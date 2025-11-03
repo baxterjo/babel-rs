@@ -1,0 +1,6 @@
+[workspace]
+members = ["babel-proto"]
+resolver = "3"
+
+
+[dependencies]
