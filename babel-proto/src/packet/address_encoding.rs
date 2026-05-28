@@ -3,6 +3,7 @@
 /// subnet prefix may be omitted when multiple addresses are sent in a single
 /// packet -- this is known as address compression
 /// ([Section 4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#update)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum AddressEncoding {
     /// Wildcard address. The value is 0 octets long.
