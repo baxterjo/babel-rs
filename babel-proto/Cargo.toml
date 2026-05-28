@@ -4,9 +4,4 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-thiserror = "2.0.17"
-
-[features]
-default = ["std"]
-std = ["alloc"]
-alloc = []
+thiserror = { version = "2.0.17", default-features = false }
