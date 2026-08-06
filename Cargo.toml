@@ -1,0 +1,7 @@
+[workspace.package]
+authors = ["Jordan Baxter", "baxterjo <me+babel-rs@baxterjo.dev>"]
+edition = "2024"
+
+[workspace]
+resolver = "3"
+members = ["babel-proto", "babel-udp"]
