@@ -8,7 +8,7 @@ extern crate alloc;
 #[cfg(all(feature = "defmt", feature = "log"))]
 compile_error!("You must enable at most one of the following features: defmt, log");
 
-#[macro_export]
+#[macro_use]
 mod macros;
 
 pub mod interface;
