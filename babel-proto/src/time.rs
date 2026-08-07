@@ -149,13 +149,13 @@ impl ops::Add<Duration> for Instant {
     type Output = Instant;
 
     fn add(self, rhs: Duration) -> Instant {
-        Instant::from_micros(self.micros + rhs.total_micros() as i64)
+        Instant::from_micros(self.micros + rhs.as_micros() as i64)
     }
 }
 
 impl ops::AddAssign<Duration> for Instant {
     fn add_assign(&mut self, rhs: Duration) {
-        self.micros += rhs.total_micros() as i64;
+        self.micros += rhs.as_micros() as i64;
     }
 }
 
@@ -163,13 +163,13 @@ impl ops::Sub<Duration> for Instant {
     type Output = Instant;
 
     fn sub(self, rhs: Duration) -> Instant {
-        Instant::from_micros(self.micros - rhs.total_micros() as i64)
+        Instant::from_micros(self.micros - rhs.as_micros() as i64)
     }
 }
 
 impl ops::SubAssign<Duration> for Instant {
     fn sub_assign(&mut self, rhs: Duration) {
-        self.micros -= rhs.total_micros() as i64;
+        self.micros -= rhs.as_micros() as i64;
     }
 }
 
@@ -203,6 +203,13 @@ impl Duration {
         }
     }
 
+    /// Create a new `Duration` from a number of centiseconds.
+    pub const fn from_centis(centis: u64) -> Duration {
+        Duration {
+            micros: centis * 10000,
+        }
+    }
+
     /// Create a new `Duration` from a number of seconds.
     pub const fn from_secs(secs: u64) -> Duration {
         Duration {
@@ -210,42 +217,37 @@ impl Duration {
         }
     }
 
-    /// The fractional number of milliseconds in this `Duration`.
-    pub const fn millis(&self) -> u64 {
-        self.micros / 1000 % 1000
-    }
-
-    /// The fractional number of milliseconds in this `Duration`.
-    pub const fn micros(&self) -> u64 {
-        self.micros % 1000000
-    }
-
     /// The number of whole seconds in this `Duration`.
-    pub const fn secs(&self) -> u64 {
+    pub const fn as_secs(&self) -> u64 {
         self.micros / 1000000
     }
 
+    /// The total number of centiseconds in this `Duration`.
+    pub const fn as_centis(&self) -> u64 {
+        self.micros / 10000
+    }
+
     /// The total number of milliseconds in this `Duration`.
-    pub const fn total_millis(&self) -> u64 {
+    pub const fn as_millis(&self) -> u64 {
         self.micros / 1000
     }
 
     /// The total number of microseconds in this `Duration`.
-    pub const fn total_micros(&self) -> u64 {
+    pub const fn as_micros(&self) -> u64 {
         self.micros
     }
 }
 
 impl fmt::Display for Duration {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}.{:03}s", self.secs(), self.millis())
+        write!(f, "{}.{:03}s", self.as_secs(), self.as_millis())
     }
 }
 
 #[cfg(feature = "defmt")]
 impl defmt::Format for Duration {
     fn format(&self, f: defmt::Formatter) {
-        defmt::write!(f, "{}.{:03}s", self.secs(), self.millis());
+        defmt::write!(f, "{}.{:03}s", self.as_secs(), self.as_millis());
     }
 }
 
@@ -253,13 +255,13 @@ impl ops::Add<Duration> for Duration {
     type Output = Duration;
 
     fn add(self, rhs: Duration) -> Duration {
-        Duration::from_micros(self.micros + rhs.total_micros())
+        Duration::from_micros(self.micros + rhs.as_micros())
     }
 }
 
 impl ops::AddAssign<Duration> for Duration {
     fn add_assign(&mut self, rhs: Duration) {
-        self.micros += rhs.total_micros();
+        self.micros += rhs.as_micros();
     }
 }
 
@@ -269,7 +271,7 @@ impl ops::Sub<Duration> for Duration {
     fn sub(self, rhs: Duration) -> Duration {
         Duration::from_micros(
             self.micros
-                .checked_sub(rhs.total_micros())
+                .checked_sub(rhs.as_micros())
                 .expect("overflow when subtracting durations"),
         )
     }
@@ -279,7 +281,7 @@ impl ops::SubAssign<Duration> for Duration {
     fn sub_assign(&mut self, rhs: Duration) {
         self.micros = self
             .micros
-            .checked_sub(rhs.total_micros())
+            .checked_sub(rhs.as_micros())
             .expect("overflow when subtracting durations");
     }
 }
@@ -348,7 +350,7 @@ impl From<::core::time::Duration> for Duration {
 
 impl From<Duration> for ::core::time::Duration {
     fn from(val: Duration) -> Self {
-        ::core::time::Duration::from_micros(val.total_micros())
+        ::core::time::Duration::from_micros(val.as_micros())
     }
 }
 
@@ -462,9 +464,8 @@ mod test {
     #[test]
     fn test_duration_getters() {
         let instant = Duration::from_millis(4934);
-        assert_eq!(instant.secs(), 4);
-        assert_eq!(instant.millis(), 934);
-        assert_eq!(instant.total_millis(), 4934);
+        assert_eq!(instant.as_secs(), 4);
+        assert_eq!(instant.as_millis(), 4934);
     }
 
     #[test]
