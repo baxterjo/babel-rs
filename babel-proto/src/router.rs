@@ -1,18 +1,16 @@
-use core::fmt::Debug as DebugT;
 use core::fmt::Display;
 
 use thiserror::Error;
 
 use crate::interface::InterfaceTable;
 use crate::neighbour::NeighbourTable;
+use crate::Address;
 
-pub struct BabelRouter<'storage, I, A>
+pub struct BabelRouter<'storage, A>
 where
-    I: Display + DebugT,
-    for<'a> &'a I: Into<&'a [u8; 8]>,
-    A: DebugT + Copy,
+    A: Address,
 {
-    id: RouterId<I>,
+    id: RouterId,
 
     iface_table: InterfaceTable<'storage>,
 
@@ -21,26 +19,23 @@ where
 
 /// Newtype wrapper around a type that can be converted into 8 Octets.
 // This has a generic for good debug display to the user.
-#[derive(Debug)]
-pub struct RouterId<I>(I)
-where
-    I: Display + DebugT,
-    for<'a> &'a I: Into<&'a [u8; 8]>;
+#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Ord)]
+pub struct RouterId([u8; 8]);
 
-impl<I> RouterId<I>
-where
-    I: Display + DebugT,
-    for<'a> &'a I: Into<&'a [u8; 8]>,
-{
-    pub fn new(id: I) -> Result<Self, RouterIdError> {
-        let raw: &[u8; 8] = (&id).into();
-        if *raw == [0, 0, 0, 0, 0, 0, 0, 0] {
+impl RouterId {
+    pub fn new<I>(id: I) -> Result<Self, RouterIdError>
+    where
+        I: Into<[u8; 8]> + Display,
+    {
+        b_debug!("Checking router ID: {}", id);
+        let raw: [u8; 8] = id.into();
+        if raw == [0, 0, 0, 0, 0, 0, 0, 0] {
             return Err(RouterIdError::CannotBeAllZeroes);
         }
-        if *raw == [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF] {
+        if raw == [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF] {
             return Err(RouterIdError::CannotBeAllOnes);
         }
-        Ok(Self(id))
+        Ok(Self(raw))
     }
 
     pub(crate) fn octets<'a>(&'a self) -> &'a [u8; 8] {

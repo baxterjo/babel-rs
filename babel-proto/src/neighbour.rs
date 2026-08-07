@@ -1,14 +1,14 @@
-use core::fmt::Debug as DebugT;
 use managed::ManagedMap;
 
 use crate::{
     interface::InterfaceHandle,
     time::{Duration as Interval, Instant},
+    Address,
 };
 
 pub struct NeighbourTable<'storage, A>
 where
-    A: DebugT + Copy,
+    A: Address,
 {
     inner: ManagedMap<'storage, NeighbourIndex<A>, Neighbour<A>>,
     /// The hold time of a neighbour between receiving IHU TLVs.
@@ -17,7 +17,7 @@ where
 
 impl<'storage, A> NeighbourTable<'storage, A>
 where
-    A: DebugT + Copy,
+    A: Address,
 {
     /// Create a new interface table with user provided storage.
     ///
@@ -61,7 +61,7 @@ impl HoldTimeMultiplier {
 #[derive(Debug, Hash)]
 pub struct NeighbourIndex<A>(InterfaceHandle, A)
 where
-    A: DebugT + Copy;
+    A: Address;
 
 pub struct Neighbour<A> {
     /// 3.2.4-2.1: "the local node's interface over which this neighbour is reachable"
