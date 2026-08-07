@@ -3,7 +3,7 @@ use managed::ManagedMap;
 
 use crate::{
     interface::InterfaceHandle,
-    time::{Instant, Interval},
+    time::{Duration as Interval, Instant},
 };
 
 pub struct NeighbourTable<'storage, A>

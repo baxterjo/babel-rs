@@ -4,7 +4,7 @@ use core::hash::Hash;
 use managed::ManagedMap;
 use thiserror::Error;
 
-use crate::time::{Duration, Instant};
+use crate::time::{Duration as Interval, Instant};
 
 /// Recommended message intervals indicated in [RFC 8966 Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.2)
 pub const DEFAULT_MULTICAST_HELLO_INTERVAL_SECS: u64 = 4;
@@ -42,8 +42,8 @@ impl<'storage> InterfaceTable<'storage> {
     ) -> Result<InterfaceHandle, InterfaceTableError>
     where
         I: DebugT + Into<[u8; 8]>,
-        H: Into<Duration>,
-        U: Into<Duration>,
+        H: Into<Interval>,
+        U: Into<Interval>,
     {
         b_debug!("Registering interface {id:?}");
         let iface = Interface::new(id, hello_interval, update_interval);
@@ -89,11 +89,11 @@ struct Interface {
     hello_seqno: u16,
 
     /// How often this interface should send hello messages.
-    hello_interval: Duration,
+    hello_interval: Interval,
     last_hello: Option<Instant>,
 
     /// How often this interface should send update messages
-    update_interval: Duration,
+    update_interval: Interval,
     last_update: Option<Instant>,
 }
 
@@ -106,8 +106,8 @@ impl Interface {
     fn new<I, H, U>(id: I, hello_interval: Option<H>, update_interval: Option<U>) -> Self
     where
         I: Into<[u8; 8]>,
-        H: Into<Duration>,
-        U: Into<Duration>,
+        H: Into<Interval>,
+        U: Into<Interval>,
     {
         let id: [u8; 8] = id.into();
         let handle = InterfaceHandle(id);
@@ -116,12 +116,12 @@ impl Interface {
             handle,
             hello_seqno: 0,
             hello_interval: hello_interval.map_or(
-                Duration::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS),
+                Interval::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS),
                 |h| h.into(),
             ),
             last_hello: None,
             update_interval: update_interval
-                .map_or(Duration::from_secs(DEFAULT_UPDATE_INTERVAL_SECS), |u| {
+                .map_or(Interval::from_secs(DEFAULT_UPDATE_INTERVAL_SECS), |u| {
                     u.into()
                 }),
             last_update: None,
