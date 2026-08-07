@@ -1,22 +1,22 @@
 use core::fmt::Debug as DebugT;
 use core::fmt::Display;
 
-use managed::ManagedMap;
-use managed::ManagedSlice;
 use thiserror::Error;
 
-use crate::interface::Interface;
 use crate::interface::InterfaceTable;
-use crate::neighbour::NeighbourIndex;
+use crate::neighbour::NeighbourTable;
 
-pub struct BabelRouter<'storage, I>
+pub struct BabelRouter<'storage, I, A>
 where
     I: Display + DebugT,
     for<'a> &'a I: Into<&'a [u8; 8]>,
+    A: DebugT + Copy,
 {
     id: RouterId<I>,
 
     iface_table: InterfaceTable<'storage>,
+
+    neighbor_table: NeighbourTable<'storage, A>,
 }
 
 /// Newtype wrapper around a type that can be converted into 8 Octets.
