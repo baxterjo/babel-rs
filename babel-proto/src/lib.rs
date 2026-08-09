@@ -9,6 +9,7 @@ extern crate alloc;
 compile_error!("You must enable at most one of the following features: defmt, log");
 
 use core::fmt::{Debug as DebugT, Display};
+use core::hash::Hash as HashT;
 
 #[macro_use]
 mod macros;
@@ -17,7 +18,20 @@ pub mod interface;
 pub mod neighbour;
 pub mod router;
 pub mod source;
+mod storage;
 pub mod time;
 
 /// Trait wrapper around a generic Address type.
-pub trait Address: DebugT + Display + Copy {}
+pub trait Address: HashT + DebugT + Display + Copy {}
+
+#[cfg(not(feature = "defmt"))]
+pub trait RouterIdT: DebugT + Into<[u8; 8]> + Display {}
+
+#[cfg(feature = "defmt")]
+pub trait RouterIdT: DebugT + Into<[u8; 8]> + Display + defmt::Format {}
+
+#[cfg(not(feature = "defmt"))]
+pub trait InterfaceId: DebugT + Into<[u8; 8]> + Display {}
+
+#[cfg(feature = "defmt")]
+pub trait InterfaceId: DebugT + Into<[u8; 8]> + Display + defmt::Format {}

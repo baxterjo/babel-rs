@@ -4,7 +4,10 @@ use core::hash::Hash;
 use managed::ManagedMap;
 use thiserror::Error;
 
-use crate::time::{Duration as Interval, Instant};
+use crate::{
+    time::{Duration as Interval, Instant},
+    InterfaceId,
+};
 
 /// Recommended message intervals indicated in [RFC 8966 Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.2)
 pub const DEFAULT_MULTICAST_HELLO_INTERVAL_SECS: u64 = 4;
@@ -41,11 +44,11 @@ impl<'storage> InterfaceTable<'storage> {
         update_interval: Option<U>,
     ) -> Result<InterfaceHandle, InterfaceTableError>
     where
-        I: DebugT + Into<[u8; 8]>,
+        I: InterfaceId,
         H: Into<Interval>,
         U: Into<Interval>,
     {
-        b_debug!("Registering interface {id:?}");
+        b_debug!("Registering interface {:?}", id);
         let iface = Interface::new(id, hello_interval, update_interval);
         let handle = iface.handle;
         match self.inner.insert(handle, iface) {

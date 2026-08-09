@@ -1,4 +1,4 @@
-use managed::ManagedMap;
+use managed::ManagedSlice;
 
 use crate::{
     interface::InterfaceHandle,
@@ -10,7 +10,7 @@ pub struct NeighbourTable<'storage, A>
 where
     A: Address,
 {
-    inner: ManagedMap<'storage, NeighbourIndex<A>, Neighbour<A>>,
+    inner: ManagedSlice<'storage, Neighbour<A>>,
     /// The hold time of a neighbour between receiving IHU TLVs.
     hold_time: HoldTimeMultiplier,
 }
@@ -26,7 +26,7 @@ where
     /// this number for your specfic deployment.
     pub fn new_with_storage<T>(table: T) -> Self
     where
-        T: Into<ManagedMap<'storage, NeighbourIndex<A>, Neighbour<A>>>,
+        T: Into<ManagedSlice<'storage, Neighbour<A>>>,
     {
         Self {
             inner: table.into(),
@@ -38,7 +38,7 @@ where
     #[cfg(any(feature = "std", feature = "alloc"))]
     pub fn new() -> Self {
         Self {
-            inner: ManagedMap::Owned(Default::default()),
+            inner: ManagedSlice::Owned(Default::default()),
             hold_time: HoldTimeMultiplier::SPEC_DEFAULT,
         }
     }
@@ -59,11 +59,11 @@ impl HoldTimeMultiplier {
 }
 
 #[derive(Debug, Hash)]
-pub struct NeighbourIndex<A>(InterfaceHandle, A)
+pub struct NeighbourIndex<'a, A>(&'a InterfaceHandle, &'a A)
 where
     A: Address;
 
-pub struct Neighbour<A> {
+pub struct Neighbour<A: Address> {
     /// 3.2.4-2.1: "the local node's interface over which this neighbour is reachable"
     iface: InterfaceHandle,
     /// 3.2.4-2.2: "the address of the neighbouring interface"

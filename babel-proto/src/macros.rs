@@ -6,8 +6,8 @@ macro_rules! b_log {
 
 #[cfg(feature = "defmt")]
 macro_rules! b_log {
-    (trace, $(arg:expr),*) => {defmt::trace!($($arg),*)};
-    (debug, $(arg:expr),*) => {defmt::debug!($($arg),*)};
+    (trace, $($arg:expr),*) => {defmt::trace!($($arg),*)};
+    (debug, $($arg:expr),*) => {defmt::debug!($($arg),*)};
 }
 
 #[cfg(not(any(feature = "log", feature = "defmt")))]

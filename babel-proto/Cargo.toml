@@ -9,7 +9,7 @@ alloc = ["managed/alloc", "defmt?/alloc"]
 defmt = ["dep:defmt"]
 log = ["dep:log"]
 
-default = ["std", "log"]
+default = ["defmt"]
 
 [dependencies]
 defmt = { version = "1", optional = true }

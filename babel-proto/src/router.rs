@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::interface::InterfaceTable;
 use crate::neighbour::NeighbourTable;
-use crate::Address;
+use crate::{Address, RouterIdT};
 
 pub struct BabelRouter<'storage, A>
 where
@@ -25,7 +25,7 @@ pub struct RouterId([u8; 8]);
 impl RouterId {
     pub fn new<I>(id: I) -> Result<Self, RouterIdError>
     where
-        I: Into<[u8; 8]> + Display,
+        I: RouterIdT,
     {
         b_debug!("Checking router ID: {}", id);
         let raw: [u8; 8] = id.into();

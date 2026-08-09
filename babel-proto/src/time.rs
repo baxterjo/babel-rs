@@ -381,6 +381,7 @@ mod test {
     }
 
     #[test]
+    #[cfg(feature = "std")]
     fn test_instant_display() {
         assert_eq!(format!("{}", Instant::from_millis(74)), "0.074s");
         assert_eq!(format!("{}", Instant::from_millis(5674)), "5.674s");
