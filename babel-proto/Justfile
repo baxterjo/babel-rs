@@ -1,0 +1,5 @@
+test-all:
+    cargo hack --feature-powerset --mutually-exclusive-features log,defmt nextest run
+
+check-all:
+    cargo hack --feature-powerset --mutually-exclusive-features log,defmt check
