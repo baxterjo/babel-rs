@@ -90,9 +90,10 @@ where
 
                                 // If it is full, there will be no elements that contain `None`,
                                 // return the value that would have been put in.
+                                //
                                 // TODO: This is a good spot to allow for user defined behavior for
                                 // what to do if a table is full. Likely through a supplied
-                                // closure.
+                                // closure or type that implements a trait.
                                 return Err(value);
                             }
                             #[cfg(any(feature = "std", feature = "alloc"))]
@@ -135,6 +136,7 @@ mod test {
 
     use super::*;
 
+    #[allow(dead_code)]
     #[derive(Debug)]
     struct TestValue {
         a: u8,
@@ -142,6 +144,7 @@ mod test {
         _c: u64,
     }
 
+    #[allow(dead_code)]
     #[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Copy, Clone)]
     struct TestKey {
         key_a: u8,
@@ -161,7 +164,7 @@ mod test {
 
     #[cfg(not(any(feature = "std", feature = "alloc")))]
     #[test]
-    fn insert_many_inserts_until_full() {
+    fn insert_until_full_fails() {
         let _ = env_logger::try_init();
         let storage: &mut [Option<TestValue>] = &mut [const { None }; 3];
         let mut managed_slice: ManagedSlice<'_, Option<TestValue>> = storage.into();
@@ -183,13 +186,10 @@ mod test {
 
     #[cfg(any(feature = "std", feature = "alloc"))]
     #[test]
-    fn insert_many_inserts_until_full() {
+    fn insert_until_full_allocates() {
         let _ = env_logger::try_init();
-        let storage: [Option<TestValue>; 3] = [const { None }; 3];
         // In std or alloc this becomes an owned vec anc can be resized.
-        let mut managed_slice: ManagedSlice<'_, Option<TestValue>> = storage.into();
-
-        b_debug!("Slice before inserts {managed_slice:?}");
+        let mut managed_slice: ManagedSlice<'_, Option<TestValue>> = Vec::new().into();
 
         for i in (0..=3).rev() {
             managed_slice
@@ -199,7 +199,70 @@ mod test {
                     _c: i as u64,
                 })
                 .unwrap_or_else(|_| panic!("Insert {} should have succeeded", i));
-            b_debug!("Slice after insert {i} - {managed_slice:?}");
         }
+    }
+
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    #[test]
+    fn insert_many_then_get_succeeds() {
+        let _ = env_logger::try_init();
+        // In std or alloc this becomes an owned vec anc can be resized.
+        let mut managed_slice: ManagedSlice<'_, Option<TestValue>> = Vec::new().into();
+
+        // First insert a known value that is in the middle of the range of possible numbers.
+        let test_value = TestValue {
+            a: u8::MAX / 2,
+            b: u16::MAX / 2,
+            _c: u64::MAX / 2,
+        };
+        let ret_key = test_value.key();
+        let _ = managed_slice.insert(test_value);
+
+        // Insert 100 random values into the slice.
+        for _ in 0..100 {
+            managed_slice
+                .insert(TestValue {
+                    a: rand::random(),
+                    b: rand::random(),
+                    _c: rand::random(),
+                })
+                .unwrap_or_else(|_| panic!("Insert should have succeeded for owned slice."));
+        }
+
+        managed_slice
+            .get_by_key(&ret_key)
+            .expect("Should have returned expected element.");
+        managed_slice
+            .get_mut_by_key(&ret_key)
+            .expect("Should have returned expected mutable element.");
+    }
+
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    #[test]
+    fn managed_slice_remove_works() {
+        let _ = env_logger::try_init();
+        // In std or alloc this becomes an owned vec anc can be resized.
+        let mut managed_slice: ManagedSlice<'_, Option<TestValue>> = Vec::new().into();
+
+        // Insert some elements
+        for i in (0..=3).rev() {
+            managed_slice
+                .insert(TestValue {
+                    a: i as u8,
+                    b: i as u16,
+                    _c: i as u64,
+                })
+                .unwrap_or_else(|_| panic!("Insert {} should have succeeded", i));
+        }
+
+        // Remove one of the elements
+        let test_key = TestKey { key_a: 2, key_b: 2 };
+        managed_slice
+            .remove(&test_key)
+            .expect("Element should exist.");
+        assert!(
+            managed_slice.get_by_key(&test_key).is_none(),
+            "Element should not be in the slice anymore."
+        )
     }
 }
