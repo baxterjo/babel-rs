@@ -1,0 +1,22 @@
+[package]
+name = "babel-proto"
+description = "A Sans-IO implementation of the Babel routing protocol as defined in IETF RFC 8966."
+version = "0.0.1"
+edition = "2024"
+
+[features]
+std = ["managed/std", "alloc"]
+alloc = ["managed/alloc", "defmt?/alloc"]
+defmt = ["dep:defmt"]
+log = ["dep:log"]
+
+default = ["defmt"]
+
+[dependencies]
+defmt = { version = "1", optional = true }
+log = { version = "0.4", optional = true, default-features = false }
+managed = { version = "0.8", default-features = false, features = ["map"] }
+thiserror = { version = "2.0.19", default-features = false }
+
+[dev-dependencies]
+env_logger = "0.11"

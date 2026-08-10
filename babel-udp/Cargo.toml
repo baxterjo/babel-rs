@@ -1,0 +1,7 @@
+[package]
+name = "babel-udp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+babel-proto = "0.0.1"
