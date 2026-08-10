@@ -1,10 +1,11 @@
 use core::fmt::Debug as DebugT;
 use core::hash::Hash;
 
-use managed::ManagedMap;
+use managed::ManagedSlice;
 use thiserror::Error;
 
 use crate::{
+    storage::{InternallyKeyed, ManagedSliceExt},
     time::{Duration as Interval, Instant},
     InterfaceId,
 };
@@ -15,14 +16,14 @@ pub const DEFAULT_MULTICAST_HELLO_INTERVAL_SECS: u64 = 4;
 pub const DEFAULT_UPDATE_INTERVAL_SECS: u64 = DEFAULT_MULTICAST_HELLO_INTERVAL_SECS * 4;
 
 pub struct InterfaceTable<'storage> {
-    inner: ManagedMap<'storage, InterfaceHandle, Interface>,
+    inner: ManagedSlice<'storage, Option<Interface>>,
 }
 
 impl<'storage> InterfaceTable<'storage> {
     /// Create a new interface table with user provided storage.
     pub fn new_with_storage<T>(table: T) -> Self
     where
-        T: Into<ManagedMap<'storage, InterfaceHandle, Interface>>,
+        T: Into<ManagedSlice<'storage, Option<Interface>>>,
     {
         Self {
             inner: table.into(),
@@ -33,12 +34,13 @@ impl<'storage> InterfaceTable<'storage> {
     #[cfg(any(feature = "std", feature = "alloc"))]
     pub fn new() -> Self {
         Self {
-            inner: ManagedMap::Owned(Default::default()),
+            inner: ManagedSlice::Owned(Default::default()),
         }
     }
 
     pub fn register_interface<I, H, U>(
         &mut self,
+        name: &'static str,
         id: I,
         hello_interval: Option<H>,
         update_interval: Option<U>,
@@ -48,10 +50,10 @@ impl<'storage> InterfaceTable<'storage> {
         H: Into<Interval>,
         U: Into<Interval>,
     {
-        b_debug!("Registering interface {:?}", id);
-        let iface = Interface::new(id, hello_interval, update_interval);
+        b_debug!("Registering interface: {}", name);
+        let iface = Interface::new(name, id, hello_interval, update_interval);
         let handle = iface.handle;
-        match self.inner.insert(handle, iface) {
+        match self.inner.insert(iface) {
             Ok(v) if v.is_some() => {
                 b_debug!("Duplicate interface registered");
                 Err(InterfaceTableError::DuplicateInterfaceId(handle))
@@ -85,10 +87,13 @@ pub struct InterfaceHandle([u8; 8]);
 
 /// Interfaces that speak the Babel Protocol
 #[derive(Debug, Clone, Copy)]
-struct Interface {
+pub struct Interface {
+    /// User defined interface name. Used
+    name: &'static str,
     /// User defined interface ID. Used to correlate the router tracked interface with user defined
     /// interfaces.
     handle: InterfaceHandle,
+
     hello_seqno: u16,
 
     /// How often this interface should send hello messages.
@@ -100,13 +105,25 @@ struct Interface {
     last_update: Option<Instant>,
 }
 
+impl InternallyKeyed for Interface {
+    type Key = InterfaceHandle;
+    fn key(&self) -> Self::Key {
+        self.handle
+    }
+}
+
 impl Interface {
     /// Creates a new babel interface with the given interface ID.
     ///
     /// Returns:
     /// -
     /// - An interface struct that will be used by the BabelRouter to keep track of interface state.
-    fn new<I, H, U>(id: I, hello_interval: Option<H>, update_interval: Option<U>) -> Self
+    fn new<I, H, U>(
+        name: &'static str,
+        id: I,
+        hello_interval: Option<H>,
+        update_interval: Option<U>,
+    ) -> Self
     where
         I: Into<[u8; 8]>,
         H: Into<Interval>,
@@ -116,6 +133,7 @@ impl Interface {
         let handle = InterfaceHandle(id);
 
         Self {
+            name,
             handle,
             hello_seqno: 0,
             hello_interval: hello_interval.map_or(

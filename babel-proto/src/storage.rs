@@ -5,7 +5,7 @@ use managed::ManagedSlice;
 
 /// A type that knows how to be located within a slice containing itself and can derive its own key.
 /// And knows how to sort a slice of itself in a way that the locate method is expecting.
-trait InternallyKeyed: Sized {
+pub(crate) trait InternallyKeyed: Sized {
     /// TODO: I would like to figure out the lifetime hell that would allow this GAT to contain
     /// borrowed values (if there is a performance improvement to be had)
     type Key: Ord + Copy;
@@ -35,7 +35,7 @@ trait InternallyKeyed: Sized {
 /// This trait extends the managed slice struct to have some of the methods of a map, all of the
 /// babel tables are indexed by some data stored inside the table entries. That means that if a
 /// regular map was used, there would be a lot of duplicate data taking up memory for no reason.
-trait ManagedSliceExt<K, V>
+pub(crate) trait ManagedSliceExt<K, V>
 where
     V: InternallyKeyed<Key = K>,
     K: Ord,
