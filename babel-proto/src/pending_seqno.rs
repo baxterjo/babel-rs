@@ -3,6 +3,7 @@ use managed::ManagedSlice;
 use crate::{
     neighbour::NeighbourIndex,
     router::RouterId,
+    seqno::SeqNo,
     storage::InternallyKeyed,
     time::{Duration as Interval, Instant},
     Address,
@@ -51,7 +52,7 @@ pub struct SeqnoRequest<A: Address> {
     /// 3.2.7-2.1: the [...] router-id [...] being requested
     router_id: RouterId,
     /// 3.2.7-2.1: the [...] seqno being requested
-    seqno: u16,
+    seqno: SeqNo,
     /// 3.2.7-2.2: the neighbour, if any, on behalf of which we are forwarding this request
     neighbor: Option<NeighbourIndex<A>>,
     /// 3.2.7-2.3: a small integer indicating the number of times that this request will be resent if it remains unsatisfied

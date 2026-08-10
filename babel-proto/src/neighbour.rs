@@ -2,6 +2,7 @@ use managed::ManagedSlice;
 
 use crate::{
     interface::InterfaceHandle,
+    seqno::SeqNo,
     storage::InternallyKeyed,
     time::{Duration as Interval, DurationMultiplier as HoldTimeMultiplier, Instant},
     Address,
@@ -66,15 +67,15 @@ pub struct Neighbour<A: Address> {
     tx_cost: u16,
     /// 3.2.4-2.6: "the expected incoming Multicast Hello sequence number for this neighbour, an
     /// integer modulo 2^16"
-    expected_mcast_seqno: u16,
+    expected_mcast_seqno: SeqNo,
     /// 3.2.4-2.7: "the expected incoming Unicast Hello sequence number for this neighbour, an
     /// integer modulo 2^16"
-    expected_ucast_seqno: u16,
+    expected_ucast_seqno: SeqNo,
     /// 3.2.4-2.8: "the outgoing Unicast Hello sequence number for this neighbour, an integer modulo
     /// 2^16 that is sent with each Unicast Hello TLV to this neighbour and is incremented (modulo
     /// 2^16) whenever a Unicast Hello is sent. (Note that the outgoing Unicast Hello seqno for a
     /// neighbour is distinct from the interface's outgoing Multicast Hello seqno.)"
-    outgoing_ucast_seqno: u16,
+    outgoing_ucast_seqno: SeqNo,
 
     timers: NeighbourTimers,
 }

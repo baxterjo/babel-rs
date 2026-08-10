@@ -4,6 +4,7 @@ use managed::ManagedSlice;
 use thiserror::Error;
 
 use crate::{
+    seqno::SeqNo,
     storage::{InternallyKeyed, ManagedSliceExt},
     time::{Duration as Interval, Instant},
     InterfaceId,
@@ -93,7 +94,7 @@ pub struct Interface {
     /// interfaces.
     handle: InterfaceHandle,
 
-    hello_seqno: u16,
+    hello_seqno: SeqNo,
 
     /// How often this interface should send hello messages.
     hello_interval: Interval,
@@ -134,7 +135,7 @@ impl Interface {
         Self {
             name,
             handle,
-            hello_seqno: 0,
+            hello_seqno: SeqNo::default(),
             hello_interval: hello_interval.map_or(
                 Interval::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS),
                 |h| h.into(),

@@ -2,6 +2,7 @@ use managed::ManagedSlice;
 
 use crate::{
     neighbour::NeighbourIndex,
+    seqno::SeqNo,
     source::SourceIndex,
     storage::InternallyKeyed,
     time::{Duration as Interval, Instant},
@@ -51,7 +52,7 @@ pub struct Route<A: Address> {
     /// hexadecimal (infinity) for a recently retracted route
     metric: u16,
     /// 3.2.6-2.4: the sequence number with which this route was advertised
-    seqno: u16,
+    seqno: SeqNo,
     /// 3.2.6-2.5: the next-hop address of this route
     next_hop: A,
     /// 3.2.6-2.6: a boolean flag indicating whether this route is selected, i.e., whether it is

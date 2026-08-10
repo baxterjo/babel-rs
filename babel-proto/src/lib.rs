@@ -20,6 +20,7 @@ pub mod neighbour;
 pub mod pending_seqno;
 pub mod route;
 pub mod router;
+mod seqno;
 pub mod source;
 mod storage;
 pub mod time;

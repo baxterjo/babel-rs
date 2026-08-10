@@ -1,6 +1,6 @@
 use managed::ManagedSlice;
 
-use crate::{router::RouterId, storage::InternallyKeyed, Address};
+use crate::{router::RouterId, seqno::SeqNo, storage::InternallyKeyed, Address};
 
 pub struct SourceTable<'storage, A>
 where
@@ -47,7 +47,7 @@ pub struct Source<A: Address> {
     prefix: A,
     prefix_len: u8,
     router_id: RouterId,
-    seqno: u16,
+    seqno: SeqNo,
     metric: u16,
 }
 
