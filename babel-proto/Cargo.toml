@@ -1,6 +1,10 @@
 [package]
 name = "babel-proto"
 description = "A Sans-IO implementation of the Babel routing protocol as defined in IETF RFC 8966."
+readme = "README.md"
+license = "MIT"
+keywords = ["babel", "routing", "networking", "sans-io"]
+catagories = ["netowork-programming"]
 version = "0.0.1"
 edition = "2024"
 
