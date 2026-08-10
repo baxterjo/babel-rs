@@ -20,7 +20,7 @@ impl<'storage, A> NeighbourTable<'storage, A>
 where
     A: Address,
 {
-    /// Create a new interface table with user provided storage.
+    /// Create a new [`NeighbourTable`] with user provided storage.
     ///
     /// While interfaces are generally well known at compile time, the number of neighbors this
     /// Babel speaker might see is specific to its deployment. So it is important to right size
@@ -35,7 +35,6 @@ where
         }
     }
 
-    /// Create a new interface table.
     #[cfg(any(feature = "std", feature = "alloc"))]
     pub fn new() -> Self {
         Self {
