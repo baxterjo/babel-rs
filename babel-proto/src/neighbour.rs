@@ -3,7 +3,7 @@ use managed::ManagedSlice;
 use crate::{
     interface::InterfaceHandle,
     storage::InternallyKeyed,
-    time::{Duration as Interval, Instant},
+    time::{Duration as Interval, DurationMultiplier as HoldTimeMultiplier, Instant},
     Address,
 };
 
@@ -31,7 +31,7 @@ where
     {
         Self {
             inner: table.into(),
-            hold_time: HoldTimeMultiplier::SPEC_DEFAULT,
+            hold_time: HoldTimeMultiplier::IHU_HOLD_TIME_SPEC_DEFAULT,
         }
     }
 
@@ -40,22 +40,8 @@ where
     pub fn new() -> Self {
         Self {
             inner: ManagedSlice::Owned(Default::default()),
-            hold_time: HoldTimeMultiplier::SPEC_DEFAULT,
+            hold_time: HoldTimeMultiplier::IHU_HOLD_TIME_SPEC_DEFAULT,
         }
-    }
-}
-
-pub struct HoldTimeMultiplier {
-    pub num: u8,
-    pub den: u8,
-}
-
-impl HoldTimeMultiplier {
-    /// appendix.b-4.12: "IHU Hold time: 3.5 times the advertised IHU interval."
-    const SPEC_DEFAULT: Self = Self { num: 7, den: 2 };
-
-    fn apply(&self, interval: u16) -> Interval {
-        Interval::from_centis((interval as u64 * self.num as u64) / self.den as u64)
     }
 }
 
