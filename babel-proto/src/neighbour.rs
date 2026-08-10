@@ -2,6 +2,7 @@ use managed::ManagedSlice;
 
 use crate::{
     interface::InterfaceHandle,
+    storage::InternallyKeyed,
     time::{Duration as Interval, Instant},
     Address,
 };
@@ -58,8 +59,8 @@ impl HoldTimeMultiplier {
     }
 }
 
-#[derive(Debug, Hash)]
-pub struct NeighbourIndex<'a, A>(&'a InterfaceHandle, &'a A)
+#[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+pub struct NeighbourIndex<A>(InterfaceHandle, A)
 where
     A: Address;
 
@@ -107,4 +108,11 @@ struct NeighbourTimers {
 
     ihu_interval: Interval,
     last_ihu: Instant,
+}
+
+impl<A: Address> InternallyKeyed for Neighbour<A> {
+    type Key = NeighbourIndex<A>;
+    fn key(&self) -> Self::Key {
+        NeighbourIndex(self.iface, self.address)
+    }
 }

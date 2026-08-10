@@ -1,4 +1,3 @@
-use core::fmt::Debug as DebugT;
 use core::hash::Hash;
 
 use managed::ManagedSlice;
