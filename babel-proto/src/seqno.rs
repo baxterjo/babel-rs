@@ -1,13 +1,7 @@
 use core::{cmp::Ordering, ops};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SeqNo(u16);
-
-impl SeqNo {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
+pub struct SeqNo(pub u16);
 
 impl ops::Add for SeqNo {
     type Output = Self;
@@ -49,7 +43,7 @@ impl PartialOrd for SeqNo {
             return Some(Ordering::Equal);
         }
 
-        let d_fwd = self.0.wrapping_sub(other.0);
+        let d_fwd = other.0.wrapping_sub(self.0);
 
         if d_fwd == 32768 {
             return None;
@@ -59,5 +53,35 @@ impl PartialOrd for SeqNo {
         } else {
             Some(Ordering::Greater)
         }
+    }
+}
+
+mod test {
+    use super::*;
+
+    #[test]
+    fn partial_order_undefined_case() {
+        let s = SeqNo(0);
+        let s_prime = SeqNo(32768);
+        assert!(s.partial_cmp(&s_prime).is_none());
+        assert!(s_prime.partial_cmp(&s).is_none())
+    }
+
+    #[test]
+    fn simple_case_matches_normal_order() {
+        assert!(SeqNo(5) < SeqNo(10));
+        assert!(SeqNo(10) > SeqNo(5));
+    }
+
+    #[test]
+    fn wraparound_less_than() {
+        // 65534 < 2, since 2 comes shortly "after" 65534 going forward.
+        assert!(SeqNo(65534) < SeqNo(2));
+        assert!(!(SeqNo(2) < SeqNo(65534)));
+    }
+    #[test]
+    fn addition_wraps() {
+        assert_eq!(SeqNo(65535) + 1, SeqNo(0));
+        assert_eq!(SeqNo(65530) + 10, SeqNo(4));
     }
 }
