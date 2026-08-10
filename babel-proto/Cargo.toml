@@ -1,6 +1,7 @@
 [package]
 name = "babel-proto"
-version = "0.1.0"
+description = "A Sans-IO implementation of the Babel routing protocol as defined in IETF RFC 8966."
+version = "0.0.1"
 edition = "2024"
 
 [features]

@@ -10,6 +10,7 @@ compile_error!("You must enable at most one of the following features: defmt, lo
 
 use core::fmt::{Debug as DebugT, Display};
 use core::hash::Hash as HashT;
+use core::net::Ipv6Addr;
 
 #[macro_use]
 mod macros;
@@ -35,3 +36,5 @@ pub trait InterfaceId: DebugT + Into<[u8; 8]> + Display {}
 
 #[cfg(feature = "defmt")]
 pub trait InterfaceId: DebugT + Into<[u8; 8]> + Display + defmt::Format {}
+
+impl Address for Ipv6Addr {}
