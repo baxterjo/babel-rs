@@ -24,6 +24,10 @@ pub(crate) trait InternallyKeyed: Sized {
     ///
     /// The locate method requires a sorted slice.
     fn my_sort(slice: &mut [Option<Self>]) {
+        // This data structure is deduplicated by key, so unstable sort is stable.
+        //
+        // Unstable sort is called unstable because it does not guarantee the ordering of equal
+        // elements. That is why it is ok here.
         slice.sort_unstable_by(|a, b| {
             a.as_ref()
                 .map(|av| av.key())

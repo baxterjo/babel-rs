@@ -1,12 +1,12 @@
-use managed::ManagedMap;
+use managed::ManagedSlice;
 
-use crate::{router::RouterId, Address};
+use crate::{router::RouterId, storage::InternallyKeyed, Address};
 
 pub struct SourceTable<'storage, A>
 where
     A: Address,
 {
-    inner: ManagedMap<'storage, SourceIndex<A>, Source<A>>,
+    inner: ManagedSlice<'storage, Source<A>>,
 }
 
 impl<'storage, A> SourceTable<'storage, A>
@@ -20,7 +20,7 @@ where
     /// this number for your specfic deployment.
     pub fn new_with_storage<T>(table: T) -> Self
     where
-        T: Into<ManagedMap<'storage, SourceIndex<A>, Source<A>>>,
+        T: Into<ManagedSlice<'storage, Source<A>>>,
     {
         Self {
             inner: table.into(),
@@ -31,12 +31,12 @@ where
     #[cfg(any(feature = "std", feature = "alloc"))]
     pub fn new() -> Self {
         Self {
-            inner: ManagedMap::Owned(Default::default()),
+            inner: ManagedSlice::Owned(Default::default()),
         }
     }
 }
 
-#[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord, Clone, Copy)]
 pub struct SourceIndex<A: Address> {
     prefix: A,
     prefix_len: u8,
@@ -49,4 +49,15 @@ pub struct Source<A: Address> {
     router_id: RouterId,
     seqno: u16,
     metric: u16,
+}
+
+impl<A: Address> InternallyKeyed for Source<A> {
+    type Key = SourceIndex<A>;
+    fn key(&self) -> Self::Key {
+        SourceIndex {
+            prefix: self.prefix,
+            prefix_len: self.prefix_len,
+            router_id: self.router_id,
+        }
+    }
 }
