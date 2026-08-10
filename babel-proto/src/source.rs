@@ -6,7 +6,7 @@ pub struct SourceTable<'storage, A>
 where
     A: Address,
 {
-    inner: ManagedSlice<'storage, Source<A>>,
+    inner: ManagedSlice<'storage, Option<Source<A>>>,
 }
 
 impl<'storage, A> SourceTable<'storage, A>
@@ -15,19 +15,19 @@ where
 {
     /// Create a new source table with user provided storage.
     ///
-    /// While interfaces are generally well known at compile time, the number of source this
+    /// While interfaces are generally well known at compile time, the number of sources this
     /// Babel speaker might see is specific to its deployment. So it is important to right size
-    /// this number for your specfic deployment.
+    /// this number for your specfic deployment or do what you can to enable the alloc feature.
     pub fn new_with_storage<T>(table: T) -> Self
     where
-        T: Into<ManagedSlice<'storage, Source<A>>>,
+        T: Into<ManagedSlice<'storage, Option<Source<A>>>>,
     {
         Self {
             inner: table.into(),
         }
     }
 
-    /// Create a new interface table.
+    /// Create a new source table.
     #[cfg(any(feature = "std", feature = "alloc"))]
     pub fn new() -> Self {
         Self {
@@ -38,8 +38,8 @@ where
 
 #[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord, Clone, Copy)]
 pub struct SourceIndex<A: Address> {
-    prefix: A,
-    prefix_len: u8,
+    pub(crate) prefix: A,
+    pub(crate) prefix_len: u8,
     router_id: RouterId,
 }
 
