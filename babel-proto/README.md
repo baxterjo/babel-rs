@@ -3,7 +3,7 @@ A Sans-IO implementation of the Babel routing protocol as defined in IETF RFC 89
 
 # Namespace Reservation
 
-I am publishing a non-working version of this crate to reserve the namespace. If there is no activity in this crate for 6 months and you have a working version. Pleas contact me and I will transfer ownership of the crate to you.
+I am publishing a non-working version of this crate to reserve the namespace. If there is no activity in this crate for 6 months and you have a working version. Please contact me and I will transfer ownership of the crate to you.
 
 ## Attributions
 ### smoltcp

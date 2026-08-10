@@ -286,30 +286,30 @@ impl ops::SubAssign<Duration> for Duration {
     }
 }
 
-impl ops::Mul<u32> for Duration {
+impl ops::Mul<u8> for Duration {
     type Output = Duration;
 
-    fn mul(self, rhs: u32) -> Duration {
+    fn mul(self, rhs: u8) -> Duration {
         Duration::from_micros(self.micros * rhs as u64)
     }
 }
 
-impl ops::MulAssign<u32> for Duration {
-    fn mul_assign(&mut self, rhs: u32) {
+impl ops::MulAssign<u8> for Duration {
+    fn mul_assign(&mut self, rhs: u8) {
         self.micros *= rhs as u64;
     }
 }
 
-impl ops::Div<u32> for Duration {
+impl ops::Div<u8> for Duration {
     type Output = Duration;
 
-    fn div(self, rhs: u32) -> Duration {
+    fn div(self, rhs: u8) -> Duration {
         Duration::from_micros(self.micros / rhs as u64)
     }
 }
 
-impl ops::DivAssign<u32> for Duration {
-    fn div_assign(&mut self, rhs: u32) {
+impl ops::DivAssign<u8> for Duration {
+    fn div_assign(&mut self, rhs: u8) {
         self.micros /= rhs as u64;
     }
 }
@@ -351,6 +351,30 @@ impl From<::core::time::Duration> for Duration {
 impl From<Duration> for ::core::time::Duration {
     fn from(val: Duration) -> Self {
         ::core::time::Duration::from_micros(val.as_micros())
+    }
+}
+
+/// A fractional multiplier for [`Duration`] that avoids the use of floating point numbers.
+///
+/// Note: Arithmetic operations may not be exact, to get as accurate as possible, arithmetic is
+/// done in [`Duration`]'s native units (microseconds) so Babel units (centiseconds) have an
+/// acceptable level of fidelity.
+pub struct DurationMultiplier {
+    pub num: u8,
+    pub den: u8,
+}
+
+impl DurationMultiplier {
+    /// appendix.b-4.12: IHU Hold time: 3.5 times the advertised IHU interval.
+    pub const IHU_HOLD_TIME_SPEC_DEFAULT: Self = Self { num: 7, den: 2 };
+    /// appendix.b-4.14: Route Expiry time: 3.5 times the advertised update interval.
+    pub const ROUTE_EXPIRY_TIME_SPEC_DEFAULT: Self = Self { num: 7, den: 2 };
+}
+
+impl ops::Mul<DurationMultiplier> for Duration {
+    type Output = Duration;
+    fn mul(self, rhs: DurationMultiplier) -> Self::Output {
+        Duration::from_micros((self.as_micros() * rhs.num as u64) / rhs.den as u64)
     }
 }
 

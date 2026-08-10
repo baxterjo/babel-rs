@@ -17,13 +17,16 @@ mod macros;
 
 pub mod interface;
 pub mod neighbour;
+pub mod pending_seqno;
+pub mod route;
 pub mod router;
+mod seqno;
 pub mod source;
 mod storage;
 pub mod time;
 
 /// Trait wrapper around a generic Address type.
-pub trait Address: HashT + DebugT + Display + Copy {}
+pub trait Address: HashT + DebugT + Display + Copy + Ord + Eq {}
 
 #[cfg(not(feature = "defmt"))]
 pub trait RouterIdT: DebugT + Into<[u8; 8]> + Display {}
