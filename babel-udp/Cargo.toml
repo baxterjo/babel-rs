@@ -1,6 +1,11 @@
 [package]
 name = "babel-udp"
-version = "0.1.0"
+description = "A UDP speaker of the Babel routing protocol"
+readme = "README.md"
+license = "MIT"
+keywords = ["babel", "routing", "networking"]
+catagories = ["network-programming"]
+version = "0.0.1"
 edition = "2024"
 
 [dependencies]
