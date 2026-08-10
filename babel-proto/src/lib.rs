@@ -17,6 +17,7 @@ mod macros;
 
 pub mod interface;
 pub mod neighbour;
+pub mod pending_seqno;
 pub mod route;
 pub mod router;
 pub mod source;
