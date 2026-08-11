@@ -68,6 +68,15 @@ mod test {
     }
 
     #[test]
+    fn partial_order_returns_returns_false_for_boolean_opposites() {
+        // Since SeqNo only implements PartialOrd, this means that two opposite boolean statements
+        // for the case in which <SeqNo as PartialOrd>.partial_cmp() returns None will both return
+        // false.
+        assert!(!(SeqNo(0) <= SeqNo(32768)));
+        assert!(!(SeqNo(0) >= SeqNo(32768)));
+    }
+
+    #[test]
     fn simple_case_matches_normal_order() {
         assert!(SeqNo(5) < SeqNo(10));
         assert!(SeqNo(10) > SeqNo(5));
