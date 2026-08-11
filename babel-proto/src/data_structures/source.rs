@@ -1,7 +1,7 @@
 use managed::ManagedSlice;
 
 use crate::{
-    data_types::address::{AddressExtension, RouterAddress},
+    data_types::address::{Address, AddressExtension},
     router::RouterId,
     utils::storage::InternallyKeyed,
 };
@@ -44,13 +44,13 @@ where
 
 #[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord, Clone, Copy)]
 pub struct SourceIndex<A: AddressExtension> {
-    pub(crate) prefix: RouterAddress<A>,
+    pub(crate) prefix: Address<A>,
     pub(crate) prefix_len: u8,
     router_id: RouterId,
 }
 
 pub struct Source<A: AddressExtension> {
-    prefix: RouterAddress<A>,
+    prefix: Address<A>,
     prefix_len: u8,
     router_id: RouterId,
     seqno: SeqNo,

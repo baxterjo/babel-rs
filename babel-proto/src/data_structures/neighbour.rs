@@ -1,7 +1,7 @@
 use managed::ManagedSlice;
 
 use crate::{
-    data_types::address::{AddressExtension, NoExtension, RouterAddress},
+    data_types::address::{Address, AddressExtension, NoExtension},
     data_types::Interval,
     utils::storage::InternallyKeyed,
     utils::Instant,
@@ -48,7 +48,7 @@ where
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct NeighbourIndex<A>(InterfaceHandle, RouterAddress<A>)
+pub struct NeighbourIndex<A>(InterfaceHandle, Address<A>)
 where
     A: AddressExtension;
 
@@ -56,7 +56,7 @@ pub struct Neighbour<A: AddressExtension> {
     /// 3.2.4-2.1: "the local node's interface over which this neighbour is reachable"
     iface: InterfaceHandle,
     /// 3.2.4-2.2: "the address of the neighbouring interface"
-    address: RouterAddress<A>,
+    address: Address<A>,
     /// 3.2.4-2.3: "a history of recently received Multicast Hello packets from this neighbour; this
     /// can, for example, be a sequence of n bits, for some small value n, indicating which of the n
     /// hellos most recently sent by this neighbour have been received by the local node."

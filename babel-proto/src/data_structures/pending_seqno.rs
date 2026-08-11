@@ -1,7 +1,7 @@
 use managed::ManagedSlice;
 
 use crate::{
-    data_types::address::{AddressExtension, RouterAddress},
+    data_types::address::{Address, AddressExtension},
     data_types::Interval,
     router::RouterId,
     utils::storage::InternallyKeyed,
@@ -47,7 +47,7 @@ where
 /// the following data:
 pub struct SeqnoRequest<A: AddressExtension> {
     /// 3.2.7-2.1: the prefix [...] being requested
-    prefix: RouterAddress<A>,
+    prefix: Address<A>,
     /// 3.2.7-2.1: the [...] plen [...] being requested
     prefix_len: u8,
     /// 3.2.7-2.1: the [...] router-id [...] being requested
@@ -67,7 +67,7 @@ pub struct SeqnoRequest<A: AddressExtension> {
 /// 3.2.7-1: [...] This table is indexed by triples of the form (prefix, plen, router-id) [...]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SeqnoRequestIndex<A: AddressExtension> {
-    prefix: RouterAddress<A>,
+    prefix: Address<A>,
     prefix_len: u8,
     router_id: RouterId,
 }

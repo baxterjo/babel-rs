@@ -1,6 +1,6 @@
 use crate::{
     data_structures::interface::InterfaceHandle,
-    data_types::address::{AddressExtension, RouterAddress},
+    data_types::address::{Address, AddressExtension},
     utils::Duration,
 };
 
@@ -11,6 +11,6 @@ pub enum Output<'a, A: AddressExtension> {
 
 pub struct Transmit<'a, A: AddressExtension> {
     pub iface: InterfaceHandle,
-    pub destination: RouterAddress<A>,
+    pub destination: Address<A>,
     pub contents: &'a [u8],
 }

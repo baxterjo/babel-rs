@@ -1,7 +1,7 @@
 use managed::ManagedSlice;
 
 use crate::{
-    data_types::address::{AddressExtension, RouterAddress},
+    data_types::address::{Address, AddressExtension},
     data_types::Interval,
     utils::storage::InternallyKeyed,
     utils::Instant,
@@ -69,7 +69,7 @@ pub struct Route<A: AddressExtension> {
 /// form (prefix, plen, neighbour)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct RouteIndex<A: AddressExtension> {
-    prefix: RouterAddress<A>,
+    prefix: Address<A>,
     prefix_len: u8,
     neighbour: NeighbourIndex<A>,
 }

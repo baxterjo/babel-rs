@@ -28,7 +28,7 @@ impl<E: AddressExtension> DefaultAddressCodec<E> {
         ae: u8,
         plen: u8,
         buf: &[u8],
-    ) -> Result<(RouterAddress<E>, usize), DecodeError> {
+    ) -> Result<(Address<E>, usize), DecodeError> {
         match ae {
             0 => todo!("Wildcard impl"),
             1 => todo!("IPv4 impl"),
@@ -43,54 +43,71 @@ impl<E: AddressExtension> DefaultAddressCodec<E> {
                 );
                 self.extension
                     .decode(ae, plen, buf)
-                    .map(|(a, n)| (RouterAddress::Extension(a), n))
+                    .map(|(a, n)| (Address::Extension(a), n))
             }
             224..=254 => self
                 .extension
                 .decode(ae, plen, buf)
-                .map(|(a, n)| (RouterAddress::Extension(a), n)),
-            255 => Err(DecodeError::ReservedAEUsed),
+                .map(|(a, n)| (Address::Extension(a), n)),
+            255 => Err(DecodeError::ReservedEncoding),
         }
     }
 }
 
+/// Resolved address as described in section
+/// [4.1.4](https://datatracker.ietf.org/doc/html/rfc8966#name-address) and used in data structures
+/// described in section [3.2](https://datatracker.ietf.org/doc/html/rfc8966#name-data-structures)
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RouterAddress<E: AddressExtension = NoExtension> {
+pub enum Address<E: AddressExtension = NoExtension> {
     V4(Ipv4Addr),
     V6(Ipv6Addr),
-    Extension(E::Address),
+    Extension(E::ExtensionAddress),
 }
 
 #[derive(Debug, ErrorD)]
 pub enum DecodeError<E: AddressExtension = NoExtension> {
     UnknownAddressEncoding,
-    ReservedAEUsed,
-    Extension(E::DecodeError),
+    ReservedEncoding,
+    Extension(E::ExtensionDecodeError),
 }
 
 #[derive(Debug, ErrorD)]
 pub enum EncodeError<E: AddressExtension = NoExtension> {
-    Extension(E::EncodeError),
+    Extension(E::ExtensionEncodeError),
 }
 
-/// Implement this trait for any type to provide address encoding extensions.
 // TODO: Using this trait as a generic type bound for other structs that derive Ord and Copy
 // requires the trait to also be Ord and Copy, although the type being used in those structs is
 // usually AddressExtension::Address which has Ord and copy bounds. If the Ord + Copy bound on
 // AddressExtension are to be removed, then Ord and Copy must be implemented manually for types
 // that use AddressExtension as a generic arg.
+/// Trait for adding an address encoding extension.
 pub trait AddressExtension: Ord + Copy {
-    type Address: HashT + DebugT + Copy + Ord + Eq;
-    type EncodeError: Error;
-    type DecodeError: Error;
+    /// User defined new address type.
+    type ExtensionAddress: HashT + DebugT + Copy + Ord + Eq;
+    /// User defined extension encoding error.
+    type ExtensionEncodeError: Error;
+    /// User defined extension decoding error.
+    type ExtensionDecodeError: Error;
 
+    /// Decode the given address from the buffer.
+    ///
+    /// If the encoding is not recognized, return `Err(DecodeError::UnknownAddressEncoding)`
     fn decode(
         &mut self,
         ae: u8,
         prefix_len: u8,
         buf: &[u8],
-    ) -> Result<(Self::Address, usize), DecodeError>;
-    fn encode(&mut self, addr: &Self::Address, buf: &mut [u8]) -> Result<usize, EncodeError>;
+    ) -> Result<(Self::ExtensionAddress, usize), DecodeError>;
+
+    /// Encode the given address into the buffer.
+    ///
+    /// This MUST return the number of bytes encoded into the buffer.
+    fn encode(
+        &mut self,
+        addr: &Self::ExtensionAddress,
+        buf: &mut [u8],
+    ) -> Result<usize, EncodeError>;
 }
 
 /// Applies no extension to the base babel spec address encoding scheme.
@@ -98,9 +115,9 @@ pub trait AddressExtension: Ord + Copy {
 pub struct NoExtension;
 
 impl AddressExtension for NoExtension {
-    type Address = Infallible;
-    type EncodeError = Infallible;
-    type DecodeError = Infallible;
+    type ExtensionAddress = Infallible;
+    type ExtensionEncodeError = Infallible;
+    type ExtensionDecodeError = Infallible;
     fn decode(
         &mut self,
         _ae: u8,
