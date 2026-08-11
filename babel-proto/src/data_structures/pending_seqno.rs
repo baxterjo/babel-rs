@@ -3,7 +3,7 @@ use managed::ManagedSlice;
 use crate::{
     data_types::address::{Address, AddressExtension},
     data_types::Interval,
-    router::RouterId,
+    data_types::RouterId,
     utils::storage::InternallyKeyed,
     utils::Instant,
 };

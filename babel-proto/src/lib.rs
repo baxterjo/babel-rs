@@ -17,14 +17,7 @@ pub mod data_structures;
 pub mod data_types;
 pub mod output;
 pub mod router;
-
 pub mod utils;
-
-#[cfg(not(feature = "defmt"))]
-pub trait RouterIdT: DebugT + Into<[u8; 8]> + Display {}
-
-#[cfg(feature = "defmt")]
-pub trait RouterIdT: DebugT + Into<[u8; 8]> + Display + defmt::Format {}
 
 #[cfg(not(feature = "defmt"))]
 pub trait InterfaceId: DebugT + Into<[u8; 8]> + Display {}
