@@ -4,8 +4,9 @@ use managed::ManagedSlice;
 use thiserror::Error;
 
 use crate::{
-    storage::{InternallyKeyed, ManagedSliceExt},
-    time::{Duration as Interval, Instant},
+    data_types::Interval,
+    utils::storage::{InternallyKeyed, ManagedSliceExt},
+    utils::Instant,
     InterfaceId,
 };
 

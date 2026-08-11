@@ -1,7 +1,7 @@
 use crate::{
     data_structures::interface::InterfaceHandle,
     data_types::address::{AddressExtension, RouterAddress},
-    time::Duration,
+    utils::Duration,
 };
 
 pub enum Output<'a, A: AddressExtension> {

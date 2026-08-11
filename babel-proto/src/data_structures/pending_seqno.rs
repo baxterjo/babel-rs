@@ -2,9 +2,10 @@ use managed::ManagedSlice;
 
 use crate::{
     data_types::address::{AddressExtension, RouterAddress},
+    data_types::Interval,
     router::RouterId,
-    storage::InternallyKeyed,
-    time::{Duration as Interval, Instant},
+    utils::storage::InternallyKeyed,
+    utils::Instant,
 };
 
 use super::{neighbour::NeighbourIndex, seqno::SeqNo};

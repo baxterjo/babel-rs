@@ -2,8 +2,10 @@ use managed::ManagedSlice;
 
 use crate::{
     data_types::address::{AddressExtension, NoExtension, RouterAddress},
-    storage::InternallyKeyed,
-    time::{Duration as Interval, DurationMultiplier as HoldTimeMultiplier, Instant},
+    data_types::Interval,
+    utils::storage::InternallyKeyed,
+    utils::Instant,
+    utils::IntervalMultiplier as HoldTimeMultiplier,
 };
 
 use super::{interface::InterfaceHandle, seqno::SeqNo};

@@ -3,7 +3,7 @@ use managed::ManagedSlice;
 use crate::{
     data_types::address::{AddressExtension, RouterAddress},
     router::RouterId,
-    storage::InternallyKeyed,
+    utils::storage::InternallyKeyed,
 };
 
 use super::seqno::SeqNo;
