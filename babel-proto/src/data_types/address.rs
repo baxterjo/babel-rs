@@ -17,12 +17,12 @@ use thiserror::Error as ErrorD;
 /// This extension must implement [`AddressExtension`]. A default value of [`NoExtension`] is
 /// provided.
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DefaultAddressCodec<E: AddressExtension = NoExtension> {
+pub struct AddressCodec<E: AddressExtension = NoExtension> {
     extension: E,
     last_v6: Option<Ipv6Addr>,
 }
 
-impl<E: AddressExtension> DefaultAddressCodec<E> {
+impl<E: AddressExtension> AddressCodec<E> {
     pub fn decode(
         &mut self,
         ae: u8,
