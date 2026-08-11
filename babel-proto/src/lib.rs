@@ -13,8 +13,8 @@ use core::fmt::{Debug as DebugT, Display};
 #[macro_use]
 mod macros;
 
-pub mod address;
 pub mod data_structures;
+pub mod data_types;
 pub mod output;
 pub mod router;
 pub mod time;

@@ -1,7 +1,7 @@
 use thiserror::Error;
 
-use crate::address::{AddressExtension, NoExtension};
 use crate::data_structures::{interface::InterfaceTable, neighbour::NeighbourTable};
+use crate::data_types::address::{AddressExtension, NoExtension};
 use crate::RouterIdT;
 
 pub struct BabelRouter<'storage, A = NoExtension>

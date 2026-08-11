@@ -1,7 +1,7 @@
 use managed::ManagedSlice;
 
 use crate::{
-    address::{AddressExtension, NoExtension, RouterAddress},
+    data_types::address::{AddressExtension, NoExtension, RouterAddress},
     storage::InternallyKeyed,
     time::{Duration as Interval, DurationMultiplier as HoldTimeMultiplier, Instant},
 };
