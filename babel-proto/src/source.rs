@@ -1,17 +1,22 @@
 use managed::ManagedSlice;
 
-use crate::{router::RouterId, seqno::SeqNo, storage::InternallyKeyed, Address};
+use crate::{
+    address::{AddressExtension, RouterAddress},
+    router::RouterId,
+    seqno::SeqNo,
+    storage::InternallyKeyed,
+};
 
 pub struct SourceTable<'storage, A>
 where
-    A: Address,
+    A: AddressExtension,
 {
     inner: ManagedSlice<'storage, Option<Source<A>>>,
 }
 
 impl<'storage, A> SourceTable<'storage, A>
 where
-    A: Address,
+    A: AddressExtension,
 {
     /// Create a new source table with user provided storage.
     ///
@@ -37,21 +42,21 @@ where
 }
 
 #[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord, Clone, Copy)]
-pub struct SourceIndex<A: Address> {
-    pub(crate) prefix: A,
+pub struct SourceIndex<A: AddressExtension> {
+    pub(crate) prefix: RouterAddress<A>,
     pub(crate) prefix_len: u8,
     router_id: RouterId,
 }
 
-pub struct Source<A: Address> {
-    prefix: A,
+pub struct Source<A: AddressExtension> {
+    prefix: RouterAddress<A>,
     prefix_len: u8,
     router_id: RouterId,
     seqno: SeqNo,
     metric: u16,
 }
 
-impl<A: Address> InternallyKeyed for Source<A> {
+impl<A: AddressExtension> InternallyKeyed for Source<A> {
     type Key = SourceIndex<A>;
     fn key(&self) -> Self::Key {
         SourceIndex {

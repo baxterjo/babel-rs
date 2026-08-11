@@ -1,16 +1,16 @@
 use managed::ManagedSlice;
 
 use crate::{
+    address::{AddressExtension, NoExtension, RouterAddress},
     interface::InterfaceHandle,
     seqno::SeqNo,
     storage::InternallyKeyed,
     time::{Duration as Interval, DurationMultiplier as HoldTimeMultiplier, Instant},
-    Address,
 };
 
-pub struct NeighbourTable<'storage, A>
+pub struct NeighbourTable<'storage, A = NoExtension>
 where
-    A: Address,
+    A: AddressExtension,
 {
     inner: ManagedSlice<'storage, Neighbour<A>>,
     /// The hold time of a neighbour between receiving IHU TLVs.
@@ -19,7 +19,7 @@ where
 
 impl<'storage, A> NeighbourTable<'storage, A>
 where
-    A: Address,
+    A: AddressExtension,
 {
     /// Create a new [`NeighbourTable`] with user provided storage.
     ///
@@ -46,15 +46,15 @@ where
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct NeighbourIndex<A>(InterfaceHandle, A)
+pub struct NeighbourIndex<A>(InterfaceHandle, RouterAddress<A>)
 where
-    A: Address;
+    A: AddressExtension;
 
-pub struct Neighbour<A: Address> {
+pub struct Neighbour<A: AddressExtension> {
     /// 3.2.4-2.1: "the local node's interface over which this neighbour is reachable"
     iface: InterfaceHandle,
     /// 3.2.4-2.2: "the address of the neighbouring interface"
-    address: A,
+    address: RouterAddress<A>,
     /// 3.2.4-2.3: "a history of recently received Multicast Hello packets from this neighbour; this
     /// can, for example, be a sequence of n bits, for some small value n, indicating which of the n
     /// hellos most recently sent by this neighbour have been received by the local node."
@@ -96,7 +96,7 @@ struct NeighbourTimers {
     last_ihu: Instant,
 }
 
-impl<A: Address> InternallyKeyed for Neighbour<A> {
+impl<A: AddressExtension> InternallyKeyed for Neighbour<A> {
     type Key = NeighbourIndex<A>;
     fn key(&self) -> Self::Key {
         NeighbourIndex(self.iface, self.address)

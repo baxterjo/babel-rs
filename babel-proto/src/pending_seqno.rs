@@ -1,21 +1,21 @@
 use managed::ManagedSlice;
 
 use crate::{
+    address::{AddressExtension, RouterAddress},
     neighbour::NeighbourIndex,
     router::RouterId,
     seqno::SeqNo,
     storage::InternallyKeyed,
     time::{Duration as Interval, Instant},
-    Address,
 };
 
-pub struct PendingSeqnoRequestTable<'storage, A: Address> {
+pub struct PendingSeqnoRequestTable<'storage, A: AddressExtension> {
     inner: ManagedSlice<'storage, Option<SeqnoRequest<A>>>,
 }
 
 impl<'storage, A> PendingSeqnoRequestTable<'storage, A>
 where
-    A: Address,
+    A: AddressExtension,
 {
     /// Create a new [`PendingSeqnoRequestTable`] with user provided storage.
     ///
@@ -44,9 +44,9 @@ where
 /// and to which no reply has been received yet. This table is indexed by triples of the form
 /// (prefix, plen, router-id) (see [`SeqnoRequestIndex`]), and every entry in this table contains
 /// the following data:
-pub struct SeqnoRequest<A: Address> {
+pub struct SeqnoRequest<A: AddressExtension> {
     /// 3.2.7-2.1: the prefix [...] being requested
-    prefix: A,
+    prefix: RouterAddress<A>,
     /// 3.2.7-2.1: the [...] plen [...] being requested
     prefix_len: u8,
     /// 3.2.7-2.1: the [...] router-id [...] being requested
@@ -65,13 +65,13 @@ pub struct SeqnoRequest<A: Address> {
 
 /// 3.2.7-1: [...] This table is indexed by triples of the form (prefix, plen, router-id) [...]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SeqnoRequestIndex<A: Address> {
-    prefix: A,
+pub struct SeqnoRequestIndex<A: AddressExtension> {
+    prefix: RouterAddress<A>,
     prefix_len: u8,
     router_id: RouterId,
 }
 
-impl<A: Address> InternallyKeyed for SeqnoRequest<A> {
+impl<A: AddressExtension> InternallyKeyed for SeqnoRequest<A> {
     type Key = SeqnoRequestIndex<A>;
     fn key(&self) -> Self::Key {
         SeqnoRequestIndex {

@@ -1,14 +1,13 @@
-use core::fmt::Display;
-
 use thiserror::Error;
 
+use crate::address::{AddressExtension, NoExtension};
 use crate::interface::InterfaceTable;
 use crate::neighbour::NeighbourTable;
-use crate::{Address, RouterIdT};
+use crate::RouterIdT;
 
-pub struct BabelRouter<'storage, A>
+pub struct BabelRouter<'storage, A = NoExtension>
 where
-    A: Address,
+    A: AddressExtension,
 {
     id: RouterId,
 

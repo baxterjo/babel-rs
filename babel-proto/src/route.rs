@@ -1,21 +1,21 @@
 use managed::ManagedSlice;
 
 use crate::{
+    address::{AddressExtension, RouterAddress},
     neighbour::NeighbourIndex,
     seqno::SeqNo,
     source::SourceIndex,
     storage::InternallyKeyed,
     time::{Duration as Interval, Instant},
-    Address,
 };
 
-pub struct RouteTable<'storage, A: Address> {
+pub struct RouteTable<'storage, A: AddressExtension> {
     inner: ManagedSlice<'storage, Option<Route<A>>>,
 }
 
 impl<'storage, A> RouteTable<'storage, A>
 where
-    A: Address,
+    A: AddressExtension,
 {
     /// Create a new source table with user provided storage.
     ///
@@ -43,7 +43,7 @@ where
 /// 3.2.6-1: The route table contains the routes known to this node. It is indexed by triples of the
 /// form (prefix, plen, neighbour) (See [`RouteIndex`]), and every route table entry contains the
 /// following data:
-pub struct Route<A: Address> {
+pub struct Route<A: AddressExtension> {
     /// 3.2.6-2.1: the source (prefix, plen, router-id) for which this route is advertised
     source: SourceIndex<A>,
     /// 3.2.6-2.2: the neighbour (an entry in the neighbour table) that advertised this route
@@ -68,13 +68,13 @@ pub struct Route<A: Address> {
 /// 3.2.6-1: The route table contains the routes known to this node. It is indexed by triples of the
 /// form (prefix, plen, neighbour)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct RouteIndex<A: Address> {
-    prefix: A,
+pub(crate) struct RouteIndex<A: AddressExtension> {
+    prefix: RouterAddress<A>,
     prefix_len: u8,
     neighbour: NeighbourIndex<A>,
 }
 
-impl<A: Address> InternallyKeyed for Route<A> {
+impl<A: AddressExtension> InternallyKeyed for Route<A> {
     type Key = RouteIndex<A>;
     fn key(&self) -> Self::Key {
         RouteIndex {
