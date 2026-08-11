@@ -1,13 +1,21 @@
+//!
 use core::{
     convert::Infallible,
     error::Error,
-    fmt::{Debug as DebugT, Display},
+    fmt::Debug as DebugT,
     hash::Hash as HashT,
     net::{Ipv4Addr, Ipv6Addr},
 };
 
 use thiserror::Error as ErrorD;
 
+/// Implements the default address decoding methods as described in section [4.1.4](https://datatracker.ietf.org/doc/html/rfc8966#name-address)
+///
+/// An address encoding extension can be given to this struct to decode any one of the range of
+/// address encodings not specified in section [5 Table 2](https://datatracker.ietf.org/doc/html/rfc8966#table-2)
+///
+/// This extension must implement [`AddressExtension`]. A default value of [`NoExtension`] is
+/// provided.
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DefaultAddressCodec<E: AddressExtension = NoExtension> {
     extension: E,
@@ -65,6 +73,7 @@ pub enum EncodeError<E: AddressExtension = NoExtension> {
     Extension(E::EncodeError),
 }
 
+/// Implement this trait for any type to provide address encoding extensions.
 // TODO: Using this trait as a generic type bound for other structs that derive Ord and Copy
 // requires the trait to also be Ord and Copy, although the type being used in those structs is
 // usually AddressExtension::Address which has Ord and copy bounds. If the Ord + Copy bound on
@@ -84,6 +93,7 @@ pub trait AddressExtension: Ord + Copy {
     fn encode(&mut self, addr: &Self::Address, buf: &mut [u8]) -> Result<usize, EncodeError>;
 }
 
+/// Applies no extension to the base babel spec address encoding scheme.
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NoExtension;
 
@@ -102,10 +112,4 @@ impl AddressExtension for NoExtension {
     fn encode(&mut self, addr: &Infallible, _buf: &mut [u8]) -> Result<usize, EncodeError> {
         match *addr {} // unreachable — Infallible can't be constructed
     }
-}
-
-/// Trait wrapper around a generic Address type.
-pub trait Address: HashT + DebugT + Display + Copy + Ord + Eq {
-    /// A type that indicates how this address is encoded.
-    type Encoding: From<u8> + Into<u8>;
 }
