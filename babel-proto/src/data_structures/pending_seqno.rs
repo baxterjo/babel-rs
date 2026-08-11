@@ -2,12 +2,12 @@ use managed::ManagedSlice;
 
 use crate::{
     address::{AddressExtension, RouterAddress},
-    neighbour::NeighbourIndex,
     router::RouterId,
-    seqno::SeqNo,
     storage::InternallyKeyed,
     time::{Duration as Interval, Instant},
 };
+
+use super::{neighbour::NeighbourIndex, seqno::SeqNo};
 
 pub struct PendingSeqnoRequestTable<'storage, A: AddressExtension> {
     inner: ManagedSlice<'storage, Option<SeqnoRequest<A>>>,

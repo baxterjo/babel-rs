@@ -2,12 +2,11 @@ use managed::ManagedSlice;
 
 use crate::{
     address::{AddressExtension, RouterAddress},
-    neighbour::NeighbourIndex,
-    seqno::SeqNo,
-    source::SourceIndex,
     storage::InternallyKeyed,
     time::{Duration as Interval, Instant},
 };
+
+use super::{neighbour::NeighbourIndex, seqno::SeqNo, source::SourceIndex};
 
 pub struct RouteTable<'storage, A: AddressExtension> {
     inner: ManagedSlice<'storage, Option<Route<A>>>,

@@ -14,16 +14,11 @@ use core::fmt::{Debug as DebugT, Display};
 mod macros;
 
 pub mod address;
-pub mod interface;
-pub mod neighbour;
+pub mod data_structures;
 pub mod output;
-pub mod pending_seqno;
-pub mod route;
 pub mod router;
-pub mod source;
 pub mod time;
 
-mod seqno;
 mod storage;
 
 #[cfg(not(feature = "defmt"))]

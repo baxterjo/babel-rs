@@ -1,6 +1,6 @@
 use crate::{
     address::{AddressExtension, RouterAddress},
-    interface::InterfaceHandle,
+    data_structures::interface::InterfaceHandle,
     time::Duration,
 };
 

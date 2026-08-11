@@ -3,9 +3,10 @@ use managed::ManagedSlice;
 use crate::{
     address::{AddressExtension, RouterAddress},
     router::RouterId,
-    seqno::SeqNo,
     storage::InternallyKeyed,
 };
+
+use super::seqno::SeqNo;
 
 pub struct SourceTable<'storage, A>
 where

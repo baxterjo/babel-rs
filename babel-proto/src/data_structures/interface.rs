@@ -4,15 +4,16 @@ use managed::ManagedSlice;
 use thiserror::Error;
 
 use crate::{
-    seqno::SeqNo,
     storage::{InternallyKeyed, ManagedSliceExt},
     time::{Duration as Interval, Instant},
     InterfaceId,
 };
 
-/// Recommended message intervals indicated in [RFC 8966 Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.2)
+use super::seqno::SeqNo;
+
+/// Recommended message intervals indicated in [Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.2)
 pub const DEFAULT_MULTICAST_HELLO_INTERVAL_SECS: u64 = 4;
-/// Recommended message intervals indicated in [RFC 8966 Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.10)
+/// Recommended message intervals indicated in [Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.10)
 pub const DEFAULT_UPDATE_INTERVAL_SECS: u64 = DEFAULT_MULTICAST_HELLO_INTERVAL_SECS * 4;
 
 pub struct InterfaceTable<'storage> {
@@ -69,6 +70,7 @@ impl<'storage> InterfaceTable<'storage> {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum InterfaceTableError {
+    /// The storage given for the interface table is full.
     #[error("Interface table is full")]
     Full,
     /// In this instance the interface is still registered in the interface table, and the handle

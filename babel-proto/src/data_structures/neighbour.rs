@@ -2,11 +2,11 @@ use managed::ManagedSlice;
 
 use crate::{
     address::{AddressExtension, NoExtension, RouterAddress},
-    interface::InterfaceHandle,
-    seqno::SeqNo,
     storage::InternallyKeyed,
     time::{Duration as Interval, DurationMultiplier as HoldTimeMultiplier, Instant},
 };
+
+use super::{interface::InterfaceHandle, seqno::SeqNo};
 
 pub struct NeighbourTable<'storage, A = NoExtension>
 where
