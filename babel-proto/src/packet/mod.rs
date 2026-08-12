@@ -1,4 +1,4 @@
-//! Packet format as described in section [4.2](https://datatracker.ietf.org/doc/html/rfc8966#name-packet-format)
+//! Wire format as described in section [4.2](https://datatracker.ietf.org/doc/html/rfc8966#name-packet-format)
 pub mod tlv;
 
 use crate::data_types::address::{AddressCodec, AddressExtension};

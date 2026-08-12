@@ -1,15 +1,18 @@
 use core::array::TryFromSliceError;
 use thiserror::Error;
 
-use crate::packet::tlv::ack_req::AckReqError::WrongTypeField;
+use crate::{
+    packet::tlv::{TlvEncodeError, TlvHeaderT, TlvParseError},
+    utils::cursor::ManagedSliceCursor,
+};
 
 /// Acknowledgment request packet as defined in section
 /// [4.6.3](https://datatracker.ietf.org/doc/html/rfc8966#name-acknowledgment-request)
+///
+/// NOTE: `Length` and `Reserved` fields are not represented here as they have no value in the
+/// logic of the protocol.
+#[derive(Debug)]
 pub struct AckReq<'a> {
-    /// The length of the body in octets, exclusive of the Type and Length fields.
-    _length: u8,
-    /// Sent as 0 and **MUST** be ignored on reception.
-    _reserved: u16,
     /// An arbitrary value that will be echoed in the receiver's Acknowledgment TLV.
     pub opaque: u16,
     /// A time interval in centiseconds after which the sender will assume that this
@@ -17,125 +20,109 @@ pub struct AckReq<'a> {
     /// TLV before this time has elapsed (with a margin allowing for propagation time).
     pub interval: u16,
     /// This TLV is self-terminating and allows sub-TLVs.
-    pub sub_tlvs: &'a [u8],
+    pub sub_tlvs: Option<&'a [u8]>,
+}
+
+impl TlvHeaderT for AckReq<'_> {
+    /// Set to 2 to indicate an Acknowledgment Request TLV.
+    const TYPE_ID: u8 = 2;
 }
 
 impl<'a> AckReq<'a> {
-    /// 4.6.3-4.2: Set to 2 to indicate an Acknowledgment Request TLV.
-    const TYPE_ID: u8 = 2;
-
-    /// Length of the known fields exlusive of type and length fields. Convenience for calculating
-    /// length field.
-    const LENGTH_OF_KNOWN_FIELDS: u8 =
-        (size_of::<u16>() + size_of::<u16>() + size_of::<u16>()) as u8;
-
     /// Parses the entire tlv INCLUDING the already checked type field.
     ///
     /// Mutates the buffer as it parses bytes.
-    // The reason this takes the type field is for unit testing symetric parse / encode.
-    fn parse(input: &mut &'a [u8]) -> Result<Self, AckReqError> {
-        let (_type_bytes, rest) = input.split_at(size_of::<u8>());
-        *input = rest;
-
-        // First get the length
-        let (length_bytes, rest) = input.split_at(size_of::<u8>());
-        *input = rest;
-        let length = u8::from_be_bytes(
-            length_bytes
-                .try_into()
-                .map_err(|_| AckReqError::CouldNotParseLength)?,
-        );
-
-        // Now split off the TLV from the buffer.
-        let (mut tlv_bytes, rest) = input.split_at(length as usize);
+    // The reason this takes the `Type` field is for unit testing symetric parse / encode.
+    fn parse(input: &mut &'a [u8]) -> Result<Self, TlvParseError> {
+        // Parse the header.
+        let (_header, mut body, in_remainder) = Self::parse_header(input)?;
 
         // Now if the remainder of the method fails, the input buffer can still be used.
-        *input = rest;
+        *input = in_remainder;
 
-        // Parse reserved bytes
-        let (reserved_bytes, rest) = tlv_bytes.split_at(size_of::<u16>());
-        tlv_bytes = rest;
-        let reserved = u16::from_be_bytes(reserved_bytes.try_into()?);
+        // Trim and ignore reserved bytes
+        let (_reserved_bytes, rest) = body
+            .split_at_checked(size_of::<u16>())
+            .ok_or(TlvParseError::BodyNotLongEnough)?;
+        body = rest;
 
         // Parse opaque bytes
-        let (opaque_bytes, rest) = tlv_bytes.split_at(size_of::<u16>());
-        tlv_bytes = rest;
+        let (opaque_bytes, rest) = body
+            .split_at_checked(size_of::<u16>())
+            .ok_or(TlvParseError::BodyNotLongEnough)?;
+        body = rest;
         let opaque = u16::from_be_bytes(opaque_bytes.try_into()?);
 
         // Parse interval bytes.
-        let (interval_bytes, sub_tlvs) = tlv_bytes.split_at(size_of::<u16>());
+        let (interval_bytes, sub_tlvs) = body
+            .split_at_checked(size_of::<u16>())
+            .ok_or(TlvParseError::BodyNotLongEnough)?;
+
         let interval = u16::from_be_bytes(interval_bytes.try_into()?);
 
         if interval == 0 {
-            return Err(AckReqError::IntervalCannotBeZero);
+            return Err(AckReqError::IntervalCannotBeZero)?;
         }
 
         Ok(Self {
-            _length: length,
-            _reserved: reserved,
             opaque,
             interval,
-            sub_tlvs,
+            sub_tlvs: Some(sub_tlvs),
         })
     }
 
     /// Encodes the entire tlv into buf.
-    fn encode(&self, mut buf: &mut [u8]) -> Result<usize, (usize, AckReqError)> {
-        let mut encoded = 0usize;
-        let length = Self::LENGTH_OF_KNOWN_FIELDS + self.sub_tlvs.len() as u8;
-
+    ///
+    /// Returns the position of the cursor when it succeeds.
+    fn encode<'b>(&self, cursor: &mut ManagedSliceCursor<'b>) -> Result<usize, TlvEncodeError> {
         // Write type id
-        encoded += buf
-            .write_all(&Self::TYPE_ID.to_be_bytes())
-            .map_err(|io| (encoded, AckReqError::from(io)))?;
+        cursor.write(&Self::TYPE_ID.to_be_bytes())?;
 
-        // Write length.
-        encoded += buf
-            .write_all(&length.to_be_bytes())
-            .map_err(|io| (encoded, AckReqError::from(io)))?;
+        // Skip and mark length
+        let length_idx = cursor.mark_and_skip::<1>()?;
+        let mut length = 0;
 
-        // Write reserved
-        encoded += buf
-            .write_all(&0u16.to_be_bytes())
-            .map_err(|io| (encoded, AckReqError::from(io)))?;
+        // Write reserved this must always be zeros.
+        length += cursor.write(&0u16.to_be_bytes())?;
+
+        // Write opaque
+        length += cursor.write(&self.opaque.to_be_bytes())?;
 
         // Write interval
-        encoded += buf
-            .write_all(&self.interval.to_be_bytes())
-            .map_err(|io| (encoded, AckReqError::from(io)))?;
+        length += cursor.write(&self.interval.to_be_bytes())?;
 
         // Write sub TLVS
-        encoded += buf
-            .write_all(self.sub_tlvs)
-            .map_err(|io| (encoded, AckReqError::from(io)))?;
+        if let Some(stlv) = self.sub_tlvs {
+            length += cursor.write(&stlv)?;
+        }
 
-        Ok(encoded)
+        // Backfill length at the marked location
+        cursor.backfill_at(length_idx, &[length as u8])?;
+
+        Ok(cursor.position())
     }
 }
 
+/// These are recoverable errors for AckReq parsing and encoding.
+///
+/// They are usually some form of receiving a packet that is parsable but is out of spec.
 #[derive(Debug, Error)]
 pub enum AckReqError {
-    #[error("The type for AckReq is 2")]
-    WrongTypeField,
     #[error("The interval value in AckReq cannot be 0.")]
     IntervalCannotBeZero,
-    /// The entire packet (not just this TLV) needs to be thrown away if this happens.
-    #[error("Could not parse the packet length from the header.")]
-    CouldNotParseLength,
-    #[error(transparent)]
-    SliceNotLongEnough(#[from] TryFromSliceError),
-    #[error(transparent)]
-    WritingToBuf(#[from] std::io::Error),
 }
 
 mod test {
     use super::*;
     #[test]
-    fn decode_and_encode_symmetry() {
+    fn decode_and_encode_symmetry_when_reserve_is_zero() {
+        // The "when reserve is not zero" case will not be tested as it has no value.
         let mut input: &[u8] = &[AckReq::TYPE_ID, 11, 0, 0, 6, 9, 1, 1, 0, 1, 2, 3, 4];
         let expected = input.to_vec();
         let req = AckReq::parse(&mut input).expect("Should parse");
-        let mut output = Vec::new();
+        b_debug!("Parsed: {:?}", req);
+        let mut output = ManagedSliceCursor::new(Vec::new());
+
         let written = req.encode(&mut output).expect("Should encode");
         assert_ne!(written, 0, "Zero bytes written.");
         assert_eq!(output, expected);
