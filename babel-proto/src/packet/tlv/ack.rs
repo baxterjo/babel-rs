@@ -1,7 +1,5 @@
-use thiserror::Error;
-
 use crate::{
-    packet::tlv::{TlvEncodeError, TlvHeaderT, TlvParseError},
+    packet::tlv::{AckReq, TlvEncodeError, TlvHeaderT, TlvParseError},
     utils::cursor::ManagedSliceCursor,
 };
 
@@ -10,8 +8,8 @@ use crate::{
 ///
 /// Since Opaque values are not globally unique, this TLV **MUST** be sent to a unicast address.
 ///
-/// NOTE: `Length` field is not represented here as it has no value outside of parsing and
-/// encoding.
+/// NOTE: `Type` and `Length` fields are not represented here as they have no value beyond parsing
+/// and encoding.
 #[derive(Debug)]
 pub struct Ack<'a> {
     /// Set to the Opaque value of the Acknowledgment Request that prompted this Acknowledgment.
@@ -72,6 +70,15 @@ impl<'a> Ack<'a> {
         cursor.backfill_at(len_idx, &[length as u8])?;
 
         Ok(cursor.position())
+    }
+}
+
+impl From<AckReq<'_>> for Ack<'_> {
+    fn from(value: AckReq<'_>) -> Self {
+        Self {
+            opaque: value.opaque,
+            sub_tlvs: None,
+        }
     }
 }
 

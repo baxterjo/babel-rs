@@ -5,8 +5,10 @@ use thiserror::Error;
 
 use crate::{
     data_types::Interval,
-    utils::storage::{InternallyKeyed, ManagedSliceExt},
-    utils::Instant,
+    utils::{
+        storage::{InternallyKeyed, ManagedSliceExt},
+        Duration, Instant,
+    },
     InterfaceId,
 };
 
@@ -140,14 +142,14 @@ impl Interface {
             handle,
             hello_seqno: SeqNo::default(),
             hello_interval: hello_interval.map_or(
-                Interval::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS),
+                Duration::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS).into(),
                 |h| h.into(),
             ),
             last_hello: None,
-            update_interval: update_interval
-                .map_or(Interval::from_secs(DEFAULT_UPDATE_INTERVAL_SECS), |u| {
-                    u.into()
-                }),
+            update_interval: update_interval.map_or(
+                Duration::from_secs(DEFAULT_UPDATE_INTERVAL_SECS).into(),
+                |u| u.into(),
+            ),
             last_update: None,
         }
     }

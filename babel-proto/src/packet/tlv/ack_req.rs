@@ -1,4 +1,3 @@
-use core::array::TryFromSliceError;
 use thiserror::Error;
 
 use crate::{
@@ -6,11 +5,11 @@ use crate::{
     utils::cursor::ManagedSliceCursor,
 };
 
-/// Acknowledgment request packet as defined in section
+/// Acknowledgment request TLV as defined in section
 /// [4.6.3](https://datatracker.ietf.org/doc/html/rfc8966#name-acknowledgment-request)
 ///
-/// NOTE: `Length` and `Reserved` fields are not represented here as they have no value in the
-/// logic of the protocol.
+/// NOTE: `Type`, `Length`, and `Reserved` fields are not represented here as they have no value
+/// beyond parsing and encoding.
 #[derive(Debug)]
 pub struct AckReq<'a> {
     /// An arbitrary value that will be echoed in the receiver's Acknowledgment TLV.
