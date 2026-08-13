@@ -1,12 +1,25 @@
 use thiserror::Error;
 
 use crate::{
+    data_types::Interval,
     packet::tlv::{TlvEncodeError, TlvHeaderT, TlvParseError},
     utils::cursor::ManagedSliceCursor,
 };
 
 /// Acknowledgment request TLV as defined in section
 /// [4.6.3](https://datatracker.ietf.org/doc/html/rfc8966#name-acknowledgment-request)
+///
+/// ```sh
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |    Type = 2   |    Length     |          Reserved             |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |             Opaque            |          Interval             |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+///
+/// This TLV requests that the receiver send an Acknowledgment TLV within the number of centiseconds specified by the Interval field.
 ///
 /// NOTE: `Type`, `Length`, and `Reserved` fields are not represented here as they have no value
 /// beyond parsing and encoding.
@@ -17,7 +30,7 @@ pub struct AckReq<'a> {
     /// A time interval in centiseconds after which the sender will assume that this
     /// packet has been lost. This **MUST NOT** be 0. The receiver **MUST** send an Acknowledgment
     /// TLV before this time has elapsed (with a margin allowing for propagation time).
-    pub interval: u16,
+    pub interval: Interval,
     /// This TLV is self-terminating and allows sub-TLVs.
     pub sub_tlvs: Option<&'a [u8]>,
 }
@@ -57,9 +70,9 @@ impl<'a> AckReq<'a> {
             .split_at_checked(size_of::<u16>())
             .ok_or(TlvParseError::BodyNotLongEnough)?;
 
-        let interval = u16::from_be_bytes(interval_bytes.try_into()?);
+        let interval = Interval::from_wire(interval_bytes.try_into()?);
 
-        if interval == 0 {
+        if interval.is_zero() {
             return Err(AckReqError::IntervalCannotBeZero)?;
         }
 
@@ -88,7 +101,7 @@ impl<'a> AckReq<'a> {
         length += cursor.write(&self.opaque.to_be_bytes())?;
 
         // Write interval
-        length += cursor.write(&self.interval.to_be_bytes())?;
+        length += cursor.write(&self.interval.as_wire())?;
 
         // Write sub TLVS
         if let Some(stlv) = self.sub_tlvs {
@@ -119,11 +132,11 @@ mod test {
         // The "when reserve is not zero" case will not be tested as it has no value.
         let mut input: &[u8] = &[AckReq::TYPE_ID, 11, 0, 0, 6, 9, 1, 1, 0, 1, 2, 3, 4];
         let expected = input.to_vec();
-        let req = AckReq::parse(&mut input).expect("Should parse");
-        b_debug!("Parsed: {:?}", req);
+        let parsed = AckReq::parse(&mut input).expect("Should parse");
+        b_debug!("Parsed: {:?}", parsed);
         let mut output = ManagedSliceCursor::new(Vec::new());
 
-        let written = req.encode(&mut output).expect("Should encode");
+        let written = parsed.encode(&mut output).expect("Should encode");
         assert_ne!(written, 0, "Zero bytes written.");
         assert_eq!(output, expected);
     }

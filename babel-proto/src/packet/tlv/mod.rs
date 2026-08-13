@@ -3,8 +3,11 @@ use thiserror::Error;
 
 use crate::utils::cursor::ManagedSliceCursorError;
 
+#[doc(hidden)]
 pub mod ack;
+#[doc(hidden)]
 pub mod ack_req;
+#[doc(hidden)]
 pub mod hello;
 
 use ack_req::AckReqError;
@@ -14,6 +17,9 @@ pub use ack_req::AckReq;
 
 #[doc(inline)]
 pub use ack::Ack;
+
+#[doc(inline)]
+pub use hello::Hello;
 
 pub enum Tlv<'a> {
     Pad1,

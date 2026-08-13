@@ -18,6 +18,10 @@ impl Interval {
         // allowable here.
         self.0.as_centis() as u16
     }
+
+    pub fn is_zero(&self) -> bool {
+        self.as_centis() == 0
+    }
 }
 
 impl From<Duration> for Interval {

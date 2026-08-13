@@ -6,17 +6,27 @@ use crate::{
 /// Acknowledgement TLV as defined in section
 /// [4.6.4](https://datatracker.ietf.org/doc/html/rfc8966#name-acknowledgment)
 ///
+/// ```sh
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |    Type = 3   |    Length     |           Opaque              |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+///
+/// This TLV is sent by a node upon receiving an Acknowledgment Request TLV.
+///
 /// Since Opaque values are not globally unique, this TLV **MUST** be sent to a unicast address.
 ///
 /// NOTE: `Type` and `Length` fields are not represented here as they have no value beyond parsing
 /// and encoding.
 #[derive(Debug)]
-pub struct Ack<'a> {
+pub struct Ack<'input> {
     /// Set to the Opaque value of the Acknowledgment Request that prompted this Acknowledgment.
     opaque: u16,
 
     /// This TLV is self-terminating and allows sub-TLVs.
-    sub_tlvs: Option<&'a [u8]>,
+    sub_tlvs: Option<&'input [u8]>,
 }
 
 impl TlvHeaderT for Ack<'_> {
@@ -24,12 +34,12 @@ impl TlvHeaderT for Ack<'_> {
     const TYPE_ID: u8 = 3;
 }
 
-impl<'a> Ack<'a> {
+impl<'input> Ack<'input> {
     /// Parses the entire tlv INCLUDING the already checked type field.
     ///
     /// Mutates the buffer as it parses bytes.
     // The reason this takes the `Type` field is for unit testing symetric parse / encode.
-    fn parse(input: &mut &'a [u8]) -> Result<Self, TlvParseError> {
+    fn parse(input: &mut &'input [u8]) -> Result<Self, TlvParseError> {
         let (_headers, body, remainder) = Self::parse_header(input)?;
 
         *input = remainder;
@@ -55,7 +65,10 @@ impl<'a> Ack<'a> {
     /// Encodes the entire tlv into buf.
     ///
     /// Returns the position of the cursor when it succeeds.
-    fn encode<'b>(&self, cursor: &mut ManagedSliceCursor<'b>) -> Result<usize, TlvEncodeError> {
+    fn encode<'output>(
+        &self,
+        cursor: &mut ManagedSliceCursor<'output>,
+    ) -> Result<usize, TlvEncodeError> {
         cursor.write(&Self::TYPE_ID.to_be_bytes())?;
 
         let len_idx = cursor.mark_and_skip::<1>()?;
@@ -90,11 +103,11 @@ mod test {
     fn decode_and_encode_symmetry() {
         let mut input: &[u8] = &[Ack::TYPE_ID, 11, 6, 9, 0, 0, 1, 1, 0, 1, 2, 3, 4];
         let expected = input.to_vec();
-        let req = Ack::parse(&mut input).expect("Should parse");
-        b_debug!("Parsed: {:?}", req);
+        let parsed = Ack::parse(&mut input).expect("Should parse");
+        b_debug!("Parsed: {:?}", parsed);
         let mut output = ManagedSliceCursor::new(Vec::new());
 
-        let written = req.encode(&mut output).expect("Should encode");
+        let written = parsed.encode(&mut output).expect("Should encode");
         assert_ne!(written, 0, "Zero bytes written.");
         assert_eq!(output, expected);
     }
