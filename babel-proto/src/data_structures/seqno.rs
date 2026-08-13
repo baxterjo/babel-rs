@@ -56,6 +56,7 @@ impl PartialOrd for SeqNo {
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 

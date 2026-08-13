@@ -111,6 +111,7 @@ pub enum AckReqError {
     IntervalCannotBeZero,
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
     #[test]

@@ -41,6 +41,7 @@ impl From<Interval> for Duration {
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 

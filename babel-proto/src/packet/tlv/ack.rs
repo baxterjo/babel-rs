@@ -82,6 +82,7 @@ impl From<AckReq<'_>> for Ack<'_> {
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 
