@@ -10,16 +10,20 @@ use crate::{
 ///
 /// The Flags field is interpreted as follows:
 ///
+/// ```sh
 ///  0                   1
 ///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// |U|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-///
+/// ```
 /// U (Unicast) flag (8000 hexadecimal):
 ///     if set, then this Hello represents a Unicast Hello, otherwise it represents a Multicast Hello;
+///
 /// X:
 ///     all other bits MUST be sent as 0 and silently ignored on reception.
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct HelloFlags(u16);
 
 impl HelloFlags {
@@ -35,14 +39,26 @@ impl HelloFlags {
 /// Hello TLV as defined in section
 /// [4.6.5](https://datatracker.ietf.org/doc/html/rfc8966#name-hello)
 ///
+/// ```sh
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |    Type = 4   |    Length     |            Flags              |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |            Seqno              |          Interval             |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+///
 /// Note: `Type` and `Length` fields are not represented here as they have no value beyond parsing
 /// and encoding.
-pub struct Hello<'a> {
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Hello<'input> {
     /// The individual bits of this field specify special handling of this TLV (see below).
     flags: HelloFlags,
     seqno: SeqNo,
     interval: Interval,
-    sub_tlvs: Option<&'a [u8]>,
+    sub_tlvs: Option<&'input [u8]>,
 }
 
 impl TlvHeaderT for Hello<'_> {
@@ -50,12 +66,12 @@ impl TlvHeaderT for Hello<'_> {
     const TYPE_ID: u8 = 4;
 }
 
-impl<'a> Hello<'a> {
+impl<'input> Hello<'input> {
     /// Parses the entire tlv INCLUDING the already checked type field.
     ///
     /// Mutates the buffer as it parses bytes.
     // The reason this takes the `Type` field is for unit testing symetric parse / encode.
-    fn parse(input: &mut &'a [u8]) -> Result<Self, TlvParseError> {
+    fn parse(input: &mut &'input [u8]) -> Result<Self, TlvParseError> {
         let (_headers, mut body, remainder) = Self::parse_header(input)?;
 
         *input = remainder;
@@ -95,7 +111,10 @@ impl<'a> Hello<'a> {
     /// Encodes the entire tlv into buf.
     ///
     /// Returns the position of the cursor when it succeeds.
-    fn encode<'b>(&self, cursor: &mut ManagedSliceCursor<'b>) -> Result<usize, TlvEncodeError> {
+    fn encode<'output>(
+        &self,
+        cursor: &mut ManagedSliceCursor<'output>,
+    ) -> Result<usize, TlvEncodeError> {
         // Write type id
         cursor.write(&Self::TYPE_ID.to_be_bytes())?;
 
@@ -121,5 +140,32 @@ impl<'a> Hello<'a> {
         cursor.backfill_at(length_idx, &[length as u8])?;
 
         Ok(cursor.position())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn decode_and_encode_symmetry() {
+        let mut input: &[u8] = &[Hello::TYPE_ID, 11, 0x80, 0, 0, 0, 1, 1, 0, 1, 2, 3, 4];
+        let expected = input.to_vec();
+        let parsed = Hello::parse(&mut input).expect("Should parse");
+        b_debug!("Parsed: {:?}", parsed);
+        let mut output = ManagedSliceCursor::new(Vec::new());
+
+        let written = parsed.encode(&mut output).expect("Should encode");
+        assert_ne!(written, 0, "Zero bytes written.");
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn expected_flags_set() {
+        let mut input: &[u8] = &[Hello::TYPE_ID, 11, 0x80, 0, 0, 0, 1, 1, 0, 1, 2, 3, 4];
+        let parsed = Hello::parse(&mut input).expect("Should parse");
+
+        assert!(parsed.flags.is_unicast());
+        assert!(!parsed.flags.is_multicast());
     }
 }
