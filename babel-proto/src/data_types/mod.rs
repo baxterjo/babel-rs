@@ -11,6 +11,8 @@ pub mod address;
 #[doc(inline)]
 pub use address::Address;
 
+pub mod address_encoding;
+
 pub mod router_id;
 
 #[doc(inline)]

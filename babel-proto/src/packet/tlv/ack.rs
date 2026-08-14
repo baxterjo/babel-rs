@@ -45,9 +45,7 @@ impl<'input> Ack<'input> {
         *input = remainder;
 
         // Parse opaque
-        let (opaque_bytes, sub_tlvs) = body
-            .split_at_checked(size_of::<u16>())
-            .ok_or(TlvParseError::BodyNotLongEnough)?;
+        let (opaque_bytes, sub_tlvs) = parse_body!(body, u16);
         let opaque = u16::from_be_bytes(opaque_bytes.try_into()?);
 
         let stlv_opt = if sub_tlvs.len() > 0 {

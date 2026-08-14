@@ -39,6 +39,16 @@ impl HelloFlags {
 /// Hello TLV as defined in section
 /// [4.6.5](https://datatracker.ietf.org/doc/html/rfc8966#name-hello)
 ///
+/// Every time a Hello is sent, the corresponding seqno counter MUST be incremented. Since there is
+/// a single seqno counter for all the Multicast Hellos sent by a given node over a given interface,
+/// if the Unicast flag is not set, this TLV MUST be sent to all neighbours on this link, which can
+/// be achieved by sending to a multicast destination or by sending multiple packets to the unicast
+/// addresses of all reachable neighbours. Conversely, if the Unicast flag is set, this TLV MUST be
+/// sent to a single neighbour, which can achieved by sending to a unicast destination. In order to
+/// avoid large discontinuities in link quality, multiple Hello TLVs SHOULD NOT be sent in the same
+/// packet.
+///
+/// # Wire format:
 /// ```sh
 ///  0                   1                   2                   3
 ///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -49,16 +59,24 @@ impl HelloFlags {
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// ```
 ///
-/// Note: `Type` and `Length` fields are not represented here as they have no value beyond parsing
-/// and encoding.
+/// Note: `Type` and `Length` fields are not held by the struct as they have no value beyond
+/// parsing and encoding.
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Hello<'input> {
-    /// The individual bits of this field specify special handling of this TLV (see below).
-    flags: HelloFlags,
-    seqno: SeqNo,
-    interval: Interval,
-    sub_tlvs: Option<&'input [u8]>,
+    /// The individual bits of this field specify special handling of this TLV.
+    pub(crate) flags: HelloFlags,
+    /// If the Unicast flag is set, this is the value of the sending node's outgoing Unicast Hello
+    /// seqno for this neighbour. Otherwise, it is the sending node's outgoing Multicast Hello seqno
+    /// for this interface.
+    pub(crate) seqno: SeqNo,
+    /// If nonzero, this is an upper bound, expressed in centiseconds, on the time after which the
+    /// sending node will send a new scheduled Hello TLV with the same setting of the Unicast flag.
+    /// If this is 0, then this Hello represents an unscheduled Hello and doesn't carry any new
+    /// information about times at which Hellos are sent.
+    pub(crate) interval: Interval,
+    /// This TLV is self-terminating and allows sub-TLVs.
+    pub(crate) sub_tlvs: Option<&'input [u8]>,
 }
 
 impl TlvHeaderT for Hello<'_> {
@@ -71,27 +89,21 @@ impl<'input> Hello<'input> {
     ///
     /// Mutates the buffer as it parses bytes.
     // The reason this takes the `Type` field is for unit testing symetric parse / encode.
-    fn parse(input: &mut &'input [u8]) -> Result<Self, TlvParseError> {
+    pub(crate) fn parse(input: &mut &'input [u8]) -> Result<Self, TlvParseError> {
         let (_headers, mut body, remainder) = Self::parse_header(input)?;
 
         *input = remainder;
 
         // Parse flags
-        let (flags_bytes, rest) = body
-            .split_at_checked(size_of::<u16>())
-            .ok_or(TlvParseError::BodyNotLongEnough)?;
+        let (flags_bytes, rest) = parse_body!(body, u16);
         body = rest;
         let flags = HelloFlags(u16::from_be_bytes(flags_bytes.try_into()?));
 
-        let (seqno_bytes, rest) = body
-            .split_at_checked(size_of::<u16>())
-            .ok_or(TlvParseError::BodyNotLongEnough)?;
+        let (seqno_bytes, rest) = parse_body!(body, u16);
         body = rest;
         let seqno = SeqNo(u16::from_be_bytes(seqno_bytes.try_into()?));
 
-        let (interval_bytes, sub_tlvs) = body
-            .split_at_checked(size_of::<u16>())
-            .ok_or(TlvParseError::BodyNotLongEnough)?;
+        let (interval_bytes, sub_tlvs) = parse_body!(body, u16);
         let interval = Interval::from_wire(interval_bytes.try_into()?);
 
         let stlv_opt = if sub_tlvs.len() > 0 {
@@ -111,7 +123,7 @@ impl<'input> Hello<'input> {
     /// Encodes the entire tlv into buf.
     ///
     /// Returns the position of the cursor when it succeeds.
-    fn encode<'output>(
+    pub(crate) fn encode<'output>(
         &self,
         cursor: &mut ManagedSliceCursor<'output>,
     ) -> Result<usize, TlvEncodeError> {

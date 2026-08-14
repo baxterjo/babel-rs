@@ -53,22 +53,16 @@ impl<'a> AckReq<'a> {
         *input = in_remainder;
 
         // Trim and ignore reserved bytes
-        let (_reserved_bytes, rest) = body
-            .split_at_checked(size_of::<u16>())
-            .ok_or(TlvParseError::BodyNotLongEnough)?;
+        let (_reserved_bytes, rest) = parse_body!(body, u16);
         body = rest;
 
         // Parse opaque bytes
-        let (opaque_bytes, rest) = body
-            .split_at_checked(size_of::<u16>())
-            .ok_or(TlvParseError::BodyNotLongEnough)?;
+        let (opaque_bytes, rest) = parse_body!(body, u16);
         body = rest;
         let opaque = u16::from_be_bytes(opaque_bytes.try_into()?);
 
         // Parse interval bytes.
-        let (interval_bytes, sub_tlvs) = body
-            .split_at_checked(size_of::<u16>())
-            .ok_or(TlvParseError::BodyNotLongEnough)?;
+        let (interval_bytes, sub_tlvs) = parse_body!(body, u16);
 
         let interval = Interval::from_wire(interval_bytes.try_into()?);
 

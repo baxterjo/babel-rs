@@ -1,22 +1,20 @@
 //! Wire format as described in section [4.2](https://datatracker.ietf.org/doc/html/rfc8966#name-packet-format)
+//!
+//! All packet types in the base spec are low-copy sliced or constructed on demand
+//! based on a method inspired by
+//! [etherparse](https://docs.rs/etherparse/latest/etherparse/index.html). Types that end in
+//! "slice" are read only accessors into incoming packets.:
+//! - Constructors of packets perform safety checks on slice length. These slices cannot exist
+//! unless they are safe to access using `unsafe`.
+//! - Accessors get field values (via copy) on demand.
+
+// DEVELOPERS NOTE: A lot of the packet parsing for
+pub mod error;
+pub mod len_source;
+pub mod packet_header;
+pub mod packet_header_slice;
+pub mod packet_slice;
+pub mod parser;
 pub mod tlv;
 
-use crate::data_types::address::{AddressCodec, AddressExtension};
-
-/// Magic number identifying Babel packets as defined in section
-/// [4.2](https://datatracker.ietf.org/doc/html/rfc8966#name-packet-format)
-pub const BABEL_PACKET_HEADER_DEFAULT_MAGIC_NUMBER: u8 = 42;
-
-/// Babel protocol version number as defined in section
-/// [4.2](https://datatracker.ietf.org/doc/html/rfc8966#name-packet-format)
-pub const BABEL_PACKET_HEADER_DEFAULT_VERSION_NUMBER: u8 = 2;
-
-pub struct BabelPacketParser<A: AddressExtension> {
-    address_codec: AddressCodec<A>,
-}
-
-//impl BabelPacketParser<A:AddressExtension>{
-//    pub fn parse_packet(&[u8])->Iterator{
-//
-//    }
-//}
+pub(crate) mod utils;

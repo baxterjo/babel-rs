@@ -1,7 +1,7 @@
 use core::{any::type_name, array::TryFromSliceError};
 use thiserror::Error;
 
-use crate::utils::cursor::ManagedSliceCursorError;
+use crate::{data_types::address::AddressDecodeError, utils::cursor::ManagedSliceCursorError};
 
 #[doc(hidden)]
 pub mod ack;
@@ -9,7 +9,8 @@ pub mod ack;
 pub mod ack_req;
 #[doc(hidden)]
 pub mod hello;
-
+//#[doc(hidden)]
+//pub mod ihu;
 use ack_req::AckReqError;
 
 #[doc(inline)]
@@ -33,14 +34,18 @@ pub struct TlvIter<'a> {
 
 #[derive(Debug, Error)]
 pub enum TlvParseError {
+    // Non recoverable errors
     #[error(transparent)]
     Header(#[from] TlvHeaderError),
-    #[error(transparent)]
-    AckReq(#[from] AckReqError),
     #[error("The body of the TLV is not long enough.")]
     BodyNotLongEnough,
     #[error(transparent)]
     SliceNotLongEnough(#[from] TryFromSliceError),
+    // Recoverable errors
+    #[error(transparent)]
+    AckReq(#[from] AckReqError),
+    #[error(transparent)]
+    AeDecodeError(#[from] AddressDecodeError),
 }
 
 #[derive(Debug, Error)]

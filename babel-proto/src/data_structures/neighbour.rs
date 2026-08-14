@@ -1,7 +1,7 @@
 use managed::ManagedSlice;
 
 use crate::{
-    data_types::address::{Address, AddressExtension, NoExtension},
+    data_types::address::{Address, AddressExtension},
     data_types::Interval,
     utils::storage::InternallyKeyed,
     utils::Instant,
@@ -10,7 +10,7 @@ use crate::{
 
 use super::{interface::InterfaceHandle, seqno::SeqNo};
 
-pub struct NeighbourTable<'storage, A = NoExtension>
+pub struct NeighbourTable<'storage, A>
 where
     A: AddressExtension,
 {
