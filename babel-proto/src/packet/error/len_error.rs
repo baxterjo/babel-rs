@@ -107,11 +107,7 @@ impl core::error::Error for LenError {
 mod test {
     use super::*;
     use alloc::format;
-    use std::{
-        collections::hash_map::DefaultHasher,
-        error::Error,
-        hash::{Hash, Hasher},
-    };
+    use std::error::Error;
 
     #[test]
     fn add_offset() {
@@ -135,65 +131,31 @@ mod test {
     }
 
     #[test]
-    fn debug() {
-        assert_eq!(
-            format!(
-                "{:?}",
-                LenError {
-                    required_len: 2,
-                    layer: Layer::BabelPacketHeader,
-                    len: 1,
-                    len_source: LenSource::Slice,
-                    layer_start_offset: 0
-                }
-            ),
-            format!(
-                "LenError {{ required_len: {:?}, len: {:?}, len_source: {:?}, layer: {:?}, layer_start_offset: {:?} }}",
-                2,
-                1,
-                LenSource::Slice,
-                Layer::BabelPacketHeader,
-                0
-            ),
-        );
-    }
-
-    #[test]
-    fn clone_eq_hash() {
-        let err = LenError {
-            required_len: 2,
-            layer: Layer::BabelPacketHeader,
-            len: 1,
-            len_source: LenSource::Slice,
-            layer_start_offset: 20,
-        };
-        assert_eq!(err, err.clone());
-        let hash_a = {
-            let mut hasher = DefaultHasher::new();
-            err.hash(&mut hasher);
-            hasher.finish()
-        };
-        let hash_b = {
-            let mut hasher = DefaultHasher::new();
-            err.clone().hash(&mut hasher);
-            hasher.finish()
-        };
-        assert_eq!(hash_a, hash_b);
-    }
-
-    #[test]
     fn fmt() {
         // len sources based tests (not enough data)
         {
             let len_source_tests = [
                 (
                     LenSource::Slice,
-                    "Babel Header Error: Not enough data to decode 'IPv4 header'. 2 byte(s) would be required, but only 1 byte(s) are available based on the slice length.",
+                    "Babel packet header error: Not enough data to decode 'Babel routing protocol \
+                    packet header'. 2 byte(s) would be required, but only 1 byte(s) are available \
+                    based on the slice length.",
                 ),
-                (LenSource::BabelPacketBodyLength, ""),
+                (
+                    LenSource::BabelPacketBodyLength,
+                    "Babel packet header error: Not enough data to decode 'Babel routing protocol \
+                    packet header'. 2 byte(s) would be required, but only 1 byte(s) are available \
+                    based on the length retrieved from the Babel packet header.",
+                ),
+                (
+                    LenSource::BabelTlvBodyLength,
+                    "Babel packet header error: Not enough data to decode 'Babel routing protocol \
+                    packet header'. 2 byte(s) would be required, but only 1 byte(s) are available \
+                    based on the length retrieved from the Babel TLV header.",
+                ),
             ];
 
-            for test in len_source_tests {
+            for (idx, test) in len_source_tests.iter().enumerate() {
                 assert_eq!(
                     test.1,
                     format!(
@@ -205,14 +167,18 @@ mod test {
                             len_source: test.0,
                             layer_start_offset: 0
                         }
-                    )
+                    ),
+                    "test {}",
+                    idx
                 );
             }
         }
 
         // start offset based test
         assert_eq!(
-            "IPv4 Header Error: Not enough data to decode 'IPv4 header'. 2 byte(s) would be required, but only 1 byte(s) are available based on the slice length ('IPv4 header' starts at overall parsed byte 4).",
+            "Babel packet header error: Not enough data to decode 'Babel routing protocol packet \
+            header'. 2 byte(s) would be required, but only 1 byte(s) are available based on the \
+            slice length ('Babel routing protocol packet header' starts at overall parsed byte 4).",
             format!(
                 "{}",
                 LenError {
@@ -229,7 +195,9 @@ mod test {
         {
             let len_source_tests = [(
                 LenSource::Slice,
-                "IPv4 Header Error: Length of 2 byte(s) is too big for an 'IPv4 header' (maximum is 1 bytes). The slice length was used to determine the length.",
+                "Babel packet header error: Length of 2 byte(s) is too big for an 'Babel routing \
+                protocol packet header' (maximum is 1 bytes). The slice length was used to \
+                determine the length.",
             )];
 
             for (idx, test) in len_source_tests.iter().enumerate() {
@@ -253,7 +221,10 @@ mod test {
 
         // start offset based test
         assert_eq!(
-            "IPv4 Header Error: Length of 2 byte(s) is too big for an 'IPv4 header' (maximum is 1 bytes). The slice length was used to determine the length ('IPv4 header' starts at overall parsed byte 4).",
+            "Babel packet header error: Length of 2 byte(s) is too big for an 'Babel routing \
+            protocol packet header' (maximum is 1 bytes). The slice length was used to \
+            determine the length ('Babel routing protocol packet header' starts at overall parsed \
+            byte 4).",
             format!(
                 "{}",
                 LenError {

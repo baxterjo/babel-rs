@@ -90,7 +90,7 @@ impl<'input, E: AddressExtension> Ihu<'input, E> {
         body = rest;
         let interval = Interval::from_wire(interval_bytes.try_into()?);
 
-        let ((_address_bytes, sub_tlvs), address) = codec.decode(&ae, body)?;
+        let ((_address_bytes, sub_tlvs), address) = codec.fr(&ae, body)?;
 
         let stlv_opt = if sub_tlvs.len() > 0 {
             Some(sub_tlvs)

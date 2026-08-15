@@ -1,10 +1,6 @@
 use thiserror::Error;
 
-use crate::{
-    data_types::Interval,
-    packet::tlv::{TlvEncodeError, TlvHeaderT, TlvParseError},
-    utils::cursor::ManagedSliceCursor,
-};
+use crate::{data_types::Interval, packet::tlv::TlvHeaderT, utils::cursor::ManagedSliceCursor};
 
 /// Acknowledgment request TLV as defined in section
 /// [4.6.3](https://datatracker.ietf.org/doc/html/rfc8966#name-acknowledgment-request)

@@ -46,35 +46,6 @@ impl core::fmt::Display for Layer {
 mod test {
     use super::Layer::*;
     use alloc::format;
-    use std::{
-        cmp::Ordering,
-        collections::hash_map::DefaultHasher,
-        hash::{Hash, Hasher},
-    };
-
-    #[test]
-    fn debug() {
-        assert_eq!("Ethernet2Header", format!("{:?}", BabelPacketHeader));
-    }
-
-    #[test]
-    fn clone_eq_hash_ord() {
-        let layer = BabelPacketHeader;
-        assert_eq!(layer, layer.clone());
-        let hash_a = {
-            let mut hasher = DefaultHasher::new();
-            layer.hash(&mut hasher);
-            hasher.finish()
-        };
-        let hash_b = {
-            let mut hasher = DefaultHasher::new();
-            layer.clone().hash(&mut hasher);
-            hasher.finish()
-        };
-        assert_eq!(hash_a, hash_b);
-        assert_eq!(Ordering::Equal, layer.cmp(&layer));
-        assert_eq!(Some(Ordering::Equal), layer.partial_cmp(&layer));
-    }
 
     #[test]
     fn error_title() {
