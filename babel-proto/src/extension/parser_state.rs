@@ -1,0 +1,29 @@
+use core::fmt::Debug;
+
+use crate::extension::{address::AddressExt, address_encoding::AddressEncodingExt, NoExtension};
+
+/// Extends the parser state to operate with address encoding extensions.
+///
+/// Babel parser state is **PER PACKET**. Types that implement this trait will be dropped and
+/// re-initiated between Babel packets. (Hence the [`Default`] bound)
+pub trait ParserStateExt
+where
+    Self: Debug + Sized + Default,
+{
+    type AddressEncoding: AddressEncodingExt;
+    type Address: AddressExt<Encoding = Self::AddressEncoding>;
+
+    fn get_default_for_family(&self, ae: &Self::AddressEncoding) -> Option<&Self::Address>;
+    fn set_default_for_family(&mut self, ae: &Self::AddressEncoding, address: Self::Address);
+}
+
+impl ParserStateExt for NoExtension {
+    type AddressEncoding = NoExtension;
+    type Address = NoExtension;
+    fn get_default_for_family(&self, _ae: &Self::AddressEncoding) -> Option<&Self::Address> {
+        unreachable!("The NoExtension struct should not be constructable.")
+    }
+    fn set_default_for_family(&mut self, _ae: &Self::AddressEncoding, _address: Self::Address) {
+        unreachable!("The NoExtension struct should not be constructable.")
+    }
+}

@@ -7,7 +7,8 @@ use thiserror::Error;
 
 use crate::{
     data_structures::interface::InterfaceHandle,
-    data_types::{address::AddressExtension, Address, RouterId},
+    data_types::{Address, RouterId},
+    extension::address::AddressExt,
     input::Receive,
     packet::{error::len_error::LenError, packet_slice::BabelPacketSlice},
 };
@@ -15,19 +16,18 @@ use crate::{
 /// Implements parser state and update encoding as described in section
 /// [4.5](https://datatracker.ietf.org/doc/html/rfc8966#name-parser-state-and-encoding-o)
 #[derive(Debug)]
-pub struct Parser<'input, E: AddressExtension, const MN: u8, const V: u8> {
+pub struct Parser<'input, E: AddressExt, const MN: u8, const V: u8> {
     /// Interface the packet was received on.
     iface: InterfaceHandle,
     /// Source address of the received packet.
     source: Option<Address<E>>,
     packet: BabelPacketSlice<'input>,
-    extension: E,
     default_router_id: Option<RouterId>,
     ae1_default_prefix: Option<Ipv4Addr>,
     ae2_default_prefix: Option<Ipv6Addr>,
 }
 
-impl<'input, E: AddressExtension, const MN: u8, const V: u8> Parser<'input, E, MN, V> {
+impl<'input, E: AddressExt, const MN: u8, const V: u8> Parser<'input, E, MN, V> {
     fn new(received: Receive<'input, E>) -> Result<Self, PacketParseError> {
         let packet = BabelPacketSlice::from_slice(received.contents)?;
 
@@ -45,7 +45,6 @@ impl<'input, E: AddressExtension, const MN: u8, const V: u8> Parser<'input, E, M
             iface: received.iface,
             source: received.source_addr,
             packet,
-            extension: E::default(),
             default_router_id: None,
             ae1_default_prefix: None,
             ae2_default_prefix: None,
