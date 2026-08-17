@@ -10,6 +10,8 @@ pub mod ack_slice;
 pub mod hello_slice;
 #[doc(hidden)]
 pub mod ihu_slice;
+#[doc(hidden)]
+pub mod pad_slice;
 
 use core::any::type_name;
 
