@@ -2,8 +2,8 @@ pub mod tlv_header;
 pub mod tlv_header_slice;
 pub mod tlv_slice;
 
-//#[doc(hidden)]
-//pub mod ack_req_slice;
+#[doc(hidden)]
+pub mod ack_req_slice;
 #[doc(hidden)]
 pub mod ack_slice;
 #[doc(hidden)]

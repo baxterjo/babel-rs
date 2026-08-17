@@ -1,9 +1,6 @@
-use crate::{
-    packet::{
-        tlv::{tlv_header::TlvHeader, TypedTlv},
-        utils::get_unchecked_be_u16,
-    },
-    utils::cursor::ManagedSliceCursor,
+use crate::packet::{
+    tlv::{tlv_header::TlvHeader, TypedTlv},
+    utils::get_unchecked_be_u16,
 };
 
 /// Acknowledgement TLV as defined in section
