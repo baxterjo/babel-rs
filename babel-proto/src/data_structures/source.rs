@@ -1,8 +1,8 @@
 use managed::ManagedSlice;
 
 use crate::{
-    data_types::address::{Address, AddressExtension},
-    data_types::RouterId,
+    data_types::{address::Address, RouterId},
+    extension::address::AddressExt,
     utils::storage::InternallyKeyed,
 };
 
@@ -10,14 +10,14 @@ use super::seqno::SeqNo;
 
 pub struct SourceTable<'storage, A>
 where
-    A: AddressExtension,
+    A: AddressExt,
 {
     inner: ManagedSlice<'storage, Option<Source<A>>>,
 }
 
 impl<'storage, A> SourceTable<'storage, A>
 where
-    A: AddressExtension,
+    A: AddressExt,
 {
     /// Create a new source table with user provided storage.
     ///
@@ -43,13 +43,13 @@ where
 }
 
 #[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord, Clone, Copy)]
-pub struct SourceIndex<A: AddressExtension> {
+pub struct SourceIndex<A: AddressExt> {
     pub(crate) prefix: Address<A>,
     pub(crate) prefix_len: u8,
     router_id: RouterId,
 }
 
-pub struct Source<A: AddressExtension> {
+pub struct Source<A: AddressExt> {
     prefix: Address<A>,
     prefix_len: u8,
     router_id: RouterId,
@@ -57,7 +57,7 @@ pub struct Source<A: AddressExtension> {
     metric: u16,
 }
 
-impl<A: AddressExtension> InternallyKeyed for Source<A> {
+impl<A: AddressExt> InternallyKeyed for Source<A> {
     type Key = SourceIndex<A>;
     fn key(&self) -> Self::Key {
         SourceIndex {

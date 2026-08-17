@@ -1,22 +1,20 @@
 use managed::ManagedSlice;
 
 use crate::{
-    data_types::address::{Address, AddressExtension},
-    data_types::Interval,
-    data_types::RouterId,
-    utils::storage::InternallyKeyed,
-    utils::Instant,
+    data_types::{address::Address, Interval, RouterId},
+    extension::address::AddressExt,
+    utils::{storage::InternallyKeyed, Instant},
 };
 
 use super::{neighbour::NeighbourIndex, seqno::SeqNo};
 
-pub struct PendingSeqnoRequestTable<'storage, A: AddressExtension> {
+pub struct PendingSeqnoRequestTable<'storage, A: AddressExt> {
     inner: ManagedSlice<'storage, Option<SeqnoRequest<A>>>,
 }
 
 impl<'storage, A> PendingSeqnoRequestTable<'storage, A>
 where
-    A: AddressExtension,
+    A: AddressExt,
 {
     /// Create a new [`PendingSeqnoRequestTable`] with user provided storage.
     ///
@@ -45,7 +43,7 @@ where
 /// and to which no reply has been received yet. This table is indexed by triples of the form
 /// (prefix, plen, router-id) (see [`SeqnoRequestIndex`]), and every entry in this table contains
 /// the following data:
-pub struct SeqnoRequest<A: AddressExtension> {
+pub struct SeqnoRequest<A: AddressExt> {
     /// 3.2.7-2.1: the prefix [...] being requested
     prefix: Address<A>,
     /// 3.2.7-2.1: the [...] plen [...] being requested
@@ -66,13 +64,13 @@ pub struct SeqnoRequest<A: AddressExtension> {
 
 /// 3.2.7-1: [...] This table is indexed by triples of the form (prefix, plen, router-id) [...]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SeqnoRequestIndex<A: AddressExtension> {
+pub struct SeqnoRequestIndex<A: AddressExt> {
     prefix: Address<A>,
     prefix_len: u8,
     router_id: RouterId,
 }
 
-impl<A: AddressExtension> InternallyKeyed for SeqnoRequest<A> {
+impl<A: AddressExt> InternallyKeyed for SeqnoRequest<A> {
     type Key = SeqnoRequestIndex<A>;
     fn key(&self) -> Self::Key {
         SeqnoRequestIndex {

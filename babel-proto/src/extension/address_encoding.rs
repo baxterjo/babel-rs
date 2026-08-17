@@ -11,6 +11,7 @@ where
     fn from_value(_value: u8) -> Result<Self, AddressEncodingError<Self>>;
     fn as_value(&self) -> u8;
     fn address_len(&self) -> usize;
+    fn can_compress(&self) -> bool;
 }
 
 impl AddressEncodingExt for NoExtension {
@@ -25,6 +26,10 @@ impl AddressEncodingExt for NoExtension {
     }
 
     fn address_len(&self) -> usize {
+        unreachable!("The NoExtension struct should not be constructable.")
+    }
+
+    fn can_compress(&self) -> bool {
         unreachable!("The NoExtension struct should not be constructable.")
     }
 }

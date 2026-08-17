@@ -13,6 +13,8 @@ where
     UnknownAddressEncoding,
     #[error("Attempted to decode a reserved address encoding value")]
     ReservedEncoding,
+    #[error("Cannot encode custom address encoding into reserved value.")]
+    NiceTry,
     #[error(transparent)]
     Extension(E::Error),
 }
@@ -54,18 +56,24 @@ where
     }
 }
 
-impl<E> Into<u8> for AddressEncoding<E>
+impl<E> TryInto<u8> for AddressEncoding<E>
 where
     E: AddressEncodingExt,
 {
-    fn into(self) -> u8 {
-        match self {
+    type Error = AddressEncodingError<E>;
+
+    fn try_into(self) -> Result<u8, Self::Error> {
+        let value = match self {
             Self::WildCard => 0,
             Self::Ipv4 => 1,
             Self::Ipv6 => 2,
             Self::LocalIpv6 => 3,
             Self::Extension(e) => e.as_value(),
+        };
+        if value <= 3 || value == 255 {
+            return Err(AddressEncodingError::NiceTry);
         }
+        Ok(value)
     }
 }
 

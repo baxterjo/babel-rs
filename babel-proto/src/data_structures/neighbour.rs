@@ -1,18 +1,16 @@
 use managed::ManagedSlice;
 
 use crate::{
-    data_types::address::{Address, AddressExtension},
-    data_types::Interval,
-    utils::storage::InternallyKeyed,
-    utils::Instant,
-    utils::IntervalMultiplier as HoldTimeMultiplier,
+    data_types::{address::Address, Interval},
+    extension::address::AddressExt,
+    utils::{storage::InternallyKeyed, Instant, IntervalMultiplier as HoldTimeMultiplier},
 };
 
 use super::{interface::InterfaceHandle, seqno::SeqNo};
 
 pub struct NeighbourTable<'storage, A>
 where
-    A: AddressExtension,
+    A: AddressExt,
 {
     inner: ManagedSlice<'storage, Neighbour<A>>,
     /// The hold time of a neighbour between receiving IHU TLVs.
@@ -21,7 +19,7 @@ where
 
 impl<'storage, A> NeighbourTable<'storage, A>
 where
-    A: AddressExtension,
+    A: AddressExt,
 {
     /// Create a new [`NeighbourTable`] with user provided storage.
     ///
@@ -50,9 +48,9 @@ where
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct NeighbourIndex<A>(InterfaceHandle, Address<A>)
 where
-    A: AddressExtension;
+    A: AddressExt;
 
-pub struct Neighbour<A: AddressExtension> {
+pub struct Neighbour<A: AddressExt> {
     /// 3.2.4-2.1: "the local node's interface over which this neighbour is reachable"
     iface: InterfaceHandle,
     /// 3.2.4-2.2: "the address of the neighbouring interface"
@@ -98,7 +96,7 @@ struct NeighbourTimers {
     last_ihu: Instant,
 }
 
-impl<A: AddressExtension> InternallyKeyed for Neighbour<A> {
+impl<A: AddressExt> InternallyKeyed for Neighbour<A> {
     type Key = NeighbourIndex<A>;
     fn key(&self) -> Self::Key {
         NeighbourIndex(self.iface, self.address)
