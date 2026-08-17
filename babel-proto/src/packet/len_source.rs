@@ -10,6 +10,8 @@ pub enum LenSource {
     BabelPacketBodyLength,
     /// Body length field in the Babel TLV header.
     BabelTlvBodyLength,
+    /// Expected address length based on address encoding
+    AddressEncoding,
 }
 
 #[cfg(test)]

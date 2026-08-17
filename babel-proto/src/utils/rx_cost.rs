@@ -1,8 +1,8 @@
 use core::ops::Deref;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct RxCost(u16);
+pub struct RxCost(pub u16);
 
 impl RxCost {
     pub fn from_wire(wire: [u8; 2]) -> Self {

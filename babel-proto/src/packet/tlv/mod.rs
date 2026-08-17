@@ -8,8 +8,8 @@ pub mod tlv_slice;
 //pub mod ack_req;
 #[doc(hidden)]
 pub mod hello_slice;
-//#[doc(hidden)]
-//pub mod ihu;
+#[doc(hidden)]
+pub mod ihu_slice;
 
 use core::any::type_name;
 

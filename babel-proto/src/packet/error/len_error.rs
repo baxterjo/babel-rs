@@ -44,6 +44,9 @@ impl core::fmt::Display for LenError {
                 LenSource::Slice => "slice length",
                 LenSource::BabelPacketBodyLength => "length retrieved from the Babel packet header",
                 LenSource::BabelTlvBodyLength => "length retrieved from the Babel TLV header",
+                LenSource::AddressEncoding => {
+                    "length retrieved from address encoding and tlv context"
+                }
             }
         };
 

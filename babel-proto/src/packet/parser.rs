@@ -7,11 +7,7 @@ use thiserror::Error;
 
 use crate::{
     data_structures::interface::InterfaceHandle,
-    data_types::{
-        address::{AddressDecodeError, AddressExtension},
-        address_encoding::AddressEncoding,
-        Address, RouterId,
-    },
+    data_types::{address::AddressExtension, Address, RouterId},
     input::Receive,
     packet::{error::len_error::LenError, packet_slice::BabelPacketSlice},
 };
@@ -54,24 +50,6 @@ impl<'input, E: AddressExtension, const MN: u8, const V: u8> Parser<'input, E, M
             ae1_default_prefix: None,
             ae2_default_prefix: None,
         })
-    }
-    /// Decodes an address that is known to not be compressed.
-    pub fn decode_non_compressed(
-        &self,
-        ae: &AddressEncoding<E>,
-        input: &'input [u8],
-    ) -> Result<((&'input [u8], &'input [u8]), Option<Address<E>>), AddressDecodeError> {
-        match ae {
-            AddressEncoding::WildCard => Ok((input.split_at(0), None)),
-            AddressEncoding::Ipv4 => todo!("IPv4 impl"),
-            AddressEncoding::Ipv6 => todo!("Ipv6 impl"),
-            AddressEncoding::LocalIpv6 => todo!("Link local IPv6 impl"),
-            AddressEncoding::Extension(_e) => {
-                Err(AddressDecodeError::UnknownAddressEncoding)
-                //decode_outer(&mut self.extension, ae, input)
-            }
-            AddressEncoding::Reserved => Err(AddressDecodeError::ReservedEncoding),
-        }
     }
 
     /// Sets the default prefix for an update TLV for AE 1, this is the state that is used to decode

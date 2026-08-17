@@ -19,20 +19,6 @@ pub enum Address<E: AddressExtension> {
 }
 
 #[derive(Debug, ErrorD)]
-pub enum AddressDecodeError {
-    #[error("Wildcard addresses cannot be decoded, they are zero bytes.")]
-    CannotDecodeWildcard,
-    #[error("Encountered an unknown address encoding.")]
-    UnknownAddressEncoding,
-    #[error("Attempted to decode a reserved address encoding value")]
-    ReservedEncoding,
-    #[error("Address byte array was not long enough")]
-    AddressTooShort,
-    #[error("Address is malformed")]
-    MalformedAddress,
-}
-
-#[derive(Debug, ErrorD)]
 pub enum AddressEncodeError {
     #[error("Cannot encode custom address encoding into reserved value.")]
     NiceTry,
@@ -54,13 +40,6 @@ pub trait AddressExtension: Ord + Copy + DebugT + Default {
     type ExtensionEncoding: DebugT + Eq;
     /// User defined new address type.
     type ExtensionAddress: HashT + DebugT + Copy + Ord + Eq;
-
-    /// Decode the given address from the buffer.
-    fn decode(
-        &mut self,
-        ae: u8,
-        input: &[u8],
-    ) -> Result<(Self::ExtensionAddress, usize), AddressDecodeError>;
 
     /// Encode the given address into the buffer.
     ///
@@ -97,13 +76,6 @@ impl AddressExtension for NoAddressExtension {
     type ExtensionEncoding = Infallible;
     type ExtensionAddress = Infallible;
 
-    fn decode(
-        &mut self,
-        _ae: u8,
-        _input: &[u8],
-    ) -> Result<(Infallible, usize), AddressDecodeError> {
-        Err(AddressDecodeError::UnknownAddressEncoding)
-    }
     fn encode(&mut self, addr: &Infallible, _buf: &mut [u8]) -> Result<usize, AddressEncodeError> {
         match *addr {} // unreachable: Infallible can't be constructed.
     }
