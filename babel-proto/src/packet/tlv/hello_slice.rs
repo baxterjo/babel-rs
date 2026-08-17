@@ -61,9 +61,6 @@ impl HelloFlags {
 /// |            Seqno              |          Interval             |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// ```
-///
-/// Note: `Type` and `Length` fields are not held by the struct as they have no value beyond
-/// parsing and encoding.
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct HelloSlice<'a> {

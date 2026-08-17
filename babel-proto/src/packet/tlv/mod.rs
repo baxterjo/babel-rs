@@ -3,9 +3,9 @@ pub mod tlv_header_slice;
 pub mod tlv_slice;
 
 //#[doc(hidden)]
-//pub mod ack;
-//#[doc(hidden)]
-//pub mod ack_req;
+//pub mod ack_req_slice;
+#[doc(hidden)]
+pub mod ack_slice;
 #[doc(hidden)]
 pub mod hello_slice;
 #[doc(hidden)]

@@ -5,6 +5,10 @@ use crate::packet::{
 };
 
 /// A slice containing the header and payload of a TLV.
+///
+/// The constructor of this struct guarantees:
+///  - The TLV is not a Pad1
+///  - The slice is at least as long as the TLV header claims it is.
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(Defmt::Format))]
 pub struct TlvSlice<'a> {
@@ -31,15 +35,13 @@ impl<'a> TlvSlice<'a> {
 
     pub fn r#type(&self) -> u8 {
         // SAFETY:
-        // Safe as the constructor checks to make sure there is at least TlvHeader::Len (2) +
-        // length bytes in slice.
+        // Safe as the constructor checks to make sure there is at least TlvHeader::Len (2)
         unsafe { *self.slice.get_unchecked(0) }
     }
 
     pub fn length(&self) -> u8 {
         // SAFETY:
-        // Safe as the constructor checks to make sure there is at least TlvHeader::Len (2) +
-        // length bytes in slice.
+        // Safe as the constructor checks to make sure there is at least TlvHeader::Len (2)
         unsafe { *self.slice.get_unchecked(1) }
     }
 

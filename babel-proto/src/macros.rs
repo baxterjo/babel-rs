@@ -30,11 +30,3 @@ macro_rules! b_trace {
 macro_rules! b_debug {
     ($($arg:expr),*) => (b_log!(debug, $($arg),*));
 }
-
-macro_rules! parse_body {
-    ($body:ident, $size_of:ty) => {
-        $body
-            .split_at_checked(size_of::<$size_of>())
-            .ok_or(TlvParseError::BodyNotLongEnough)?
-    };
-}

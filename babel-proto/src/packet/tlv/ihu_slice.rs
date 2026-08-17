@@ -32,9 +32,6 @@ use crate::{
 /// |       Address...
 /// +-+-+-+-+-+-+-+-+-+-+-+-
 /// ```
-///
-/// Note: `Type`, `Length`, and `Reserved` fields are not held by the struct as they have no value
-/// beyond parsing and encoding.
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct IhuSlice<'a> {
@@ -135,7 +132,7 @@ mod test {
     #[test]
     fn normal_slice() {
         let packet: &[u8] = &[
-            5,  // Hello Type ID
+            5,  // IHU Type ID
             19, // Length
             1,  // AE
             0,  // Reserved
@@ -148,7 +145,7 @@ mod test {
         let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
         assert_eq!(tlv_slice.r#type(), 5, "Incorrect type ID");
         assert_eq!(tlv_slice.length(), 19, "Incorrect length");
-        let ihu = IhuSlice::from_untyped(tlv_slice).expect("Hello should parse.");
+        let ihu = IhuSlice::from_untyped(tlv_slice).expect("IHU should parse.");
 
         let ae: AddressEncoding<NoExtension> =
             AddressEncoding::try_from(ihu.ae()).expect("Should be known address encoding.");
@@ -171,7 +168,7 @@ mod test {
     fn tlv_with_bad_length() {
         // Declared length is less than TlvHeader::LEN + Self::MIN_LEN
         let packet: &[u8] = &[
-            5, // Hello Type ID
+            5, // IHU Type ID
             5, // Length
             1, // AE
             0, // Reserved
@@ -189,7 +186,7 @@ mod test {
 
         // Declared length is greater than TlvHeader::LEN + Self::MIN_LEN but address is too short.
         let packet: &[u8] = &[
-            5, // Hello Type ID
+            5, // IHU Type ID
             8, // Length
             1, // AE
             0, // Reserved

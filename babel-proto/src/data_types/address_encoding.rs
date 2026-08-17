@@ -2,7 +2,7 @@ use core::fmt::Debug;
 
 use thiserror::Error;
 
-use crate::extension::{address_encoding::AddressEncodingExt, NoExtension};
+use crate::extension::address_encoding::AddressEncodingExt;
 
 #[derive(Debug, Error)]
 pub enum AddressEncodingError<E>
