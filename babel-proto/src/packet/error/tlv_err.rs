@@ -1,7 +1,7 @@
 use crate::packet::error::len_error::LenError;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum TlvError {
     #[error("This TLV is a Pad1 TLV, so a header slice cannot be made.")]
     Pad1,

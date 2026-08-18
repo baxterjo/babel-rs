@@ -307,6 +307,15 @@ impl ops::Div<u8> for Duration {
     }
 }
 
+impl ops::Div<Duration> for Duration {
+    type Output = u64;
+    fn div(self, rhs: Duration) -> Self::Output {
+        let lhs_micros = self.as_micros();
+        let rhs_micros = rhs.as_micros();
+        lhs_micros / rhs_micros
+    }
+}
+
 impl ops::DivAssign<u8> for Duration {
     fn div_assign(&mut self, rhs: u8) {
         self.micros /= rhs as u64;

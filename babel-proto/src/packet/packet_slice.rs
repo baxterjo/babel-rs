@@ -3,16 +3,17 @@ use crate::packet::{
     len_source::LenSource,
     packet_header::BabelPacketHeader,
     packet_header_slice::BabelPacketHeaderSlice,
+    tlv::reader::TlvReader,
     utils::get_unchecked_be_u16,
 };
 
 /// A slice containing the header, body, and trailer of a Babel Packet
 #[derive(Debug)]
-pub struct BabelPacketSlice<'a> {
+pub struct PacketSlice<'a> {
     slice: &'a [u8],
 }
 
-impl<'a> BabelPacketSlice<'a> {
+impl<'a> PacketSlice<'a> {
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, LenError> {
         let header = BabelPacketHeaderSlice::from_slice(slice)?;
 
@@ -79,6 +80,11 @@ impl<'a> BabelPacketSlice<'a> {
         }
     }
 
+    /// Returns an iterator that iterates over the TLV's in the packet body.
+    pub fn body_reader(&self) -> TlvReader<'a> {
+        TlvReader::new(self.body())
+    }
+
     /// Returns the slice containing the Babel packet trailer.
     pub fn trailer(&self) -> &'a [u8] {
         let body_length: usize = self.body_length().into();
@@ -91,6 +97,11 @@ impl<'a> BabelPacketSlice<'a> {
             self.slice
                 .get_unchecked(body_length + BabelPacketHeader::LEN..self.slice.len())
         }
+    }
+
+    /// Returns an iterator that iterates over the packet trailer.
+    pub fn trailer_reader(&self) -> TlvReader<'a> {
+        TlvReader::new(self.trailer())
     }
 }
 
@@ -108,7 +119,7 @@ mod test {
             11, 12, 13, // Trailer
         ];
 
-        let packet_slice = BabelPacketSlice::from_slice(packet).expect("Packet should parse");
+        let packet_slice = PacketSlice::from_slice(packet).expect("Packet should parse");
 
         assert_eq!(packet_slice.magic(), 42, "Magic incorrect");
         assert_eq!(packet_slice.version(), 2, "Version incorrect");
@@ -131,7 +142,7 @@ mod test {
             11, 12, 13, // Trailer
         ];
 
-        BabelPacketSlice::from_slice(packet).expect_err("Packet should not parse");
+        PacketSlice::from_slice(packet).expect_err("Packet should not parse");
     }
 
     #[test]
@@ -143,7 +154,7 @@ mod test {
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, // Body
         ];
 
-        let packet_slice = BabelPacketSlice::from_slice(packet).expect("Packet should parse");
+        let packet_slice = PacketSlice::from_slice(packet).expect("Packet should parse");
 
         assert_eq!(packet_slice.magic(), 42, "Magic incorrect");
         assert_eq!(packet_slice.version(), 2, "Version incorrect");

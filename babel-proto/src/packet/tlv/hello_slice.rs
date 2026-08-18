@@ -30,11 +30,11 @@ use crate::{
 pub struct HelloFlags(u16);
 
 impl HelloFlags {
-    fn is_unicast(&self) -> bool {
+    pub fn is_unicast(&self) -> bool {
         (self.0 & 0x8000u16) > 0u16
     }
 
-    fn is_multicast(&self) -> bool {
+    pub fn is_multicast(&self) -> bool {
         !self.is_unicast()
     }
 }

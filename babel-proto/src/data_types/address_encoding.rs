@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::extension::address_encoding::AddressEncodingExt;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum AddressEncodingError<E>
 where
     E: AddressEncodingExt,

@@ -82,7 +82,7 @@ mod test {
     fn normal_slice() {
         // With sub_tlvs
         let packet: &[u8] = &[
-            2,  // Ack Type ID
+            2,  // Ack req Type ID
             15, // Length
             0, 0, // Reserved
             0x80, 0x80, // Opaque
@@ -100,7 +100,7 @@ mod test {
 
         // Without sub_tlvs
         let packet: &[u8] = &[
-            2, // Ack Type ID
+            2, // Ack req Type ID
             6, // Length
             0, 0, // Reserved
             0x80, 0x80, // Opaque

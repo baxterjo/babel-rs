@@ -20,6 +20,7 @@ impl<'a> TlvHeaderSlice<'a> {
             layer_start_offset: 0,
         })?;
 
+        // In this instance there will be no length field.
         if *type_id == 0 {
             return Err(TlvError::Pad1);
         }

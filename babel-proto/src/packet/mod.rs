@@ -14,7 +14,7 @@ pub mod len_source;
 pub mod packet_header;
 pub mod packet_header_slice;
 pub mod packet_slice;
-pub mod parser_state;
+pub mod parser;
 pub mod tlv;
 
 pub(crate) mod utils;

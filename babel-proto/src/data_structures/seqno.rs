@@ -29,6 +29,13 @@ impl ops::AddAssign<u16> for SeqNo {
     }
 }
 
+impl ops::Sub<SeqNo> for SeqNo {
+    type Output = Self;
+    fn sub(self, rhs: SeqNo) -> Self::Output {
+        Self(self.0.wrapping_sub(rhs.0))
+    }
+}
+
 /// 3.2.1-7: Given two sequence numbers s and s', the relation s is less than s' (s < s') is defined
 /// by the following:
 

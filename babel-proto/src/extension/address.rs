@@ -1,3 +1,4 @@
+use core::fmt::Debug;
 use core::{convert::Infallible, error::Error};
 
 use crate::{
@@ -10,7 +11,7 @@ use crate::{
 /// This is useful for running Babel over transports that the spec is not written for (e.g.: BLE)
 pub trait AddressExt
 where
-    Self: Sized + Ord + Copy,
+    Self: Debug + Sized + Ord + Copy,
 {
     type Error: Error;
     type Encoding: AddressEncodingExt;
@@ -23,10 +24,10 @@ where
 impl AddressExt for NoExtension {
     type Error = Infallible;
     type Encoding = NoExtension;
-    fn as_bytes(&self, ae: &NoExtension) -> &[u8] {
+    fn as_bytes(&self, _ae: &NoExtension) -> &[u8] {
         unreachable!("The NoExtension struct should not be constructable.")
     }
-    fn from_bytes(ae: &NoExtension, bytes: &[u8]) -> Result<Self, AddressError<Self>> {
+    fn from_bytes(_ae: &NoExtension, _bytes: &[u8]) -> Result<Self, AddressError<Self>> {
         unreachable!("The NoExtension struct should not be constructable.")
     }
 }

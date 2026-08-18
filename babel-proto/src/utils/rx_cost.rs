@@ -28,3 +28,5 @@ impl Deref for RxCost {
         &self.0
     }
 }
+
+pub type TxCost = RxCost;

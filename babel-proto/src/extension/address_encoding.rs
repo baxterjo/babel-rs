@@ -7,9 +7,9 @@ use crate::{data_types::address_encoding::AddressEncodingError, extension::NoExt
 /// Meant to be used in conjunction with [`AddressExt`](crate::extension::address::AddressExt)
 pub trait AddressEncodingExt
 where
-    Self: Debug + Sized,
+    Self: Debug + Sized + PartialEq + Eq,
 {
-    type Error: ErrorT;
+    type Error: ErrorT + PartialEq + Eq;
 
     fn from_value(_value: u8) -> Result<Self, AddressEncodingError<Self>>;
     fn as_value(&self) -> u8;

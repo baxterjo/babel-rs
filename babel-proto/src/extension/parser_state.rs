@@ -1,6 +1,8 @@
 use core::fmt::Debug;
 
-use crate::extension::{address::AddressExt, address_encoding::AddressEncodingExt, NoExtension};
+use crate::extension::{
+    address::AddressExt, address_encoding::AddressEncodingExt, NoStateExtension,
+};
 
 /// Extends the parser state to operate with address encoding extensions.
 ///
@@ -17,9 +19,9 @@ where
     fn set_default_for_family(&mut self, ae: &Self::AddressEncoding, address: Self::Address);
 }
 
-impl ParserStateExt for NoExtension {
-    type AddressEncoding = NoExtension;
-    type Address = NoExtension;
+impl<A: AddressExt> ParserStateExt for NoStateExtension<A> {
+    type Address = A;
+    type AddressEncoding = A::Encoding;
     fn get_default_for_family(&self, _ae: &Self::AddressEncoding) -> Option<&Self::Address> {
         unreachable!("The NoExtension struct should not be constructable.")
     }
