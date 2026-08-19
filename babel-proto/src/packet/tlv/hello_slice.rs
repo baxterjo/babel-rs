@@ -32,12 +32,19 @@ use crate::{
 pub struct HelloFlags(u16);
 
 impl HelloFlags {
+    pub fn new(unicast: bool) -> Self {
+        Self(0 | (unicast as u16) << 15)
+    }
     pub fn is_unicast(&self) -> bool {
         (self.0 & 0x8000u16) > 0u16
     }
 
     pub fn is_multicast(&self) -> bool {
         !self.is_unicast()
+    }
+
+    pub fn to_wire(&self) -> [u8; 2] {
+        self.0.to_be_bytes()
     }
 }
 
@@ -157,6 +164,12 @@ mod test {
     use crate::packet::tlv::tlv_slice::TlvSlice;
 
     use super::*;
+
+    #[test]
+    fn hello_flags_create_as_expected() {
+        assert!(HelloFlags::new(true).is_unicast());
+        assert!(HelloFlags::new(false).is_multicast());
+    }
 
     #[test]
     fn normal_slice() {

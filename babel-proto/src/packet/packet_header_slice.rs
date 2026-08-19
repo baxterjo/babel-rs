@@ -23,6 +23,7 @@ impl Debug for PacketHeaderSlice<'_> {
 }
 
 impl<'a> PacketHeaderSlice<'a> {
+    pub const LEN: usize = 4;
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, LenError> {
         let slice = slice.get(0..BabelPacketHeader::LEN).ok_or(LenError {
             required_len: BabelPacketHeader::LEN,

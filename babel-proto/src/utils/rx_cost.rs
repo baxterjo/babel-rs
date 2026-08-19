@@ -9,7 +9,7 @@ impl RxCost {
         Self(u16::from_be_bytes(wire.into()))
     }
 
-    pub fn as_wire(&self) -> [u8; 2] {
+    pub fn to_wire(&self) -> [u8; 2] {
         self.0.to_be_bytes()
     }
 

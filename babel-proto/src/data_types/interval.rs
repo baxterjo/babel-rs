@@ -9,7 +9,7 @@ impl Interval {
         Self(Duration::from_centis(u16::from_be_bytes(raw).into()))
     }
 
-    pub fn as_wire(&self) -> [u8; 2] {
+    pub fn to_wire(&self) -> [u8; 2] {
         (self.0.as_centis() as u16).to_be_bytes()
     }
 

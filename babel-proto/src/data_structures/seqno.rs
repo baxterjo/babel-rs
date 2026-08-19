@@ -3,6 +3,12 @@ use core::{cmp::Ordering, ops};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SeqNo(pub u16);
 
+impl SeqNo {
+    pub fn to_wire(&self) -> [u8; 2] {
+        self.0.to_be_bytes()
+    }
+}
+
 impl ops::Add for SeqNo {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
