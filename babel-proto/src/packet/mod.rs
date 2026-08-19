@@ -8,7 +8,6 @@
 //! unless they are safe to access using `unsafe`.
 //! - Accessors get field values (via copy) on demand.
 
-// DEVELOPERS NOTE: A lot of the packet parsing for
 pub mod error;
 pub mod len_source;
 pub mod packet_header;
@@ -16,5 +15,6 @@ pub mod packet_header_slice;
 pub mod packet_slice;
 pub mod parser;
 pub mod tlv;
+pub mod writer;
 
 pub(crate) mod utils;
