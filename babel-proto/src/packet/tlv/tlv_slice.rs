@@ -1,3 +1,5 @@
+use core::fmt::Debug;
+
 use crate::packet::{
     error::{layer::Layer, len_error::LenError, tlv_err::TlvError},
     len_source::LenSource,
@@ -9,10 +11,17 @@ use crate::packet::{
 /// The constructor of this struct guarantees:
 ///  - The TLV is not a Pad1
 ///  - The slice is at least as long as the TLV header claims it is.
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(Defmt::Format))]
 pub struct TlvSlice<'a> {
     slice: &'a [u8],
+}
+
+impl Debug for TlvSlice<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TlvSlice")
+            .field("type", &self.r#type())
+            .field("length", &self.length())
+            .finish()
+    }
 }
 
 impl<'a> TlvSlice<'a> {
@@ -31,6 +40,12 @@ impl<'a> TlvSlice<'a> {
         })?;
 
         Ok(Self { slice })
+    }
+
+    pub fn from_typed<T: TypedTlv<'a>>(typed: &'a T) -> Self {
+        Self {
+            slice: typed.slice(),
+        }
     }
 
     pub fn r#type(&self) -> u8 {

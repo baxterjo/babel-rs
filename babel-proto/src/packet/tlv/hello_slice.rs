@@ -1,8 +1,10 @@
+use core::fmt::Debug;
+
 use crate::{
     data_structures::seqno::SeqNo,
     data_types::Interval,
     packet::{
-        tlv::{tlv_header::TlvHeader, TypedTlv},
+        tlv::{tlv_header::TlvHeader, tlv_slice::TlvSlice, TypedTlv},
         utils::get_unchecked_be_u16,
     },
     utils::Duration,
@@ -25,7 +27,7 @@ use crate::{
 ///
 /// X:
 ///     all other bits MUST be sent as 0 and silently ignored on reception.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct HelloFlags(u16);
 
@@ -36,6 +38,14 @@ impl HelloFlags {
 
     pub fn is_multicast(&self) -> bool {
         !self.is_unicast()
+    }
+}
+
+impl Debug for HelloFlags {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HelloFlags")
+            .field("unicast", &self.is_unicast())
+            .finish()
     }
 }
 
@@ -61,10 +71,20 @@ impl HelloFlags {
 /// |            Seqno              |          Interval             |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// ```
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct HelloSlice<'a> {
     slice: &'a [u8],
+}
+
+impl Debug for HelloSlice<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HelloSlice")
+            .field("type", &TlvSlice::from_typed(self).r#type())
+            .field("length", &TlvSlice::from_typed(self).length())
+            .field("flags", &self.flags())
+            .field("seqno", &self.seqno())
+            .field("interval", &self.interval())
+            .finish()
+    }
 }
 
 impl<'a> TypedTlv<'a> for HelloSlice<'a> {

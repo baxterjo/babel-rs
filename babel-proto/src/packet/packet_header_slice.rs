@@ -1,3 +1,5 @@
+use core::fmt::Debug;
+
 use crate::packet::{
     error::{layer::Layer, len_error::LenError},
     len_source::LenSource,
@@ -5,11 +7,22 @@ use crate::packet::{
     utils::get_unchecked_be_u16,
 };
 
-pub struct BabelPacketHeaderSlice<'a> {
+pub struct PacketHeaderSlice<'a> {
     slice: &'a [u8],
 }
 
-impl<'a> BabelPacketHeaderSlice<'a> {
+impl Debug for PacketHeaderSlice<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PacketHeaderSlice")
+            .field("magic", &self.magic())
+            .field("version", &self.version())
+            .field("body_length", &self.body_length())
+            .field("len", &self.slice.len())
+            .finish()
+    }
+}
+
+impl<'a> PacketHeaderSlice<'a> {
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, LenError> {
         let slice = slice.get(0..BabelPacketHeader::LEN).ok_or(LenError {
             required_len: BabelPacketHeader::LEN,

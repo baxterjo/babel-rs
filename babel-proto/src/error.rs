@@ -1,11 +1,20 @@
 use thiserror::Error;
 
-use crate::{data_structures::interface::InterfaceTableError, packet::error::len_error::LenError};
+use crate::{
+    data_structures::{interface::InterfaceTableError, neighbour::NeighbourTableError},
+    extension::address::AddressExt,
+    packet::error::len_error::LenError,
+};
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum BabelError {
+pub enum BabelError<A>
+where
+    A: AddressExt,
+{
     #[error(transparent)]
     Len(#[from] LenError),
     #[error(transparent)]
     IfaceTable(#[from] InterfaceTableError),
+    #[error(transparent)]
+    NeighbourTable(#[from] NeighbourTableError<A>),
 }

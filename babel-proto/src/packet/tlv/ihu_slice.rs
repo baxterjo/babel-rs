@@ -1,9 +1,11 @@
+use core::fmt::Debug;
+
 use crate::{
     data_types::Interval,
     packet::{
         error::{layer::Layer, len_error::LenError, tlv_err::TlvError},
         len_source::LenSource,
-        tlv::{tlv_header::TlvHeader, TypedTlv},
+        tlv::{tlv_header::TlvHeader, tlv_slice::TlvSlice, TypedTlv},
         utils::get_unchecked_be_u16,
     },
     utils::{rx_cost::RxCost, Duration},
@@ -32,10 +34,20 @@ use crate::{
 /// |       Address...
 /// +-+-+-+-+-+-+-+-+-+-+-+-
 /// ```
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct IhuSlice<'a> {
     slice: &'a [u8],
+}
+
+impl Debug for IhuSlice<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("IhuSlice")
+            .field("type", &TlvSlice::from_typed(self).r#type())
+            .field("length", &TlvSlice::from_typed(self).length())
+            .field("ae", &self.ae())
+            .field("rx_cost", &self.rx_cost())
+            .field("interval", &self.interval())
+            .finish()
+    }
 }
 
 impl<'a> TypedTlv<'a> for IhuSlice<'a> {

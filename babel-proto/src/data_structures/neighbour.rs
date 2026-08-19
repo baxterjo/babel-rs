@@ -122,7 +122,7 @@ where
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct NeighbourIndex<A>(InterfaceHandle, Address<A>)
+pub struct NeighbourIndex<A>(pub InterfaceHandle, pub Address<A>)
 where
     A: AddressExt;
 

@@ -31,17 +31,8 @@ pub use ihu_slice::IhuSlice;
 use crate::packet::{
     error::{layer::Layer, len_error::LenError, tlv_err::TlvError},
     len_source::LenSource,
-    tlv::{pad_slice::PadNSlice, tlv_slice::TlvSlice},
+    tlv::tlv_slice::TlvSlice,
 };
-
-pub enum Tlv<'a> {
-    Pad1,
-    PadN(PadNSlice<'a>),
-    AckReq(AckReqSlice<'a>),
-    Ack(AckSlice<'a>),
-    Hello(HelloSlice<'a>),
-    Ihu(IhuSlice<'a>),
-}
 
 /// Trait that defines a TLV with a known `Type` value and structure.
 ///

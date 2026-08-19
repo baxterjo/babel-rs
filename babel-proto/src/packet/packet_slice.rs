@@ -1,21 +1,34 @@
+use core::fmt::Debug;
+
 use crate::packet::{
     error::{layer::Layer, len_error::LenError},
     len_source::LenSource,
     packet_header::BabelPacketHeader,
-    packet_header_slice::BabelPacketHeaderSlice,
+    packet_header_slice::PacketHeaderSlice,
     tlv::reader::TlvReader,
     utils::get_unchecked_be_u16,
 };
 
 /// A slice containing the header, body, and trailer of a Babel Packet
-#[derive(Debug)]
 pub struct PacketSlice<'a> {
     slice: &'a [u8],
 }
 
+impl Debug for PacketSlice<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PacketSlice")
+            .field("magic", &self.magic())
+            .field("version", &self.version())
+            .field("body_length", &self.body_length())
+            .field("trailer_len", &self.trailer().len())
+            .field("total_len", &self.slice.len())
+            .finish()
+    }
+}
+
 impl<'a> PacketSlice<'a> {
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, LenError> {
-        let header = BabelPacketHeaderSlice::from_slice(slice)?;
+        let header = PacketHeaderSlice::from_slice(slice)?;
 
         let min_len: usize = header.body_length().into();
 

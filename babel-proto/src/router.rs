@@ -3,8 +3,9 @@ use core::marker::PhantomData;
 use managed::ManagedSlice;
 
 use crate::data_structures::interface::{Interface, InterfaceHandle};
-use crate::data_structures::neighbour::Neighbour;
+use crate::data_structures::neighbour::{Neighbour, NeighbourIndex};
 use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
+use crate::data_structures::route::{Route, RouteTable};
 use crate::data_structures::{interface::InterfaceTable, neighbour::NeighbourTable};
 use crate::data_types::{Address, Interval, RouterId};
 use crate::error::BabelError;
@@ -15,6 +16,7 @@ use crate::input::{Input, Receive};
 use crate::packet::packet_header::BabelPacketHeader;
 use crate::packet::packet_slice::PacketSlice;
 use crate::packet::parser::Parser;
+use crate::utils::{Duration, Instant};
 use crate::InterfaceId;
 
 pub struct BabelRouter<
@@ -27,6 +29,7 @@ pub struct BabelRouter<
     P: ParserStateExt,
     A: AddressExt,
 {
+    /// Router ID of this Babel router. This must be globally unique within your routing domain.
     id: RouterId,
 
     iface_table: InterfaceTable<'storage>,
@@ -35,6 +38,9 @@ pub struct BabelRouter<
 
     pending_seqno: PendingSeqnoRequestTable<'storage, A>,
 
+    route_table: RouteTable<'storage, A>,
+
+    // Extension markers
     _state_ext_marker: PhantomData<P>,
     _addr_ext_marker: PhantomData<A>,
 }
@@ -51,22 +57,25 @@ where
     /// `iface_storage`: User provided storage that will be used internally.
     /// `neighbour_storage`: User provided storage that will be used internally.
     /// `pending_seqno_storage`: User provided storage that will be used internally.
-    pub fn new_with_storage<IF, N, PS>(
+    pub fn new_with_storage<IF, N, PS, R>(
         id: RouterId,
         iface_storage: IF,
         neighbour_storage: N,
         pending_seqno_storage: PS,
+        route_table_storage: R,
     ) -> Self
     where
         IF: Into<ManagedSlice<'storage, Option<Interface>>>,
         N: Into<ManagedSlice<'storage, Option<Neighbour<A>>>>,
         PS: Into<ManagedSlice<'storage, Option<SeqnoRequest<A>>>>,
+        R: Into<ManagedSlice<'storage, Option<Route<A>>>>,
     {
         Self {
             id,
             iface_table: InterfaceTable::new_with_storage(iface_storage),
             neighbor_table: NeighbourTable::new_with_storage(neighbour_storage),
             pending_seqno: PendingSeqnoRequestTable::new_with_storage(pending_seqno_storage),
+            route_table: RouteTable::new_with_storage(route_table_storage),
             _state_ext_marker: PhantomData,
             _addr_ext_marker: PhantomData,
         }
@@ -83,6 +92,7 @@ where
             iface_table: InterfaceTable::new(),
             neighbor_table: NeighbourTable::new(),
             pending_seqno: PendingSeqnoRequestTable::new(),
+            route_table: RouteTable::new(),
             _state_ext_marker: PhantomData,
             _addr_ext_marker: PhantomData,
         }
@@ -104,7 +114,7 @@ where
         id: I,
         hello_interval: Option<HI>,
         update_interval: Option<UI>,
-    ) -> Result<InterfaceHandle, BabelError>
+    ) -> Result<InterfaceHandle, BabelError<A>>
     where
         I: InterfaceId,
         HI: Into<Interval>,
@@ -115,9 +125,35 @@ where
             .register_interface(name, id, hello_interval, update_interval)?)
     }
 
-    pub fn add_neighbour(&mut self, interface: InterfaceHandle, address: Address<A>) {}
+    /// Add a new neighbour to the router.
+    ///
+    /// Babel is designed to discover neighbours through multicast hello TLVs. But it allows for
+    /// neighbours to be discovered through methods outside of the routing protocol. If there is
+    /// some out of band method for neighbour discovery in your application, this is where you will
+    /// tell the router about the existance of the neighbour.
+    ///
+    /// Once the neighbour has been added, it must still conform to the spec to stay in the
+    /// neighbour table. If it has not been seen or heard from in a while it will automatically be
+    /// removed from the neighbour table.
+    pub fn add_neighbour(
+        &mut self,
+        now: Instant,
+        interface: InterfaceHandle,
+        address: Address<A>,
+        ucast_hello_interval: Option<Duration>,
+    ) -> Result<(), BabelError<A>> {
+        Ok(self.neighbor_table.add_neighbour(
+            now,
+            &NeighbourIndex(interface, address),
+            ucast_hello_interval.map(Interval::from),
+        )?)
+    }
 
-    pub fn handle_input<'input>(&mut self, input: Receive<'input, A>) -> Result<(), BabelError> {
+    pub fn handle_input<'input>(
+        &mut self,
+        now: Instant,
+        input: Receive<'input, A>,
+    ) -> Result<(), BabelError<A>> {
         let parser: Parser<P> = Parser::default();
         let packet = PacketSlice::from_slice(input.contents)?;
 
