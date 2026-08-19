@@ -1,43 +1,57 @@
-use core::ops::Deref;
+use core::{marker::PhantomData, ops::Deref};
 
 use managed::ManagedSlice;
 use thiserror::Error;
+// Attribution: Typestate writer inspired by [etherparse](https://docs.rs/etherparse/latest/etherparse/index.html)
 
 /// A cursor utility to write to buffers easily.
 #[derive(Debug)]
-pub(crate) struct ManagedSliceCursor<'a> {
+pub(crate) struct PacketWriter {}
+
+impl PacketWriter {
+    pub(crate) fn new_packet<'a, T>(
+        magic: u8,
+        version: u8,
+        buf: T,
+    ) -> PacketWriterStep<PacketHeaders>
+    where
+        T: Into<ManagedSlice<'a, u8>>,
+    {
+    }
+}
+
+pub(crate) struct PacketWriterStep<'a, LastStep> {
+    state: PacketState<'a>,
+    _marker: PhantomData<LastStep>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PacketState<'a> {
     buf: ManagedSlice<'a, u8>,
     pos: usize,
 }
 
-impl PartialEq<&[u8]> for ManagedSliceCursor<'_> {
+impl PartialEq<&[u8]> for PacketState<'_> {
     fn eq(&self, other: &&[u8]) -> bool {
         self.buf.deref() == *other
     }
 }
 
 #[cfg(any(feature = "std", feature = "alloc"))]
-impl PartialEq<Vec<u8>> for ManagedSliceCursor<'_> {
+impl PartialEq<Vec<u8>> for PacketState<'_> {
     fn eq(&self, other: &Vec<u8>) -> bool {
         self.buf.deref() == *other
     }
 }
 
-impl<'a> Deref for ManagedSliceCursor<'a> {
+impl<'a> Deref for PacketState<'a> {
     type Target = [u8];
     fn deref(&self) -> &Self::Target {
         &self.buf
     }
 }
 
-impl<'a> ManagedSliceCursor<'a> {
-    pub(crate) fn new<A: Into<ManagedSlice<'a, u8>>>(buf: A) -> Self {
-        Self {
-            buf: buf.into(),
-            pos: 0,
-        }
-    }
-
+impl<'a> PacketWriter<'a> {
     /// Returns the remaining bytes in the buf if it is borrowed.
     ///
     /// Otherwise it is assumed the slice can allocate and returns None.
