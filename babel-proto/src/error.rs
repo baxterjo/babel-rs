@@ -11,6 +11,16 @@ pub enum BabelError<A>
 where
     A: AddressExt,
 {
+    #[error(
+        "Incorrect magic number \
+        - expected: {expected}, received: {received}"
+    )]
+    IncorrectMagicNumber { expected: u8, received: u8 },
+    #[error(
+        "Incorrect version number\
+        - expected: {expected}, received: {received}"
+    )]
+    IncorrectVersionNumber { expected: u8, received: u8 },
     #[error(transparent)]
     Len(#[from] LenError),
     #[error(transparent)]

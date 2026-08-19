@@ -116,7 +116,9 @@ where
         address: Address<A>,
         ihu: IhuSlice<'_>,
     ) -> Result<(), NeighbourTableError<A>> {
+        let hold_time = self.hold_time;
         let neighbour = self.get_or_insert_default(now, &NeighbourIndex(interface, address))?;
+        neighbour.handle_ihu(now, ihu, hold_time);
         Ok(())
     }
 }

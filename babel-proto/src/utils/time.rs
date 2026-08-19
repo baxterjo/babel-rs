@@ -367,6 +367,7 @@ impl From<Duration> for ::core::time::Duration {
 /// Note: Arithmetic operations may not be exact, to get as accurate as possible, arithmetic is
 /// done in [`Duration`]'s native units (microseconds) so Babel units (centiseconds) have an
 /// acceptable level of fidelity.
+#[derive(Debug, Clone, Copy)]
 pub struct DurationMultiplier {
     pub num: u8,
     pub den: u8,

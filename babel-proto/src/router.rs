@@ -16,6 +16,8 @@ use crate::input::{Input, Receive};
 use crate::packet::packet_header::BabelPacketHeader;
 use crate::packet::packet_slice::PacketSlice;
 use crate::packet::parser::Parser;
+use crate::packet::tlv::reader::TlvReader;
+use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
 use crate::utils::{Duration, Instant};
 use crate::InterfaceId;
 
@@ -149,14 +151,98 @@ where
         )?)
     }
 
+    //  _    _          _   _ _____  _      ______
+    // | |  | |   /\   | \ | |  __ \| |    |  ____|
+    // | |__| |  /  \  |  \| | |  | | |    | |__
+    // |  __  | / /\ \ | . ` | |  | | |    |  __|
+    // | |  | |/ ____ \| |\  | |__| | |____| |____
+    // |_|  |_/_/    \_\_| \_|_____/|______|______|
+    //
+    //
+    //  _____ _   _ _____  _    _ _______
+    // |_   _| \ | |  __ \| |  | |__   __|
+    //   | | |  \| | |__) | |  | |  | |
+    //   | | | . ` |  ___/| |  | |  | |
+    //  _| |_| |\  | |    | |__| |  | |
+    // |_____|_| \_|_|     \____/   |_|
+
     pub fn handle_input<'input>(
         &mut self,
         now: Instant,
         input: Receive<'input, A>,
     ) -> Result<(), BabelError<A>> {
-        let parser: Parser<P> = Parser::default();
+        b_trace!("{:?}", input);
+        let _parser: Parser<P> = Parser::default();
         let packet = PacketSlice::from_slice(input.contents)?;
+        b_trace!("{:?}", packet);
+
+        let magic = packet.magic();
+        if magic != MN {
+            return Err(BabelError::IncorrectMagicNumber {
+                expected: MN,
+                received: magic,
+            });
+        }
+
+        let version = packet.version();
+        if version != V {
+            return Err(BabelError::IncorrectVersionNumber {
+                expected: V,
+                received: version,
+            });
+        }
+
+        for tlv_result in TlvReader::new(packet.body()) {
+            let tlv = ok_or_continue!(tlv_result);
+            b_trace!("{:?}", tlv);
+            match tlv.r#type() {
+                HelloSlice::TYPE_ID => {
+                    let hello = ok_or_continue!(HelloSlice::from_untyped(tlv));
+                    b_debug!("{:?}", hello);
+                    self.handle_hello(now, input.iface, input.source_addr, hello)?;
+                }
+                IhuSlice::TYPE_ID => {
+                    let ihu = ok_or_continue!(IhuSlice::from_untyped(tlv));
+                    b_debug!("{:?}", ihu);
+                    self.handle_ihu(now, input.iface, input.source_addr, ihu)?;
+                }
+                other => {
+                    unimplemented!("Unimplemented TLV found, Type: {}", other);
+                }
+            }
+        }
 
         Ok(())
     }
+
+    fn handle_hello(
+        &mut self,
+        now: Instant,
+        interface: InterfaceHandle,
+        address: Address<A>,
+        hello: HelloSlice<'_>,
+    ) -> Result<(), BabelError<A>> {
+        self.neighbor_table
+            .handle_hello(now, interface, address, hello)?;
+        Ok(())
+    }
+
+    fn handle_ihu(
+        &mut self,
+        now: Instant,
+        interface: InterfaceHandle,
+        address: Address<A>,
+        ihu: IhuSlice<'_>,
+    ) -> Result<(), BabelError<A>> {
+        self.neighbor_table
+            .handle_ihu(now, interface, address, ihu)?;
+        Ok(())
+    }
+
+    //  _____   ____  _      _         ____  _    _ _______ _____  _    _ _______
+    // |  __ \ / __ \| |    | |       / __ \| |  | |__   __|  __ \| |  | |__   __|
+    // | |__) | |  | | |    | |      | |  | | |  | |  | |  | |__) | |  | |  | |
+    // |  ___/| |  | | |    | |      | |  | | |  | |  | |  |  ___/| |  | |  | |
+    // | |    | |__| | |____| |____  | |__| | |__| |  | |  | |    | |__| |  | |
+    // |_|     \____/|______|______|  \____/ \____/   |_|  |_|     \____/   |_|
 }

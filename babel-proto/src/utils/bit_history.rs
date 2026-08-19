@@ -2,8 +2,11 @@
 pub struct BitHistory(u16);
 
 impl BitHistory {
+    /// Starts with a full history.
+    ///
+    /// This gives some natural hysteresis for neibour churn.
     pub fn new() -> Self {
-        Self(0)
+        Self(0xFFFF)
     }
     pub fn record(&mut self, value: bool) {
         self.0 = (self.0 << 1) | (value as u16);
