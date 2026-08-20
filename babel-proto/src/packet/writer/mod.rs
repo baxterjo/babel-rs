@@ -2,13 +2,12 @@ use managed::ManagedSlice;
 use thiserror::Error;
 
 mod finished_packet_body;
-mod finished_tlv;
-mod packet_headers;
 mod packet_state;
+mod ready;
 mod tlv;
 
-use packet_headers::PacketHeaders;
 use packet_state::PacketState;
+use ready::Ready;
 
 // Attribution: Typestate writer inspired by [etherparse](https://docs.rs/etherparse/latest/etherparse/index.html)
 
@@ -21,7 +20,7 @@ impl PacketWriter {
         magic: u8,
         version: u8,
         buf: T,
-    ) -> Result<PacketWriterStep<'a, PacketHeaders>, PacketWriterError>
+    ) -> Result<PacketWriterStep<'a, Ready>, PacketWriterError>
     where
         T: Into<ManagedSlice<'a, u8>>,
     {
@@ -31,7 +30,7 @@ impl PacketWriter {
 
         Ok(PacketWriterStep {
             state,
-            step_state: PacketHeaders {},
+            step_state: Ready {},
         })
     }
 }
@@ -128,6 +127,7 @@ mod test {
             .expect("Could not finish IHU tlv")
             .finish_packet()
             .expect("Could not finish packet")
+            .expect("There should be a packet body")
             .into();
 
         let packet_slice = PacketSlice::from_slice(&datagram).expect("Packet should slice.");

@@ -1,7 +1,6 @@
 use crate::packet::tlv::pad_slice::PadNSlice;
 use crate::packet::tlv::TypedTlv;
-use crate::packet::writer::finished_tlv::FinishedTlv;
-use crate::packet::writer::packet_headers::PacketHeaders;
+use crate::packet::writer::ready::Ready;
 
 use super::PacketWriterError;
 use super::PacketWriterStep;
@@ -10,21 +9,18 @@ use super::PacketWriterStep;
 ///
 /// The generic const indicates whether this is the first TLV or not.
 #[derive(Debug)]
-pub(crate) struct Tlv<const FIRST: bool> {
+pub(crate) struct Tlv {
     pub(crate) start_pos: usize,
     pub(crate) length_pos: usize,
     pub(crate) tlv_length: usize,
 }
 
-impl<'a> PacketWriterStep<'a, Tlv<true>> {
+impl<'a> PacketWriterStep<'a, Tlv> {
     /// State transitions for when finishing a TLV succeeds or fails when the current TLV is the first
     /// one.
     pub(crate) fn finish_tlv(
         self,
-    ) -> Result<
-        PacketWriterStep<'a, FinishedTlv>,
-        (PacketWriterError, PacketWriterStep<'a, PacketHeaders>),
-    > {
+    ) -> Result<PacketWriterStep<'a, Ready>, (PacketWriterError, PacketWriterStep<'a, Ready>)> {
         let start = self.step_state.start_pos;
         match self.finish_inner() {
             Ok(v) => Ok(v),
@@ -35,47 +31,15 @@ impl<'a> PacketWriterStep<'a, Tlv<true>> {
                     err,
                     PacketWriterStep {
                         state: writer.state,
-                        step_state: PacketHeaders {},
+                        step_state: Ready {},
                     },
                 ))
             }
         }
     }
-}
-
-impl<'a> PacketWriterStep<'a, Tlv<false>> {
-    /// State transitions for when finishing a TLV succeeds or fails when the current TLV is not
-    /// the first one.
-    pub(crate) fn finish_tlv(
-        self,
-    ) -> Result<
-        PacketWriterStep<'a, FinishedTlv>,
-        (PacketWriterError, PacketWriterStep<'a, FinishedTlv>),
-    > {
-        let start = self.step_state.start_pos;
-        match self.finish_inner() {
-            Ok(v) => Ok(v),
-            Err((err, mut writer)) => {
-                // If there is an error finishing the TLV it needs to be erased.
-                writer.state.roll_back(start);
-                Err((
-                    err,
-                    PacketWriterStep {
-                        state: writer.state,
-                        step_state: FinishedTlv {},
-                    },
-                ))
-            }
-        }
-    }
-}
-
-impl<'a, const F: bool> PacketWriterStep<'a, Tlv<F>> {
     /// Performs the inner length check and backfill function. Does not roll back the TLV on
     /// failure.
-    fn finish_inner(
-        mut self,
-    ) -> Result<PacketWriterStep<'a, FinishedTlv>, (PacketWriterError, Self)> {
+    fn finish_inner(mut self) -> Result<PacketWriterStep<'a, Ready>, (PacketWriterError, Self)> {
         if self.step_state.tlv_length > u8::MAX.into() {
             return Err((
                 PacketWriterError::TlvLengthLargerThanMax(self.step_state.tlv_length),
@@ -93,7 +57,7 @@ impl<'a, const F: bool> PacketWriterStep<'a, Tlv<F>> {
 
         Ok(PacketWriterStep {
             state: self.state,
-            step_state: FinishedTlv {},
+            step_state: Ready {},
         })
     }
 

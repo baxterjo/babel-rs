@@ -3,12 +3,11 @@ title: Packet Writer
 ---
 
 stateDiagram-v2
-  [*] --> PacketHeaders: write_headers
-  PacketHeaders --> Tlv: write_tlv
-  Tlv --> FinishedTlv: finish_tlv
-  FinishedTlv --> Tlv: write_tlv
+  [*] --> Ready: write_headers
+  Ready --> Tlv: write_tlv
+  Tlv --> Ready: finish_tlv
   Tlv --> Tlv: write_sub_tlv
-  FinishedTlv --> FinishedPacketBody: finish_body
+  Ready --> FinishedPacketBody: finish_body
   
 
 

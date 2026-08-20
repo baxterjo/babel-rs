@@ -1,7 +1,9 @@
 use crate::data_structures::seqno::SeqNo;
 use crate::data_types::Interval;
+use crate::packet::packet_header_slice::PacketHeaderSlice;
 use crate::packet::tlv::hello_slice::HelloFlags;
 use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
+use crate::packet::writer::finished_packet_body::FinishedPacketBody;
 use crate::utils::rx_cost::RxCost;
 
 use super::PacketWriterError;
@@ -10,15 +12,35 @@ use super::tlv::Tlv;
 use super::PacketWriterStep;
 
 #[derive(Debug)]
-pub(crate) struct PacketHeaders;
+pub(crate) struct Ready;
 
-impl<'a> PacketWriterStep<'a, PacketHeaders> {
+impl<'a> PacketWriterStep<'a, Ready> {
+    pub(crate) fn finish_packet(
+        mut self,
+    ) -> Result<Option<PacketWriterStep<'a, FinishedPacketBody>>, PacketWriterError> {
+        // Check body length to see if there is anything to send.
+        let body_len = self.state.len() - PacketHeaderSlice::LEN;
+        if body_len == 0 {
+            return Ok(None);
+        } else if body_len > u16::MAX.into() {
+            return Err(PacketWriterError::PacketBodyLengthLargerThanMax(body_len));
+        }
+
+        self.state
+            .backfill_at(2, &(body_len as u16).to_be_bytes())?;
+
+        Ok(Some(PacketWriterStep {
+            state: self.state,
+            step_state: FinishedPacketBody {},
+        }))
+    }
+
     pub(crate) fn write_hello(
         self,
         flags: HelloFlags,
         seqno: SeqNo,
         interval: Interval,
-    ) -> Result<PacketWriterStep<'a, Tlv<true>>, (PacketWriterError, Self)> {
+    ) -> Result<PacketWriterStep<'a, Tlv>, (PacketWriterError, Self)> {
         // Take self
         let step = self;
 
@@ -75,7 +97,7 @@ impl<'a> PacketWriterStep<'a, PacketHeaders> {
         rx_cost: RxCost,
         interval: Interval,
         address: &[u8],
-    ) -> Result<PacketWriterStep<'a, Tlv<true>>, (PacketWriterError, Self)> {
+    ) -> Result<PacketWriterStep<'a, Tlv>, (PacketWriterError, Self)> {
         // Take self
         let step = self;
 
