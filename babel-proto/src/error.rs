@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::{
     data_structures::{interface::InterfaceTableError, neighbour::NeighbourTableError},
     extension::address::AddressExt,
-    packet::error::len_error::LenError,
+    packet::{error::len_error::LenError, writer::PacketWriterError},
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -27,4 +27,6 @@ where
     IfaceTable(#[from] InterfaceTableError),
     #[error(transparent)]
     NeighbourTable(#[from] NeighbourTableError<A>),
+    #[error(transparent)]
+    PacketWriter(#[from] PacketWriterError),
 }

@@ -1,10 +1,10 @@
 use managed::ManagedSlice;
 use thiserror::Error;
 
-mod finished_packet_body;
-mod packet_state;
-mod ready;
-mod tlv;
+pub(crate) mod finished_packet_body;
+pub(crate) mod packet_state;
+pub(crate) mod ready;
+pub(crate) mod tlv;
 
 use packet_state::PacketState;
 use ready::Ready;
@@ -72,7 +72,7 @@ impl<LastStep> PacketWriterStep<'_, LastStep> {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum PacketWriterError {
     #[error("Buffer is too small, needed {need}, have {remaining}")]
     BufferTooSmall { need: usize, remaining: usize },

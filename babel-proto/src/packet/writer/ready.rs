@@ -23,6 +23,9 @@ impl<'a> PacketWriterStep<'a, Ready> {
         if body_len == 0 {
             return Ok(None);
         } else if body_len > u16::MAX.into() {
+            // There is currently no recovery for this failure mode. Every TLV in this packet will
+            // be discarded and the router state will "think" the outgoing packet was dropped in
+            // transit.
             return Err(PacketWriterError::PacketBodyLengthLargerThanMax(body_len));
         }
 
