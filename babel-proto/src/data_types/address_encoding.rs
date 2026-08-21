@@ -68,11 +68,15 @@ where
             Self::Ipv4 => 1,
             Self::Ipv6 => 2,
             Self::LocalIpv6 => 3,
-            Self::Extension(e) => e.as_value(),
+            Self::Extension(e) => {
+                let ext_value = e.as_value();
+                if ext_value <= 3 || ext_value == 255 {
+                    return Err(AddressEncodingError::NiceTry);
+                }
+                ext_value
+            }
         };
-        if value <= 3 || value == 255 {
-            return Err(AddressEncodingError::NiceTry);
-        }
+
         Ok(value)
     }
 }

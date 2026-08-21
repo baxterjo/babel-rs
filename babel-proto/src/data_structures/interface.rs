@@ -3,10 +3,15 @@ use core::{fmt::Display, hash::Hash, slice::IterMut};
 use managed::ManagedSlice;
 use thiserror::Error;
 
-use crate::utils::{
-    storage::{InternallyKeyed, ManagedSliceExt},
-    timer::{Timer, TimerError},
-    Duration, Instant,
+use crate::{
+    data_types::Address,
+    extension::address::AddressExt,
+    utils::{
+        rx_cost::RxCost,
+        storage::{InternallyKeyed, ManagedSliceExt},
+        timer::{Timer, TimerError},
+        Duration, Instant,
+    },
 };
 
 use super::seqno::SeqNo;
@@ -16,15 +21,15 @@ pub const DEFAULT_MULTICAST_HELLO_INTERVAL_SECS: u64 = 4;
 /// Recommended message intervals indicated in [Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.10)
 pub const DEFAULT_UPDATE_INTERVAL_SECS: u64 = DEFAULT_MULTICAST_HELLO_INTERVAL_SECS * 4;
 
-pub struct InterfaceTable<'storage> {
-    inner: ManagedSlice<'storage, Option<Interface>>,
+pub struct InterfaceTable<'storage, A: AddressExt> {
+    pub(crate) inner: ManagedSlice<'storage, Option<Interface<A>>>,
 }
 
-impl<'storage> InterfaceTable<'storage> {
+impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
     /// Create a new interface table with user provided storage.
     pub fn new_with_storage<T>(table: T) -> Self
     where
-        T: Into<ManagedSlice<'storage, Option<Interface>>>,
+        T: Into<ManagedSlice<'storage, Option<Interface<A>>>>,
     {
         Self {
             inner: table.into(),
@@ -43,6 +48,7 @@ impl<'storage> InterfaceTable<'storage> {
         &mut self,
         now: Instant,
         handle: InterfaceHandle,
+        address: Address<A>,
         hello_interval: Option<Duration>,
         update_interval: Option<Duration>,
     ) -> Result<InterfaceHandle, InterfaceTableError> {
@@ -60,7 +66,7 @@ impl<'storage> InterfaceTable<'storage> {
             update_interval.unwrap_or_else(|| Duration::from_secs(DEFAULT_UPDATE_INTERVAL_SECS)),
         )?;
         // Create the new interface
-        let iface = Interface::new(handle, hello_timer, update_timer);
+        let iface: Interface<A> = Interface::new(handle, address, hello_timer, update_timer);
         let handle = iface.handle;
 
         // Insert into the interface table
@@ -77,7 +83,7 @@ impl<'storage> InterfaceTable<'storage> {
         }
     }
 
-    pub(crate) fn iter_mut(&mut self) -> IterMut<'_, Option<Interface>> {
+    pub(crate) fn iter_mut(&mut self) -> IterMut<'_, Option<Interface<A>>> {
         self.inner.iter_mut()
     }
 }
@@ -147,7 +153,7 @@ impl Display for InterfaceHandle {
 
 /// Interfaces that speak the Babel Protocol
 #[derive(Debug, Clone, Copy)]
-pub struct Interface {
+pub struct Interface<A: AddressExt> {
     /// User defined interface ID. Used to correlate the router tracked interface with user defined
     /// interfaces.
     pub(crate) handle: InterfaceHandle,
@@ -159,27 +165,51 @@ pub struct Interface {
 
     /// How often this interface should send update messages
     pub(crate) update_timer: Timer,
+
+    /// User configuration
+    pub(crate) config: InterfaceConfig<A>,
 }
 
-impl InternallyKeyed for Interface {
+impl<A: AddressExt> InternallyKeyed for Interface<A> {
     type Key = InterfaceHandle;
     fn key(&self) -> Self::Key {
         self.handle
     }
 }
 
-impl Interface {
+#[derive(Debug, Clone, Copy)]
+pub struct InterfaceConfig<A: AddressExt> {
+    pub(crate) unicast_ihu: bool,
+    pub(crate) address: Address<A>,
+    pub(crate) starting_rx_cost: RxCost,
+}
+
+impl<A: AddressExt> InterfaceConfig<A> {
+    pub fn new(address: Address<A>) -> Self {
+        Self {
+            unicast_ihu: false,
+            address,
+            starting_rx_cost: RxCost(10),
+        }
+    }
+}
+
+impl<A: AddressExt> Interface<A> {
     /// Creates a new babel interface with the given interface ID.
     ///
     /// Returns:
-    /// -
-    /// - An interface struct that will be used by the BabelRouter to keep track of interface state.
-    fn new(handle: InterfaceHandle, hello_timer: Timer, update_timer: Timer) -> Self {
+    fn new(
+        handle: InterfaceHandle,
+        address: Address<A>,
+        hello_timer: Timer,
+        update_timer: Timer,
+    ) -> Self {
         Self {
             handle,
             hello_seqno: SeqNo::default(),
             hello_timer,
             update_timer,
+            config: InterfaceConfig::new(address),
         }
     }
 }

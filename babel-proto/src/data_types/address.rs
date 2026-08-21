@@ -1,9 +1,73 @@
 //!
-use core::net::{Ipv4Addr, Ipv6Addr};
 
 use thiserror::Error;
 
 use crate::{data_types::address_encoding::AddressEncoding, extension::address::AddressExt};
+
+/// Have to create my own Ipv4Addr type because core lib doesn't allow borrowing a slice of its
+/// octets???
+// Crashing out on this FR
+#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Ipv4Addr {
+    octets: [u8; 4],
+}
+
+impl Ipv4Addr {
+    pub(crate) fn as_octets(&self) -> &[u8] {
+        &self.octets
+    }
+
+    pub(crate) fn octets(&self) -> [u8; 4] {
+        self.octets
+    }
+}
+
+impl From<core::net::Ipv4Addr> for Ipv4Addr {
+    fn from(value: core::net::Ipv4Addr) -> Self {
+        Self {
+            octets: value.octets(),
+        }
+    }
+}
+
+impl Into<core::net::Ipv4Addr> for Ipv4Addr {
+    fn into(self) -> core::net::Ipv4Addr {
+        core::net::Ipv4Addr::from_octets(self.octets)
+    }
+}
+
+/// Have to create my own Ipv6Addr type because core lib doesn't allow borrowing a slice of its
+/// octets???
+///
+// Crashing out on this FR
+#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Ipv6Addr {
+    octets: [u8; 16],
+}
+
+impl Ipv6Addr {
+    pub(crate) fn as_octets(&self) -> &[u8] {
+        &self.octets
+    }
+
+    pub(crate) fn octets(&self) -> [u8; 16] {
+        self.octets
+    }
+}
+
+impl From<core::net::Ipv6Addr> for Ipv6Addr {
+    fn from(value: core::net::Ipv6Addr) -> Self {
+        Self {
+            octets: value.octets(),
+        }
+    }
+}
+
+impl Into<core::net::Ipv6Addr> for Ipv6Addr {
+    fn into(self) -> core::net::Ipv6Addr {
+        core::net::Ipv6Addr::from_octets(self.octets)
+    }
+}
 
 /// Resolved address as described in section
 /// [4.1.4](https://datatracker.ietf.org/doc/html/rfc8966#name-address) and used in data structures
@@ -37,14 +101,14 @@ where
     Extension(E::Error),
 }
 
-impl<E> Address<E>
+impl<A> Address<A>
 where
-    E: AddressExt,
+    A: AddressExt,
 {
     pub fn from_bytes(
-        ae: AddressEncoding<E::Encoding>,
+        ae: AddressEncoding<A::Encoding>,
         bytes: &[u8],
-    ) -> Result<Self, AddressError<E>> {
+    ) -> Result<Self, AddressError<A>> {
         match ae {
             AddressEncoding::WildCard => Err(AddressError::CannotCreateFromWildCard),
             AddressEncoding::Ipv4 => {
@@ -56,7 +120,7 @@ where
                             required_len: 4,
                             len: bytes.len(),
                         })?;
-                Ok(Self::V4(Ipv4Addr::from_octets(octets)))
+                Ok(Self::V4(core::net::Ipv4Addr::from_octets(octets).into()))
             }
             AddressEncoding::Ipv6 => {
                 let octets: [u8; 16] =
@@ -67,7 +131,7 @@ where
                             required_len: 16,
                             len: bytes.len(),
                         })?;
-                Ok(Self::V6(Ipv6Addr::from_octets(octets)))
+                Ok(Self::V6(core::net::Ipv6Addr::from_octets(octets).into()))
             }
             AddressEncoding::LocalIpv6 => {
                 let suffix: [u8; 8] =
@@ -86,12 +150,52 @@ where
                     suf.copy_from_slice(&suffix);
                     whole
                 };
-                Ok(Self::V6(Ipv6Addr::from_octets(whole)))
+                Ok(Self::V6(core::net::Ipv6Addr::from_octets(whole).into()))
             }
             AddressEncoding::Extension(e) => {
-                let ext_add = E::from_bytes(&e, bytes)?;
+                let ext_add = A::from_bytes(&e, bytes)?;
                 Ok(Self::Extension(ext_add))
             }
         }
+    }
+
+    pub(crate) fn as_wire(&self) -> &[u8] {
+        match self {
+            Address::V4(v4) => &v4.as_octets(),
+            Address::V6(v6) => {
+                if v6.octets()[0..8] == [0xFE, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00] {
+                    &v6.as_octets()[9..]
+                } else {
+                    v6.as_octets()
+                }
+            }
+            Address::Extension(e) => e.as_bytes(),
+        }
+    }
+
+    pub(crate) fn encoding(&self) -> AddressEncoding<A::Encoding> {
+        match self {
+            Address::V4(_) => AddressEncoding::Ipv4,
+            Address::V6(v6) => {
+                if v6.octets()[0..8] == [0xFE, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00] {
+                    AddressEncoding::LocalIpv6
+                } else {
+                    AddressEncoding::Ipv6
+                }
+            }
+            Address::Extension(e) => AddressEncoding::Extension(e.encoding()),
+        }
+    }
+}
+
+impl<A: AddressExt> From<core::net::Ipv6Addr> for Address<A> {
+    fn from(value: core::net::Ipv6Addr) -> Self {
+        Self::V6(value.into())
+    }
+}
+
+impl<A: AddressExt> From<core::net::Ipv4Addr> for Address<A> {
+    fn from(value: core::net::Ipv4Addr) -> Self {
+        Self::V4(value.into())
     }
 }

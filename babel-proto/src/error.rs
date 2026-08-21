@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::{
     data_structures::{interface::InterfaceTableError, neighbour::NeighbourTableError},
+    data_types::address_encoding::AddressEncodingError,
     extension::address::AddressExt,
     packet::{error::len_error::LenError, writer::PacketWriterError},
 };
@@ -29,4 +30,6 @@ where
     NeighbourTable(#[from] NeighbourTableError<A>),
     #[error(transparent)]
     PacketWriter(#[from] PacketWriterError),
+    #[error(transparent)]
+    AddressEncoding(#[from] AddressEncodingError<A::Encoding>),
 }

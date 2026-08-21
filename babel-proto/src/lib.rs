@@ -8,8 +8,6 @@ extern crate alloc;
 #[cfg(all(feature = "defmt", feature = "log"))]
 compile_error!("You must enable at most one of the following features: defmt, log");
 
-use core::fmt::{Debug as DebugT, Display};
-
 #[macro_use]
 mod macros;
 
@@ -23,8 +21,6 @@ pub mod packet;
 pub mod router;
 pub mod utils;
 
-#[cfg(not(feature = "defmt"))]
-pub trait InterfaceId: DebugT + Into<[u8; 8]> + Display {}
-
-#[cfg(feature = "defmt")]
-pub trait InterfaceId: DebugT + Into<[u8; 8]> + Display + defmt::Format {}
+#[cfg(test)]
+/// Collection of white box tests that need access to `pub(crate)` visibility.
+mod tests;

@@ -25,9 +25,9 @@ pub struct NeighbourTable<'storage, A>
 where
     A: AddressExt,
 {
-    inner: ManagedSlice<'storage, Option<Neighbour<A>>>,
+    pub(crate) inner: ManagedSlice<'storage, Option<Neighbour<A>>>,
     /// The hold time of a neighbour between receiving IHU TLVs.
-    hold_time: HoldTimeMultiplier,
+    pub(crate) hold_time: HoldTimeMultiplier,
 }
 
 impl<'storage, A> NeighbourTable<'storage, A>
@@ -204,30 +204,30 @@ where
 pub struct Neighbour<A: AddressExt> {
     // Protocol state as defined by SPEC
     /// the local node's interface over which this neighbour is reachable
-    iface: InterfaceHandle,
+    pub(crate) iface: InterfaceHandle,
 
     /// the address of the neighbouring interface
-    address: Address<A>,
+    pub(crate) address: Address<A>,
 
     /// State data of a neighbour that has either been added manually or has recevied a hello.
-    state: NeighbourInitState,
+    pub(crate) state: NeighbourInitState,
 
     /// the 'transmission cost' value from the last IHU packet received from this
     /// neighbour, or FFFF hexadecimal (infinity) if the IHU hold timer for this neighbour has
     /// expired
     ///
     /// Infinity if this router has never received an IHU from this neighbour.
-    tx_cost: TxCost,
+    pub(crate) tx_cost: TxCost,
 
     /// and the IHU timer, which is set to a small multiple of the interval carried in IHU TLVs
     /// (see "IHU Hold time" in Appendix B for suggested values).
     ///
     /// None if this router has never received an IHU from this neighbour.
-    ihu_timer: Option<Timer>,
+    pub(crate) ihu_timer: Option<Timer>,
 
     // Scheduling state, required to drive Sans-IO state machine.
     /// Pending TLV's that need to go out during `poll_transmit`
-    pending: NeighbourPending,
+    pub(crate) pending: NeighbourPending,
 }
 
 #[derive(Debug)]
@@ -276,11 +276,11 @@ pub struct NeighbourPending {
     /// [Appendix B. - 4.4](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.4).
     /// But the spec is also written for only IP based transports where multicast can be assumed to
     /// work well.
-    ucast_hello: Option<Timer>,
+    pub(crate) ucast_hello: Option<Timer>,
     /// Timer for sending periodic IHU's to this neighbour.
     ///
     /// None if router has never received a hello from this neighbour.
-    ihu_timer: Option<Timer>,
+    pub(crate) ihu_timer: Option<Timer>,
 }
 
 impl<A: AddressExt> InternallyKeyed for Neighbour<A> {
@@ -390,8 +390,19 @@ impl<A: AddressExt> Neighbour<A> {
         // Update the state
         self.state = NeighbourInitState::HelloReceived(hello_info);
 
-        self.pending.ihu_timer =
-            Some(Timer::new(now, ihu_dur).expect("Interval bounds were pre-checked"))
+        let new_ihu_timer = match self.pending.ihu_timer {
+            Some(mut timer) => {
+                // If there was already an IHU timer, set it under the spec rules (increase creates
+                // an eager timer, decrease does not.)
+                timer
+                    .set_duration(ihu_dur)
+                    .expect("Interval bounds were pre-checked");
+                Some(timer)
+            }
+            // If no IHU timer was set, set an eager timer.
+            None => Some(Timer::new_eager(now, ihu_dur).expect("Interval bounds were pre-checked")),
+        };
+        self.pending.ihu_timer = new_ihu_timer;
     }
 
     fn handle_ihu(

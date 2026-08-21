@@ -9,6 +9,8 @@ pub(crate) mod tlv;
 use packet_state::PacketState;
 use ready::Ready;
 
+use crate::packet::packet_header_slice::PacketHeaderSlice;
+
 // Attribution: Typestate writer inspired by [etherparse](https://docs.rs/etherparse/latest/etherparse/index.html)
 
 /// A cursor utility to write to buffers easily.
@@ -70,10 +72,14 @@ impl<LastStep> PacketWriterStep<'_, LastStep> {
             }
         }
     }
+
+    pub(crate) fn has_tlvs(&self) -> bool {
+        self.state.position() - PacketHeaderSlice::LEN != 0
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum PacketWriterError {
+pub enum PacketWriterError {
     #[error("Buffer is too small, needed {need}, have {remaining}")]
     BufferTooSmall { need: usize, remaining: usize },
     #[error(

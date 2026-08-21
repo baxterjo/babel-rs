@@ -1,4 +1,4 @@
-use core::ops::Deref;
+use core::{fmt::Debug, ops::Deref};
 
 use managed::ManagedSlice;
 
@@ -7,12 +7,14 @@ use crate::{
     extension::address::AddressExt, utils::Duration,
 };
 
+#[derive(Debug)]
 pub enum Output<'a, A: AddressExt> {
     SetTimer(Duration),
     Transmit(Transmit<'a, A>),
 }
 
 /// Transmit payload.
+#[derive(Debug)]
 pub struct Transmit<'a, A: AddressExt> {
     /// Interface to transmit on.
     pub iface: InterfaceHandle,
@@ -22,6 +24,7 @@ pub struct Transmit<'a, A: AddressExt> {
 }
 
 /// Destination of the transmitted datagram.
+#[derive(Debug)]
 pub enum TransmitDestination<A: AddressExt> {
     /// Send the datagram to a unicast address. On the well known Babel port for your routing
     /// domain.
@@ -41,8 +44,15 @@ pub enum TransmitDestination<A: AddressExt> {
 ///
 /// The term datagram is used here as a generic term for "payloade to be sent over unreliable (or
 /// reliable if you want) transport" and does not necessarily mean UDP.
-#[derive(Debug)]
 pub struct DatagramSend<'a>(ManagedSlice<'a, u8>);
+
+impl<'a> Debug for DatagramSend<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DatagramSend")
+            .field("len", &self.len())
+            .finish()
+    }
+}
 
 impl<'a> From<ManagedSlice<'a, u8>> for DatagramSend<'a> {
     fn from(value: ManagedSlice<'a, u8>) -> Self {

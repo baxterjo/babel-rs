@@ -1,5 +1,4 @@
 use core::marker::PhantomData;
-use core::ops::Add;
 
 use managed::ManagedSlice;
 
@@ -8,13 +7,13 @@ use crate::data_structures::neighbour::{Neighbour, NeighbourIndex};
 use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
 use crate::data_structures::route::{Route, RouteTable};
 use crate::data_structures::{interface::InterfaceTable, neighbour::NeighbourTable};
-use crate::data_types::{Address, Interval, RouterId};
+use crate::data_types::{Address, RouterId};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
-use crate::input::{Input, Receive};
-use crate::output::{DatagramSend, Output, Transmit, TransmitDestination};
+use crate::input::Receive;
+use crate::output::{Output, Transmit, TransmitDestination};
 use crate::packet::packet_header::BabelPacketHeader;
 use crate::packet::packet_slice::PacketSlice;
 use crate::packet::parser::Parser;
@@ -23,8 +22,8 @@ use crate::packet::tlv::reader::TlvReader;
 use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
 use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
+use crate::utils::storage::ManagedSliceExt;
 use crate::utils::{Duration, Instant};
-use crate::InterfaceId;
 
 pub struct BabelRouter<
     'storage,
@@ -37,15 +36,15 @@ pub struct BabelRouter<
     A: AddressExt,
 {
     /// Router ID of this Babel router. This must be globally unique within your routing domain.
-    id: RouterId,
+    pub(crate) id: RouterId,
 
-    iface_table: InterfaceTable<'storage>,
+    pub(crate) iface_table: InterfaceTable<'storage, A>,
 
-    neighbor_table: NeighbourTable<'storage, A>,
+    pub(crate) neighbor_table: NeighbourTable<'storage, A>,
 
-    pending_seqno: PendingSeqnoRequestTable<'storage, A>,
+    pub(crate) pending_seqno: PendingSeqnoRequestTable<'storage, A>,
 
-    route_table: RouteTable<'storage, A>,
+    pub(crate) route_table: RouteTable<'storage, A>,
 
     // Extension markers
     _state_ext_marker: PhantomData<P>,
@@ -72,7 +71,7 @@ where
         route_table_storage: R,
     ) -> Self
     where
-        IF: Into<ManagedSlice<'storage, Option<Interface>>>,
+        IF: Into<ManagedSlice<'storage, Option<Interface<A>>>>,
         N: Into<ManagedSlice<'storage, Option<Neighbour<A>>>>,
         PS: Into<ManagedSlice<'storage, Option<SeqnoRequest<A>>>>,
         R: Into<ManagedSlice<'storage, Option<Route<A>>>>,
@@ -115,20 +114,27 @@ where
     /// [`DEFAULT_MULTICAST_HELLO_INTERVAL_SECS`](crate::data_structures::interface::DEFAULT_MULTICAST_HELLO_INTERVAL_SECS)
     /// * `update_interval`: Optional update interval. `None` will use
     /// [`DEFAULT_UPDATE_INTERVAL_SECS`](crate::data_structures::interface::DEFAULT_UPDATE_INTERVAL_SECS)
-    pub fn register_interface<I, HI, UI>(
+    pub fn register_interface<I, IA>(
         &mut self,
         now: Instant,
-        name: &'static str,
         id: I,
+        address: IA,
         hello_interval: Option<Duration>,
         update_interval: Option<Duration>,
     ) -> Result<InterfaceHandle, BabelError<A>>
     where
-        I: InterfaceId,
+        I: Into<InterfaceHandle>,
+        IA: Into<Address<A>>,
     {
-        Ok(self
-            .iface_table
-            .register_interface(now, name, id, hello_interval, update_interval)?)
+        let handle = id.into();
+        let address = address.into();
+        Ok(self.iface_table.register_interface(
+            now,
+            handle,
+            address,
+            hello_interval,
+            update_interval,
+        )?)
     }
 
     /// Add a new neighbour to the router.
@@ -319,6 +325,11 @@ where
     where
         B: Into<ManagedSlice<'output, u8>>,
     {
+        b_debug!(
+            "{} polling for output - active_iface: {:?}",
+            self.id,
+            active_interface
+        );
         // If active address ever becomes Some, then it is a unicast packet.
         let mut active_addr: Option<Address<A>> = None;
         let mut active_iface = active_interface;
@@ -348,11 +359,15 @@ where
             None => TransmitDestination::Multicast,
         };
 
-        Ok(Output::Transmit(Transmit {
+        let output = Output::Transmit(Transmit {
             iface: active_iface.expect("Somehow built a packet with no interface?"),
             destination: dest,
             contents: finished_packet.into(),
-        }))
+        });
+
+        b_debug!("{} - {:?}", self.id, output);
+
+        Ok(output)
     }
 
     fn build_packet_body<'output>(
@@ -366,16 +381,20 @@ where
         PacketWriterStep<'output, Ready>,
         (PacketWriterError, PacketWriterStep<'output, Ready>),
     > {
+        b_trace!("Polling for IHUs");
+        writer = self.poll_for_due_ihu(now, active_iface, active_addr, next_poll, writer)?;
+
         if active_addr.is_none() {
+            b_trace!("Polling for MCAST Hellos");
             writer = self.poll_for_mcast_hello(now, active_iface, next_poll, writer)?;
         }
         Ok(writer)
     }
 
-    //  ___ _  _ _   _
-    // |_ _| || | | | |
-    //  | || __ | |_| |
-    // |___|_||_|\___/
+    //  ___  ___  _    _      ___ _  _ _   _
+    // | _ \/ _ \| |  | |    |_ _| || | | | |
+    // |  _/ (_) | |__| |__   | || __ | |_| |
+    // |_|  \___/|____|____| |___|_||_|\___/
 
     fn poll_for_due_ihu<'output>(
         &mut self,
@@ -388,13 +407,95 @@ where
         PacketWriterStep<'output, Ready>,
         (PacketWriterError, PacketWriterStep<'output, Ready>),
     > {
-        todo!()
+        let mut local_min = Duration::from_micros(u64::MAX);
+
+        for neigh_opt in self.neighbor_table.iter_mut() {
+            // Skip empty slots.
+            let Some(neighbour) = neigh_opt else {
+                continue;
+            };
+
+            // If this neighbour has not yet set it's IHU timer, skip it.
+            //
+            // This timer is set when a hello is received, neighbours that have not received hellos
+            // will expire.
+            let Some(ihu_timer) = &mut neighbour.pending.ihu_timer else {
+                continue;
+            };
+
+            // If there is some time remaining in the timer, update local min and skip it.
+            if let Some(remaining) = ihu_timer.time_remaining(now) {
+                local_min = local_min.min(remaining);
+                continue;
+            }
+
+            // If the active interface has been set and is not the interface for this neighbour,
+            // skip it.
+            if active_iface.is_some_and(|iface| neighbour.iface != iface) {
+                continue;
+            } else {
+                // Otherwise claim the active address (this won't change the iface if it was
+                // already set)
+                *active_iface = Some(neighbour.iface)
+            }
+
+            // If the active address has been claimed and it is not destined for this neighbour
+            // then skip.
+            if active_addr.is_some_and(|addr| addr != neighbour.address) {
+                continue;
+            }
+
+            // Get the interface for this neighbour.
+            let iface = self
+                .iface_table
+                .inner
+                .get_by_key(&neighbour.iface)
+                .expect("Neighbour exists on unregistered interface?");
+
+            // If the active address is none, we need to check some things.
+            if active_addr.is_none() {
+                // If the interface wants unicast IHUs in this case, we need to check if this is
+                // possible.
+                if iface.config.unicast_ihu {
+                    // If the writer has TLV's there is no way of knowing which neighbour they are
+                    // destined for. Skip this neighbour.
+                    if writer.has_tlvs() {
+                        continue;
+                    } else {
+                        // Otherwise this neighbour can claim the address.
+                        *active_addr = Some(neighbour.address)
+                    }
+                }
+            }
+
+            // If loop execution has made it to this point then the IHU can be written.
+
+            // TODO: Figure out error handling
+            let ae: u8 = iface.config.address.encoding().try_into().unwrap();
+            let rx_cost = iface.config.starting_rx_cost;
+            writer = writer
+                .write_ihu(
+                    ae,
+                    rx_cost,
+                    ihu_timer.interval(),
+                    iface.config.address.as_wire(),
+                )?
+                .finish_tlv()?;
+
+            // Once the packet has been written, reset the IHU timer
+            ihu_timer.restart(now);
+        }
+
+        // Choose the minimum between next poll and local min.
+        *next_poll = local_min.min(*next_poll);
+
+        Ok(writer)
     }
 
-    //  __  __  ___   _   ___ _____   _  _ ___ _    _    ___
-    // |  \/  |/ __| /_\ / __|_   _| | || | __| |  | |  / _ \
-    // | |\/| | (__ / _ \\__ \ | |   | __ | _|| |__| |_| (_) |
-    // |_|  |_|\___/_/ \_\___/ |_|   |_||_|___|____|____\___/
+    //  ___  ___  _    _      __  __  ___   _   ___ _____   _  _ ___ _    _    ___
+    // | _ \/ _ \| |  | |    |  \/  |/ __| /_\ / __|_   _| | || | __| |  | |  / _ \
+    // |  _/ (_) | |__| |__  | |\/| | (__ / _ \\__ \ | |   | __ | _|| |__| |_| (_) |
+    // |_|  \___/|____|____| |_|  |_|\___/_/ \_\___/ |_|   |_||_|___|____|____\___/
 
     /// Polls for multicast hellos by interface.
     fn poll_for_mcast_hello<'output>(
@@ -407,20 +508,21 @@ where
         PacketWriterStep<'output, Ready>,
         (PacketWriterError, PacketWriterStep<'output, Ready>),
     > {
-        let mut min_dur = Duration::from_micros(u64::MAX);
+        let mut local_min = Duration::from_micros(u64::MAX);
         for iface_opt in self.iface_table.iter_mut() {
             // Skip empty spots in the table.
             let Some(iface) = iface_opt else {
                 continue;
             };
+            b_trace!("Polling {} for mcast hello", iface.handle);
 
-            // If the timer on the inerface hello has not fired, get the minimum between it and
+            // If the timer on the interface hello has not fired, get the minimum between it and
             // min_dur.
-            min_dur = iface
-                .hello_timer
-                .time_remaining(now)
-                .map(|dur| dur.min(min_dur))
-                .unwrap_or_else(|| min_dur);
+            if let Some(remaining) = iface.hello_timer.time_remaining(now) {
+                b_trace!("{} centis till next mcast hello", remaining.as_centis());
+                local_min = local_min.min(remaining);
+                continue;
+            }
 
             if active_iface.is_some_and(|active| active != iface.handle) {
                 // If active interface is given, skip others.
@@ -429,7 +531,11 @@ where
 
             // The first interface that requires a hello to be sent gets it.
             if iface.hello_timer.is_finished(now) {
-                b_trace!("{} mcast hello: {:?}", iface.name, iface.hello_seqno);
+                b_trace!(
+                    "[SEND] mcast hello - iface: {} - {:?}",
+                    iface.handle,
+                    iface.hello_seqno
+                );
                 // Write the hello
                 writer = writer
                     .write_hello(
@@ -448,7 +554,7 @@ where
             }
         }
 
-        *next_poll = min_dur.min(*next_poll);
+        *next_poll = local_min.min(*next_poll);
 
         Ok(writer)
     }

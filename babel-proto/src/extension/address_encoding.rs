@@ -11,7 +11,7 @@ where
 {
     type Error: ErrorT + PartialEq + Eq;
 
-    fn from_value(_value: u8) -> Result<Self, AddressEncodingError<Self>>;
+    fn from_value(value: u8) -> Result<Self, AddressEncodingError<Self>>;
     fn as_value(&self) -> u8;
     fn address_len(&self) -> usize;
     fn can_compress(&self) -> bool;

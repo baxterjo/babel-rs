@@ -40,7 +40,8 @@ impl Timer {
     ///
     /// Timers must be restarted manually after firing.
     pub fn new_eager(now: Instant, duration: Duration) -> Result<Self, TimerError> {
-        let pre_start = now + duration;
+        // Set the "start" time in the past. That way the timer fires immediately.
+        let pre_start = now - duration;
         Self::new(pre_start, duration)
     }
 
@@ -101,12 +102,17 @@ impl Timer {
 #[cfg(all(test, feature = "std"))]
 mod test {
     use super::*;
+
     #[test]
-    fn new_finished_timer() {
+    fn new_eager_timer() {
         let duration = Duration::from_micros(200);
         let now = Instant::now();
+        let future = now + Duration::from_micros(1);
         let mut eager = Timer::new_eager(now, duration).expect("Timer should be created.");
         assert!(eager.is_finished(now));
+
+        // Introduce a small delay to see if there is an overflow issue
+        assert!(eager.is_finished(future));
 
         eager.restart(now);
         assert!(!eager.is_finished(now));

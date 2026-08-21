@@ -101,10 +101,7 @@ where
                                 return Err(value);
                             }
                             #[cfg(any(feature = "std", feature = "alloc"))]
-                            ManagedSlice::Owned(o) => {
-                                b_debug!("Slice is owned, pushing.");
-                                o.push(Some(value))
-                            }
+                            ManagedSlice::Owned(o) => o.push(Some(value)),
                         }
                     }
                 }

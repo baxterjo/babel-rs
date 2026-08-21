@@ -19,7 +19,7 @@ impl<'a> PacketWriterStep<'a, Ready> {
         mut self,
     ) -> Result<Option<PacketWriterStep<'a, FinishedPacketBody>>, PacketWriterError> {
         // Check body length to see if there is anything to send.
-        let body_len = self.state.len() - PacketHeaderSlice::LEN;
+        let body_len = self.state.position() - PacketHeaderSlice::LEN;
         if body_len == 0 {
             return Ok(None);
         } else if body_len > u16::MAX.into() {
