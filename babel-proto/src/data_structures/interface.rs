@@ -1,12 +1,12 @@
-use core::hash::Hash;
+use core::{hash::Hash, slice::IterMut};
 
 use managed::ManagedSlice;
 use thiserror::Error;
 
 use crate::{
-    data_types::Interval,
     utils::{
         storage::{InternallyKeyed, ManagedSliceExt},
+        timer::{Timer, TimerError},
         Duration, Instant,
     },
     InterfaceId,
@@ -42,21 +42,35 @@ impl<'storage> InterfaceTable<'storage> {
         }
     }
 
-    pub fn register_interface<I, H, U>(
+    pub(crate) fn register_interface<I>(
         &mut self,
+        now: Instant,
         name: &'static str,
         id: I,
-        hello_interval: Option<H>,
-        update_interval: Option<U>,
+        hello_interval: Option<Duration>,
+        update_interval: Option<Duration>,
     ) -> Result<InterfaceHandle, InterfaceTableError>
     where
         I: InterfaceId,
-        H: Into<Interval>,
-        U: Into<Interval>,
     {
         b_debug!("Registering interface: {}", name);
-        let iface = Interface::new(name, id, hello_interval, update_interval);
+
+        // Create hello timer that fires immediately.
+        let hello_timer = Timer::new_eager(
+            now,
+            hello_interval
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS)),
+        )?;
+        // Update should not fire immediately as the router does not have a route table for this interface.
+        let update_timer = Timer::new(
+            now,
+            update_interval.unwrap_or_else(|| Duration::from_secs(DEFAULT_UPDATE_INTERVAL_SECS)),
+        )?;
+        // Create the new interface
+        let iface = Interface::new(name, id, hello_timer, update_timer);
         let handle = iface.handle;
+
+        // Insert into the interface table
         match self.inner.insert(iface) {
             Ok(v) if v.is_some() => {
                 b_debug!("Duplicate interface registered");
@@ -68,6 +82,10 @@ impl<'storage> InterfaceTable<'storage> {
                 Err(InterfaceTableError::Full)
             }
         }
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> IterMut<'_, Option<Interface>> {
+        self.inner.iter_mut()
     }
 }
 
@@ -81,6 +99,8 @@ pub enum InterfaceTableError {
     /// they want to do with this error.
     #[error("An interface with the same ID was registered twice.")]
     DuplicateInterfaceId(InterfaceHandle),
+    #[error(transparent)]
+    Timer(#[from] TimerError),
 }
 
 /// An interface handle is used to reference a registered interface for incoming and outgoing
@@ -94,20 +114,18 @@ pub struct InterfaceHandle([u8; 8]);
 #[derive(Debug, Clone, Copy)]
 pub struct Interface {
     /// User defined interface name. Used
-    name: &'static str,
+    pub(crate) name: &'static str,
     /// User defined interface ID. Used to correlate the router tracked interface with user defined
     /// interfaces.
-    handle: InterfaceHandle,
+    pub(crate) handle: InterfaceHandle,
 
-    hello_seqno: SeqNo,
+    pub(crate) hello_seqno: SeqNo,
 
     /// How often this interface should send hello messages.
-    hello_interval: Interval,
-    last_hello: Option<Instant>,
+    pub(crate) hello_timer: Timer,
 
     /// How often this interface should send update messages
-    update_interval: Interval,
-    last_update: Option<Instant>,
+    pub(crate) update_timer: Timer,
 }
 
 impl InternallyKeyed for Interface {
@@ -123,16 +141,9 @@ impl Interface {
     /// Returns:
     /// -
     /// - An interface struct that will be used by the BabelRouter to keep track of interface state.
-    fn new<I, H, U>(
-        name: &'static str,
-        id: I,
-        hello_interval: Option<H>,
-        update_interval: Option<U>,
-    ) -> Self
+    fn new<I>(name: &'static str, id: I, hello_timer: Timer, update_timer: Timer) -> Self
     where
         I: Into<[u8; 8]>,
-        H: Into<Interval>,
-        U: Into<Interval>,
     {
         let id: [u8; 8] = id.into();
         let handle = InterfaceHandle(id);
@@ -141,16 +152,8 @@ impl Interface {
             name,
             handle,
             hello_seqno: SeqNo::default(),
-            hello_interval: hello_interval.map_or(
-                Duration::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS).into(),
-                |h| h.into(),
-            ),
-            last_hello: None,
-            update_interval: update_interval.map_or(
-                Duration::from_secs(DEFAULT_UPDATE_INTERVAL_SECS).into(),
-                |u| u.into(),
-            ),
-            last_update: None,
+            hello_timer,
+            update_timer,
         }
     }
 }
