@@ -1,15 +1,12 @@
-use core::{hash::Hash, slice::IterMut};
+use core::{fmt::Display, hash::Hash, slice::IterMut};
 
 use managed::ManagedSlice;
 use thiserror::Error;
 
-use crate::{
-    utils::{
-        storage::{InternallyKeyed, ManagedSliceExt},
-        timer::{Timer, TimerError},
-        Duration, Instant,
-    },
-    InterfaceId,
+use crate::utils::{
+    storage::{InternallyKeyed, ManagedSliceExt},
+    timer::{Timer, TimerError},
+    Duration, Instant,
 };
 
 use super::seqno::SeqNo;
@@ -42,18 +39,14 @@ impl<'storage> InterfaceTable<'storage> {
         }
     }
 
-    pub(crate) fn register_interface<I>(
+    pub(crate) fn register_interface(
         &mut self,
         now: Instant,
-        name: &'static str,
-        id: I,
+        handle: InterfaceHandle,
         hello_interval: Option<Duration>,
         update_interval: Option<Duration>,
-    ) -> Result<InterfaceHandle, InterfaceTableError>
-    where
-        I: InterfaceId,
-    {
-        b_debug!("Registering interface: {}", name);
+    ) -> Result<InterfaceHandle, InterfaceTableError> {
+        b_debug!("Registering interface: {}", handle);
 
         // Create hello timer that fires immediately.
         let hello_timer = Timer::new_eager(
@@ -67,7 +60,7 @@ impl<'storage> InterfaceTable<'storage> {
             update_interval.unwrap_or_else(|| Duration::from_secs(DEFAULT_UPDATE_INTERVAL_SECS)),
         )?;
         // Create the new interface
-        let iface = Interface::new(name, id, hello_timer, update_timer);
+        let iface = Interface::new(handle, hello_timer, update_timer);
         let handle = iface.handle;
 
         // Insert into the interface table
@@ -99,6 +92,8 @@ pub enum InterfaceTableError {
     /// they want to do with this error.
     #[error("An interface with the same ID was registered twice.")]
     DuplicateInterfaceId(InterfaceHandle),
+    #[error("Given interface ID is too long - max: 8, len: {}", len)]
+    IdTooLong { len: usize },
     #[error(transparent)]
     Timer(#[from] TimerError),
 }
@@ -110,11 +105,49 @@ pub enum InterfaceTableError {
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Ord)]
 pub struct InterfaceHandle([u8; 8]);
 
+impl TryFrom<&str> for InterfaceHandle {
+    type Error = InterfaceTableError;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if value.len() > 8 {
+            return Err(InterfaceTableError::IdTooLong { len: value.len() });
+        }
+        // At this point value is known to be <= 8 bytes.
+        let in_bytes = value.as_bytes();
+        let mut id_bytes = [0u8; 8];
+
+        for (idx, byte) in in_bytes.iter().rev().enumerate() {
+            id_bytes[id_bytes.len() - 1 - idx] = *byte;
+        }
+        Ok(Self(id_bytes))
+    }
+}
+
+impl Display for InterfaceHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let start = self.0.iter().position(|&b| b != 0).unwrap_or(self.0.len());
+        let trimmed = &self.0[start..];
+
+        let displayable = trimmed.iter().all(|&b| b.is_ascii_graphic() || b == b' ');
+
+        if displayable {
+            // Known to be displayable due to above check.
+            f.write_str(core::str::from_utf8(trimmed).unwrap_or(""))
+        } else {
+            for (idx, b) in self.0.iter().enumerate() {
+                if idx != self.0.len() - 1 {
+                    write!(f, "x{:02X} ", b)?;
+                } else {
+                    write!(f, "x{:02X}", b)?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Interfaces that speak the Babel Protocol
 #[derive(Debug, Clone, Copy)]
 pub struct Interface {
-    /// User defined interface name. Used
-    pub(crate) name: &'static str,
     /// User defined interface ID. Used to correlate the router tracked interface with user defined
     /// interfaces.
     pub(crate) handle: InterfaceHandle,
@@ -141,15 +174,8 @@ impl Interface {
     /// Returns:
     /// -
     /// - An interface struct that will be used by the BabelRouter to keep track of interface state.
-    fn new<I>(name: &'static str, id: I, hello_timer: Timer, update_timer: Timer) -> Self
-    where
-        I: Into<[u8; 8]>,
-    {
-        let id: [u8; 8] = id.into();
-        let handle = InterfaceHandle(id);
-
+    fn new(handle: InterfaceHandle, hello_timer: Timer, update_timer: Timer) -> Self {
         Self {
-            name,
             handle,
             hello_seqno: SeqNo::default(),
             hello_timer,

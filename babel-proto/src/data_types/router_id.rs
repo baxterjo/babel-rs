@@ -43,6 +43,29 @@ impl TryFrom<&'static str> for RouterId {
     }
 }
 
+impl Display for RouterId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let start = self.0.iter().position(|&b| b != 0).unwrap_or(self.0.len());
+        let trimmed = &self.0[start..];
+
+        let displayable = trimmed.iter().all(|&b| b.is_ascii_graphic() || b == b' ');
+
+        if displayable {
+            // Known to be displayable due to above check.
+            f.write_str(core::str::from_utf8(trimmed).unwrap_or(""))
+        } else {
+            for (idx, b) in self.0.iter().enumerate() {
+                if idx != self.0.len() - 1 {
+                    write!(f, "x{:02X} ", b)?;
+                } else {
+                    write!(f, "x{:02X}", b)?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 #[cfg(not(feature = "defmt"))]
 pub trait RouterIdT: DebugT + Into<[u8; 8]> {}
 
@@ -62,13 +85,25 @@ pub enum RouterIdError {
     IdTooLong { len: usize },
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
-    use crate::data_types::RouterId;
+    use super::*;
 
     #[test]
     fn from_static_str_right_aligns() {
         let router_id = RouterId::try_from("node_1").expect("Bad router Id");
-        println!("{:?}", router_id);
+        assert_eq!(router_id.0, [0, 0, 110, 111, 100, 101, 95, 49]);
+    }
+
+    #[test]
+    fn display_with_utf8_characters() {
+        let router_id = RouterId::try_from("node_1").expect("Bad router id");
+        assert_eq!(&router_id.to_string(), "node_1");
+    }
+
+    #[test]
+    fn display_with_non_utf8_characters() {
+        let router_id = RouterId::new([1, 2, 0, 3, 4, 5, 6, 7]).expect("Bad router ID");
+        assert_eq!(&router_id.to_string(), "x01 x02 x00 x03 x04 x05 x06 x07");
     }
 }
