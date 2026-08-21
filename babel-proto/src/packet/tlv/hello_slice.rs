@@ -157,6 +157,14 @@ impl<'a> HelloSlice<'a> {
                 .get_unchecked(TlvHeader::LEN + Self::MIN_LEN..self.slice.len())
         }
     }
+
+    pub fn is_scheduled(&self) -> bool {
+        !self.interval().is_zero()
+    }
+
+    pub fn is_unscheduled(&self) -> bool {
+        self.interval().is_zero()
+    }
 }
 
 #[cfg(test)]
