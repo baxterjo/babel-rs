@@ -1,0 +1,15 @@
+# Requires nightly rustfmt for the unstable options below: `cargo +nightly fmt`.
+# Stable rustfmt ignores them (with a warning) rather than failing.
+
+style_edition = "2024"
+max_width = 100
+
+# --- Comments (nightly) ---
+wrap_comments = true
+comment_width = 100
+format_code_in_doc_comments = true
+doc_comment_code_block_width = 100
+
+# --- Imports (nightly) ---
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"
