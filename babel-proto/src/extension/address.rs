@@ -16,23 +16,31 @@ where
 {
     type Error: Error + MaybeDefmt;
     type Encoding: AddressEncodingExt;
-    /// Return the address encoding and byte representation of the address.
-    fn as_bytes(&self) -> &[u8];
+    /// Return the big endian byte representation of the address.
+    fn as_octets(&self) -> &[u8];
     /// Create the address type from un-compressed bytes.
     fn from_bytes(ae: &Self::Encoding, bytes: &[u8]) -> Result<Self, AddressError<Self>>;
+    /// Get the encoding for this address.
     fn encoding(&self) -> Self::Encoding;
+    /// Returns `true` if this is a multicast address.
+    ///
+    /// This is synonymous to [`Ipv6Addr::is_multicast`](core::net::Ipv6Addr::is_multicast)
+    fn is_multicast(&self) -> bool;
 }
 
 impl AddressExt for NoExtension {
     type Error = Infallible;
     type Encoding = NoExtension;
-    fn as_bytes(&self) -> &[u8] {
+    fn as_octets(&self) -> &[u8] {
         unreachable!("The NoExtension struct should not be constructable.")
     }
     fn from_bytes(_ae: &NoExtension, _bytes: &[u8]) -> Result<Self, AddressError<Self>> {
         unreachable!("The NoExtension struct should not be constructable.")
     }
     fn encoding(&self) -> Self::Encoding {
+        unreachable!("The NoExtension struct should not be constructable.")
+    }
+    fn is_multicast(&self) -> bool {
         unreachable!("The NoExtension struct should not be constructable.")
     }
 }

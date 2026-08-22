@@ -12,7 +12,7 @@ use crate::extension::address::AddressExt;
 // Crashing out on this FR
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub(crate) struct Ipv4Addr {
+pub struct Ipv4Addr {
     octets: [u8; 4],
 }
 
@@ -46,7 +46,7 @@ impl Into<core::net::Ipv4Addr> for Ipv4Addr {
 // TODO: Manually implement defmt to skip out on zeros in the middle.
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub(crate) struct Ipv6Addr {
+pub struct Ipv6Addr {
     octets: [u8; 16],
 }
 
@@ -178,15 +178,15 @@ where
 
     pub(crate) fn as_wire(&self) -> &[u8] {
         match self {
-            Address::V4(v4) => &v4.as_octets(),
+            Address::V4(v4) => v4.as_octets(),
             Address::V6(v6) => {
                 if v6.octets()[0..8] == [0xFE, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00] {
-                    &v6.as_octets()[9..]
+                    &v6.as_octets()[8..]
                 } else {
                     v6.as_octets()
                 }
             }
-            Address::Extension(e) => e.as_bytes(),
+            Address::Extension(e) => e.as_octets(),
         }
     }
 
@@ -201,6 +201,13 @@ where
                 }
             }
             Address::Extension(e) => AddressEncoding::Extension(e.encoding()),
+        }
+    }
+    pub(crate) fn is_multicast(&self) -> bool {
+        match self {
+            Self::V4(v4) => core::net::Ipv4Addr::from_octets(v4.octets).is_multicast(),
+            Self::V6(v6) => core::net::Ipv6Addr::from_octets(v6.octets).is_multicast(),
+            Self::Extension(e) => e.is_multicast(),
         }
     }
 }

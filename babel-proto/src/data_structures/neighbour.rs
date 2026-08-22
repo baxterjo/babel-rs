@@ -3,8 +3,10 @@ use thiserror::Error;
 use super::interface::InterfaceHandle;
 use super::seqno::SeqNo;
 use crate::data_structures::interface::DEFAULT_MULTICAST_HELLO_INTERVAL_SECS;
-use crate::data_types::address::Address;
+use crate::data_types::address::{Address, AddressError};
+use crate::data_types::address_encoding::{AddressEncoding, AddressEncodingError};
 use crate::extension::address::AddressExt;
+use crate::packet::error::tlv_err::TlvError;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
 use crate::utils::bit_history::BitHistory;
 use crate::utils::rx_cost::RxCost as TxCost;
@@ -156,7 +158,19 @@ where
         ihu: IhuSlice<'_>,
     ) -> Result<(), NeighbourTableError<A>> {
         let hold_time = self.hold_time;
-        let neighbour = self.get_or_insert_default(now, &NeighbourIndex(interface, address))?;
+
+        // If the address the IHU was received on is a multicast address, then the neighbour
+        // address needs to be resolved from the TLV.
+        let resolved_address = if address.is_multicast() {
+            let ae = AddressEncoding::try_from(ihu.ae())?;
+            let addr_len = ae.address_len();
+            let address_bytes = ihu.address(addr_len)?;
+            Address::from_bytes(ae, address_bytes)?
+        } else {
+            address
+        };
+        let neighbour =
+            self.get_or_insert_default(now, &NeighbourIndex(interface, resolved_address))?;
         b_debug!(
             "[RECV] IHU - iface: {:?}, addr: {:?} - {:?}",
             interface,
@@ -325,8 +339,11 @@ impl<A: AddressExt> Neighbour<A> {
                 // If the router has received a hello from this neighbour in the past. Calculate
                 // any missed hellos that may have occured.
                 Some(ucast_info) => {
+                    // Record any gaps in history.
                     let hello_gap = seqno - ucast_info.expected_seqno;
                     ucast_info.history.record_many(false, hello_gap.0.into());
+                    // Record this hello
+                    ucast_info.history.record(true);
                     ucast_info.history
                 }
                 None => BitHistory::new(),
@@ -341,7 +358,9 @@ impl<A: AddressExt> Neighbour<A> {
                 Some(ucast_info) => ucast_info.timer.duration(),
                 None => Duration::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS),
             };
-            ihu_dur = timer_dur * 2;
+
+            // Multiply the incoming duration by two and clamp to max timer duration
+            ihu_dur = (timer_dur * 2).min(Duration::from_centis(u16::MAX.into()));
 
             let timer = Timer::new(now, timer_dur).expect("Interval bounds were pre-checked");
 
@@ -355,8 +374,11 @@ impl<A: AddressExt> Neighbour<A> {
                 // If the router has received a hello from this neighbour in the past. Calculate
                 // any missed hellos that may have occured.
                 Some(mcast_info) => {
+                    // Record any gaps in history
                     let hello_gap = seqno - mcast_info.expected_seqno;
                     mcast_info.history.record_many(false, hello_gap.0.into());
+                    // Record this hello
+                    mcast_info.history.record(true);
                     mcast_info.history
                 }
                 None => BitHistory::new(),
@@ -371,7 +393,9 @@ impl<A: AddressExt> Neighbour<A> {
                 Some(mcast_info) => mcast_info.timer.duration(),
                 None => Duration::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS),
             };
-            ihu_dur = timer_dur * 2;
+
+            // Multiply the incoming duration by two and clamp to max timer duration
+            ihu_dur = (timer_dur * 2).min(Duration::from_centis(u16::MAX.into()));
 
             let timer = Timer::new(now, timer_dur).expect("Interval bounds were pre-checked");
 
@@ -423,7 +447,7 @@ impl<A: AddressExt> Neighbour<A> {
     }
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum NeighbourTableError<A: AddressExt> {
     /// The storage given for the interface table is full.
@@ -438,4 +462,10 @@ pub enum NeighbourTableError<A: AddressExt> {
     IntervalCannotBeZero,
     #[error(transparent)]
     Timer(#[from] TimerError),
+    #[error(transparent)]
+    AddressEncoding(#[from] AddressEncodingError<A::Encoding>),
+    #[error(transparent)]
+    Tlv(#[from] TlvError),
+    #[error(transparent)]
+    Address(#[from] AddressError<A>),
 }
