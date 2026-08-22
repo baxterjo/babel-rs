@@ -1,7 +1,7 @@
 use core::fmt::Debug as DebugT;
 use core::ops::{Deref, DerefMut};
 
-use managed::ManagedSlice;
+use crate::utils::ManagedSlice;
 
 /// A type that knows how to be located within a slice containing itself and can derive its own key.
 /// And knows how to sort a slice of itself in a way that the locate method is expecting.

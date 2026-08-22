@@ -2,9 +2,13 @@
 
 pub(crate) mod bit_history;
 pub(crate) mod destination;
+pub(crate) mod managed_slice;
 pub(crate) mod rx_cost;
 pub(crate) mod storage;
 pub(crate) mod time;
 pub(crate) mod timer;
 
+pub(crate) use destination::{DestAddr, DestinationError};
+pub(crate) use managed_slice::ManagedSlice;
+pub(crate) use storage::{InternallyKeyed, ManagedSliceExt};
 pub use time::{Duration, DurationMultiplier as IntervalMultiplier, Instant};

@@ -1,12 +1,10 @@
-use managed::ManagedSlice;
-
 use super::neighbour::NeighbourIndex;
 use super::seqno::SeqNo;
 use crate::data_types::address::Address;
 use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
-use crate::utils::Instant;
 use crate::utils::storage::InternallyKeyed;
+use crate::utils::{Instant, ManagedSlice};
 
 pub struct PendingSeqnoRequestTable<'storage, A: AddressExt> {
     inner: ManagedSlice<'storage, Option<SeqnoRequest<A>>>,

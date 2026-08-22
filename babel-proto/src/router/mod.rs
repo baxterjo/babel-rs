@@ -1,7 +1,5 @@
 use core::marker::PhantomData;
 
-use managed::ManagedSlice;
-
 use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTable};
 use crate::data_structures::neighbour::{Neighbour, NeighbourIndex, NeighbourTable};
 use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
@@ -22,7 +20,7 @@ use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
 use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
 use crate::utils::storage::ManagedSliceExt;
-use crate::utils::{Duration, Instant};
+use crate::utils::{Duration, Instant, ManagedSlice};
 
 pub mod handle_input;
 pub mod poll_output;

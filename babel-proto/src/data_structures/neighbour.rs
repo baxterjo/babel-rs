@@ -1,4 +1,3 @@
-use managed::ManagedSlice;
 use thiserror::Error;
 
 use super::interface::InterfaceHandle;
@@ -11,7 +10,7 @@ use crate::utils::bit_history::BitHistory;
 use crate::utils::rx_cost::RxCost as TxCost;
 use crate::utils::storage::{InternallyKeyed, ManagedSliceExt};
 use crate::utils::timer::{Timer, TimerError};
-use crate::utils::{Duration, Instant, IntervalMultiplier as HoldTimeMultiplier};
+use crate::utils::{Duration, Instant, IntervalMultiplier as HoldTimeMultiplier, ManagedSlice};
 
 pub const DEFAULT_NEIGHBOUR_EXPIRY_SECS: u64 = 10;
 

@@ -3,7 +3,6 @@ use core::hash::Hash;
 use core::iter::FilterMap;
 use core::slice::IterMut;
 
-use managed::ManagedSlice;
 use thiserror::Error;
 
 use super::seqno::SeqNo;
@@ -12,7 +11,7 @@ use crate::extension::address::AddressExt;
 use crate::utils::rx_cost::RxCost;
 use crate::utils::storage::{InternallyKeyed, ManagedSliceExt};
 use crate::utils::timer::{Timer, TimerError};
-use crate::utils::{Duration, Instant};
+use crate::utils::{Duration, Instant, ManagedSlice};
 
 /// Recommended message intervals indicated in [Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.2)
 pub const DEFAULT_MULTICAST_HELLO_INTERVAL_SECS: u64 = 4;

@@ -1,5 +1,6 @@
-use managed::ManagedSlice;
 use thiserror::Error;
+
+use crate::utils::ManagedSlice;
 
 pub(crate) mod finished_packet_body;
 pub(crate) mod packet_state;

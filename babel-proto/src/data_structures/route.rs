@@ -1,13 +1,11 @@
-use managed::ManagedSlice;
-
 use super::neighbour::NeighbourIndex;
 use super::seqno::SeqNo;
 use super::source::SourceIndex;
 use crate::data_types::Interval;
 use crate::data_types::address::Address;
 use crate::extension::address::AddressExt;
-use crate::utils::Instant;
 use crate::utils::storage::InternallyKeyed;
+use crate::utils::{Instant, ManagedSlice};
 
 pub struct RouteTable<'storage, A: AddressExt> {
     inner: ManagedSlice<'storage, Option<Route<A>>>,

@@ -1,5 +1,3 @@
-use managed::ManagedSlice;
-
 use super::BabelRouter;
 use crate::data_structures::interface::InterfaceHandle;
 use crate::error::BabelError;
@@ -11,7 +9,7 @@ use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
 use crate::utils::destination::{Claim, DestAddr};
 use crate::utils::storage::ManagedSliceExt;
-use crate::utils::{Duration, Instant};
+use crate::utils::{Duration, Instant, ManagedSlice};
 
 impl<'storage, A, P, const MN: u8, const V: u8> BabelRouter<'storage, P, A, MN, V>
 where

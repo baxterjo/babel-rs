@@ -1,9 +1,8 @@
-use managed::ManagedSlice;
-
 use super::seqno::SeqNo;
 use crate::data_types::RouterId;
 use crate::data_types::address::Address;
 use crate::extension::address::AddressExt;
+use crate::utils::ManagedSlice;
 use crate::utils::storage::InternallyKeyed;
 
 pub struct SourceTable<'storage, A>

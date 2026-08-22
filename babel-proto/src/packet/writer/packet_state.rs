@@ -1,9 +1,8 @@
 use core::fmt::Debug;
 use core::ops::Deref;
 
-use managed::ManagedSlice;
-
 use super::PacketWriterError;
+use crate::utils::ManagedSlice;
 
 pub(crate) struct PacketState<'a> {
     pub(super) buf: ManagedSlice<'a, u8>,
