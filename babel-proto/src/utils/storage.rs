@@ -63,6 +63,10 @@ where
     ///
     /// Returns None if there is no value for the given key.
     fn get_mut_by_key(&mut self, key: &K) -> Option<&mut V>;
+    /// Retains only the elements specified by the predicate.
+    fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut(&V) -> bool;
 }
 
 impl<'storage, K, V> ManagedSliceExt<K, V> for ManagedSlice<'storage, Option<V>>
@@ -130,6 +134,22 @@ where
     fn get_mut_by_key(&mut self, key: &K) -> Option<&mut V> {
         let idx = V::locate(&self[..], key)?;
         self.get_mut(idx)?.as_mut()
+    }
+
+    fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&V) -> bool,
+    {
+        for item_opt in self.iter_mut() {
+            let Some(v) = item_opt.as_ref() else {
+                continue;
+            };
+            // If the
+            if !f(v) {
+                *item_opt = None;
+            }
+        }
+        V::my_sort(&mut self[..]);
     }
 }
 
