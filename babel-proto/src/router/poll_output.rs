@@ -1076,6 +1076,27 @@ mod test {
         }
 
         #[test]
+        fn oversized_borrowed_buffer_is_trimmed_to_the_bytes_written() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let handle = iface_handle("iface_1");
+            r.register_interface(t0, handle, NODE_ADDR, Some(IFACE_INTERVAL), None)
+                .expect("register should succeed");
+
+            // Far bigger than the eager mcast hello needs, so any untrimmed slack shows up as
+            // trailing zeros in the transmitted contents.
+            let mut buf = [0u8; 256];
+            let transmit = expect_transmit(
+                r.poll_output_with_buf(t0, &mut buf[..])
+                    .expect("poll should succeed"),
+            );
+
+            // 4 byte packet header + 2 byte TLV header + 6 byte hello body.
+            assert_eq!(transmit.contents.len(), 12);
+            assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
+        }
+
+        #[test]
         fn undersized_buffer_write_failure_yields_set_timer_without_panicking() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);

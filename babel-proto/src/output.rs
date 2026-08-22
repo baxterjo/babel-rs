@@ -47,6 +47,9 @@ pub enum TransmitDestination<A: AddressExt> {
 ///
 /// The term datagram is used here as a generic term for "payloade to be sent over unreliable (or
 /// reliable if you want) transport" and does not necessarily mean UDP.
+///
+/// The payload is trimmed to the bytes that were actually written, so it never carries trailing
+/// slack from the buffer it was built in.
 pub struct DatagramSend<'a>(ManagedSlice<'a, u8>);
 
 impl<'a> Debug for DatagramSend<'a> {

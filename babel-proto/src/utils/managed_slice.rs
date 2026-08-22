@@ -36,6 +36,25 @@ pub enum ManagedSlice<'a, T: 'a> {
     Owned(Vec<T>),
 }
 
+impl<'a, T: 'a> ManagedSlice<'a, T> {
+    /// Shortens the slice, keeping the first `len` elements and dropping the rest.
+    ///
+    /// If `len` is greater than or equal to the slice's current length, this has no effect.
+    pub(crate) fn truncate(self, len: usize) -> Self {
+        match self {
+            ManagedSlice::Borrowed(value) => {
+                let len = len.min(value.len());
+                ManagedSlice::Borrowed(&mut value[..len])
+            }
+            #[cfg(any(feature = "std", feature = "alloc"))]
+            ManagedSlice::Owned(mut value) => {
+                value.truncate(len);
+                ManagedSlice::Owned(value)
+            }
+        }
+    }
+}
+
 impl<'a, T: 'a> fmt::Debug for ManagedSlice<'a, T>
 where
     T: fmt::Debug,

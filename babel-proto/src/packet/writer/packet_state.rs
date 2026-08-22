@@ -121,6 +121,12 @@ impl<'a> PacketState<'a> {
         self.pos
     }
 
+    /// Consumes the state, yielding the buffer trimmed to the bytes that were written.
+    pub(crate) fn into_written(self) -> ManagedSlice<'a, u8> {
+        let pos = self.pos;
+        self.buf.truncate(pos)
+    }
+
     /// Resets the position of the cursor and erases everything after that position.
     ///
     /// Panics if the new position is greater than the current position.
