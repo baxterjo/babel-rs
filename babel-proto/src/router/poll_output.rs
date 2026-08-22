@@ -21,7 +21,7 @@ where
     /// Polls output from the router.
     #[cfg(any(feature = "std", feature = "alloc"))]
     pub fn poll_output(&mut self, now: Instant) -> Result<Output<'_, A>, BabelError<A>> {
-        let buf = Vec::new();
+        let buf = alloc::vec::Vec::new();
         self.poll_output_with_buf(now, buf)
     }
 
@@ -35,7 +35,7 @@ where
         now: Instant,
         iface: InterfaceHandle,
     ) -> Result<Output<'_, A>, BabelError<A>> {
-        let buf = Vec::new();
+        let buf = alloc::vec::Vec::new();
         self.poll_output_inner(now, Some(iface), buf)
     }
 
@@ -411,6 +411,7 @@ where
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
+    use alloc::vec::Vec;
     use core::net::Ipv6Addr;
 
     use super::*;
@@ -501,6 +502,8 @@ mod test {
     // |_|  |_|\___|/_/ \_\___/ |_|   |_||_|___|____|____\___/
 
     mod mcast_hello {
+        use alloc::vec;
+
         use super::*;
 
         #[test]
@@ -600,6 +603,8 @@ mod test {
     //  \___/ \___/_/ \_\___/ |_|   |_||_|___|____|____\___/
 
     mod ucast_hello {
+        use alloc::vec;
+
         use super::*;
 
         const UCAST_INTERVAL: Duration = Duration::from_secs(20);
@@ -772,6 +777,8 @@ mod test {
     // |___|_||_|\___/
 
     mod ihu {
+        use alloc::vec;
+
         use super::*;
 
         fn add_neighbour_no_ucast(
@@ -963,6 +970,8 @@ mod test {
     // |___|_|\_| |_| |___\___|_|_\/_/ \_\_| |___\___/|_|\_|
 
     mod integration {
+        use alloc::vec;
+
         use super::*;
 
         #[test]

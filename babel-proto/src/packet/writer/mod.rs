@@ -101,6 +101,8 @@ pub enum PacketWriterError {
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
+    use alloc::vec::Vec;
+
     use super::*;
     use crate::data_structures::seqno::SeqNo;
     use crate::output::DatagramSend;

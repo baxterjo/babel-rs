@@ -111,7 +111,7 @@ impl core::error::Error for LenError {
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
     use alloc::format;
-    use std::error::Error;
+    use core::error::Error;
 
     use super::*;
 

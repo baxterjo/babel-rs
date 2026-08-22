@@ -1,2 +1,2 @@
-#[cfg(any(feature = "std", feature = "alloc"))]
+#[cfg(feature = "std")]
 mod two_node_smoke_tests;

@@ -72,7 +72,7 @@ impl<'a> From<ManagedSlice<'a, u8>> for DatagramSend<'a> {
 }
 
 #[cfg(any(feature = "std", feature = "alloc"))]
-impl From<DatagramSend<'_>> for Vec<u8> {
+impl From<DatagramSend<'_>> for alloc::vec::Vec<u8> {
     fn from(value: DatagramSend) -> Self {
         value.0.to_vec()
     }

@@ -82,6 +82,8 @@ pub enum RouterIdError {
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
+    use alloc::string::ToString;
+
     use super::*;
 
     #[test]

@@ -40,8 +40,8 @@ impl PartialEq<&[u8]> for PacketState<'_> {
 }
 
 #[cfg(any(feature = "std", feature = "alloc"))]
-impl PartialEq<Vec<u8>> for PacketState<'_> {
-    fn eq(&self, other: &Vec<u8>) -> bool {
+impl PartialEq<alloc::vec::Vec<u8>> for PacketState<'_> {
+    fn eq(&self, other: &alloc::vec::Vec<u8>) -> bool {
         self.buf.deref() == *other
     }
 }

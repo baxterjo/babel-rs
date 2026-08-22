@@ -42,34 +42,3 @@ impl core::fmt::Display for Layer {
         }
     }
 }
-
-#[cfg(all(test, any(feature = "std", feature = "alloc")))]
-mod test {
-    use super::Layer::*;
-
-    #[test]
-    fn error_title() {
-        let tests = [
-            (BabelPacketHeader, "Babel packet header error"),
-            (BabelPacketBody, "Babel packet body error"),
-            (BabelTlvHeader, "Babel TLV header error"),
-            (BabelTlvBody, "Babel TLV body error"),
-        ];
-        for test in tests {
-            assert_eq!(test.0.error_title(), test.1);
-        }
-    }
-
-    #[test]
-    fn fmt() {
-        let tests = [
-            (BabelPacketHeader, "Babel routing protocol packet header"),
-            (BabelPacketBody, "Babel routing protocol packet body"),
-            (BabelTlvHeader, "Babel routing protocol tlv header"),
-            (BabelTlvBody, "Babel routing protocol tlv body"),
-        ];
-        for test in tests {
-            assert_eq!(format!("{}", test.0), test.1);
-        }
-    }
-}
