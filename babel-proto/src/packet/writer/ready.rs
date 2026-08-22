@@ -8,8 +8,8 @@ use crate::utils::rx_cost::RxCost;
 
 use super::PacketWriterError;
 
-use super::tlv::Tlv;
 use super::PacketWriterStep;
+use super::tlv::Tlv;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

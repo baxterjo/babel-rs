@@ -7,7 +7,7 @@ use crate::{
     packet::{
         packet_slice::PacketSlice,
         parser::Parser,
-        tlv::{reader::TlvReader, HelloSlice, IhuSlice, TypedTlv},
+        tlv::{HelloSlice, IhuSlice, TypedTlv, reader::TlvReader},
     },
     router::BabelRouter,
     utils::Instant,

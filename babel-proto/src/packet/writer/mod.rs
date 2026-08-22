@@ -106,9 +106,9 @@ mod test {
         output::DatagramSend,
         packet::{
             packet_slice::PacketSlice,
-            tlv::{hello_slice::HelloFlags, HelloSlice, IhuSlice, TypedTlv},
+            tlv::{HelloSlice, IhuSlice, TypedTlv, hello_slice::HelloFlags},
         },
-        utils::{rx_cost::RxCost, Duration},
+        utils::{Duration, rx_cost::RxCost},
     };
 
     use super::*;

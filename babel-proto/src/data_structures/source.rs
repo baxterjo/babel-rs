@@ -1,7 +1,7 @@
 use managed::ManagedSlice;
 
 use crate::{
-    data_types::{address::Address, RouterId},
+    data_types::{RouterId, address::Address},
     extension::address::AddressExt,
     utils::storage::InternallyKeyed,
 };

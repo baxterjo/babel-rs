@@ -244,14 +244,16 @@ mod test {
 
     #[test]
     fn source() {
-        assert!(LenError {
-            required_len: 0,
-            len: 0,
-            len_source: LenSource::Slice,
-            layer: Layer::BabelPacketHeader,
-            layer_start_offset: 0
-        }
-        .source()
-        .is_none());
+        assert!(
+            LenError {
+                required_len: 0,
+                len: 0,
+                len_source: LenSource::Slice,
+                layer: Layer::BabelPacketHeader,
+                layer_start_offset: 0
+            }
+            .source()
+            .is_none()
+        );
     }
 }

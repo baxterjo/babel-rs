@@ -7,10 +7,10 @@ use crate::{
     data_types::Address,
     extension::address::AddressExt,
     utils::{
+        Duration, Instant,
         rx_cost::RxCost,
         storage::{InternallyKeyed, ManagedSliceExt},
         timer::{Timer, TimerError},
-        Duration, Instant,
     },
 };
 

@@ -58,7 +58,7 @@ impl<'a> Iterator for TlvReader<'a> {
 #[cfg(test)]
 mod test {
     use crate::packet::tlv::{
-        reader::TlvReader, AckReqSlice, AckSlice, HelloSlice, IhuSlice, TypedTlv,
+        AckReqSlice, AckSlice, HelloSlice, IhuSlice, TypedTlv, reader::TlvReader,
     };
 
     #[test]

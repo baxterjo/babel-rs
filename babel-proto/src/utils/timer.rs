@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use crate::{
     data_types::Interval,
-    utils::{timer::TimerError::DurationTooLarge, Duration, Instant},
+    utils::{Duration, Instant, timer::TimerError::DurationTooLarge},
 };
 
 /// A simple timer.

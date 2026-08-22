@@ -5,10 +5,10 @@ use crate::{
     packet::{
         error::{layer::Layer, len_error::LenError, tlv_err::TlvError},
         len_source::LenSource,
-        tlv::{tlv_header::TlvHeader, tlv_slice::TlvSlice, TypedTlv},
+        tlv::{TypedTlv, tlv_header::TlvHeader, tlv_slice::TlvSlice},
         utils::get_unchecked_be_u16,
     },
-    utils::{rx_cost::RxCost, Duration},
+    utils::{Duration, rx_cost::RxCost},
 };
 
 /// IHU TLV as defined in section

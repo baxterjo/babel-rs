@@ -1,5 +1,5 @@
-use crate::packet::tlv::pad_slice::PadNSlice;
 use crate::packet::tlv::TypedTlv;
+use crate::packet::tlv::pad_slice::PadNSlice;
 use crate::packet::writer::ready::Ready;
 
 use super::PacketWriterError;

@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::{
     data_types::Interval,
     packet::{
-        tlv::{tlv_header::TlvHeader, TypedTlv},
+        tlv::{TypedTlv, tlv_header::TlvHeader},
         utils::get_unchecked_be_u16,
     },
     utils::Duration,

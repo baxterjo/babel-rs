@@ -7,7 +7,7 @@ use crate::{
     output::Output,
     packet::packet_slice::PacketSlice,
     router::BabelRouter,
-    utils::{storage::ManagedSliceExt, Instant},
+    utils::{Instant, storage::ManagedSliceExt},
 };
 
 #[test]

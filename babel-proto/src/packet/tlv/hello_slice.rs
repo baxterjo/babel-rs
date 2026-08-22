@@ -4,7 +4,7 @@ use crate::{
     data_structures::seqno::SeqNo,
     data_types::Interval,
     packet::{
-        tlv::{tlv_header::TlvHeader, tlv_slice::TlvSlice, TypedTlv},
+        tlv::{TypedTlv, tlv_header::TlvHeader, tlv_slice::TlvSlice},
         utils::get_unchecked_be_u16,
     },
     utils::Duration,

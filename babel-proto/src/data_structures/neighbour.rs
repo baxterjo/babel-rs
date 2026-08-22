@@ -7,11 +7,11 @@ use crate::{
     extension::address::AddressExt,
     packet::tlv::{HelloSlice, IhuSlice},
     utils::{
+        Duration, Instant, IntervalMultiplier as HoldTimeMultiplier,
         bit_history::BitHistory,
         rx_cost::RxCost as TxCost,
         storage::{InternallyKeyed, ManagedSliceExt},
         timer::{Timer, TimerError},
-        Duration, Instant, IntervalMultiplier as HoldTimeMultiplier,
     },
 };
 

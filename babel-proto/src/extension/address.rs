@@ -4,7 +4,7 @@ use core::{convert::Infallible, error::Error};
 use crate::MaybeDefmt;
 use crate::{
     data_types::address::AddressError,
-    extension::{address_encoding::AddressEncodingExt, NoExtension},
+    extension::{NoExtension, address_encoding::AddressEncodingExt},
 };
 
 /// Extends the domain of possible address types that can be used in the Babel router.

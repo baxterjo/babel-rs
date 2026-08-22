@@ -3,7 +3,7 @@ use core::fmt::Debug;
 use crate::packet::{
     error::{layer::Layer, len_error::LenError, tlv_err::TlvError},
     len_source::LenSource,
-    tlv::{tlv_header::TlvHeader, tlv_header_slice::TlvHeaderSlice, TypedTlv},
+    tlv::{TypedTlv, tlv_header::TlvHeader, tlv_header_slice::TlvHeaderSlice},
 };
 
 /// A slice containing the header and payload of a TLV.

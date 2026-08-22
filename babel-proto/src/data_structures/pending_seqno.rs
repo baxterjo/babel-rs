@@ -1,9 +1,9 @@
 use managed::ManagedSlice;
 
 use crate::{
-    data_types::{address::Address, Interval, RouterId},
+    data_types::{Interval, RouterId, address::Address},
     extension::address::AddressExt,
-    utils::{storage::InternallyKeyed, Instant},
+    utils::{Instant, storage::InternallyKeyed},
 };
 
 use super::{neighbour::NeighbourIndex, seqno::SeqNo};

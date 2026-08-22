@@ -6,9 +6,9 @@ use crate::output::Transmit;
 use crate::packet::tlv::hello_slice::HelloFlags;
 use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
+use crate::utils::Duration;
 use crate::utils::destination::{Claim, DestAddr};
 use crate::utils::storage::ManagedSliceExt;
-use crate::utils::Duration;
 use crate::{error::BabelError, output::Output, utils::Instant};
 
 use super::BabelRouter;
@@ -421,7 +421,7 @@ mod test {
         output::TransmitDestination,
         packet::{
             packet_slice::PacketSlice,
-            tlv::{tlv_slice::TlvSlice, HelloSlice, IhuSlice, TypedTlv},
+            tlv::{HelloSlice, IhuSlice, TypedTlv, tlv_slice::TlvSlice},
         },
         utils::{rx_cost::RxCost, storage::ManagedSliceExt, timer::Timer},
     };
