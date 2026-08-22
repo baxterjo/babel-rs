@@ -136,8 +136,6 @@ where
 #[cfg(test)]
 mod test {
 
-    use alloc::vec::Vec;
-
     use super::*;
 
     #[allow(dead_code)]
@@ -191,6 +189,7 @@ mod test {
     #[cfg(any(feature = "std", feature = "alloc"))]
     #[test]
     fn insert_until_full_allocates() {
+        use alloc::vec::Vec;
         let _ = env_logger::try_init();
         // In std or alloc this becomes an owned vec anc can be resized.
         let mut managed_slice: ManagedSlice<'_, Option<TestValue>> = Vec::new().into();
@@ -209,6 +208,7 @@ mod test {
     #[cfg(any(feature = "std", feature = "alloc"))]
     #[test]
     fn insert_many_then_get_succeeds() {
+        use alloc::vec::Vec;
         let _ = env_logger::try_init();
         // In std or alloc this becomes an owned vec anc can be resized.
         let mut managed_slice: ManagedSlice<'_, Option<TestValue>> = Vec::new().into();
@@ -244,6 +244,7 @@ mod test {
     #[cfg(any(feature = "std", feature = "alloc"))]
     #[test]
     fn managed_slice_remove_works() {
+        use alloc::vec::Vec;
         let _ = env_logger::try_init();
         // In std or alloc this becomes an owned vec anc can be resized.
         let mut managed_slice: ManagedSlice<'_, Option<TestValue>> = Vec::new().into();

@@ -6,7 +6,7 @@ macro_rules! b_log {
 }
 
 #[cfg(test)]
-#[cfg(feature = "log")]
+#[cfg(all(feature = "log", feature = "std"))]
 macro_rules! b_log {
     (trace, $($arg:expr),*) => { println!($($arg),*) };
     (debug, $($arg:expr),*) => { println!($($arg),*) };

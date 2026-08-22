@@ -9,12 +9,13 @@ version = "0.0.1"
 edition = "2024"
 
 [features]
-std = ["managed/std", "alloc"]
-alloc = ["managed/alloc", "defmt?/alloc"]
+std = ["managed/std", "alloc", "log?/std"]
+alloc = ["managed/alloc", "defmt?/alloc", "log?/alloc"]
 defmt = ["dep:defmt"]
 log = ["dep:log"]
 
 default = ["std", "log"]
+# default = ["alloc", "defmt"]
 # default = ["defmt"]
 
 [dependencies]
