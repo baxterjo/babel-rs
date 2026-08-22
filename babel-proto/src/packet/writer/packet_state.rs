@@ -131,14 +131,24 @@ impl<'a> PacketState<'a> {
     ///
     /// Panics if the new position is greater than the current position.
     pub(crate) fn roll_back(&mut self, pos: usize) {
-        if pos >= self.pos {
+        if pos > self.pos {
             panic!("Attempted to 'roll back' packet writer forward in buffer.")
         }
         self.pos = pos;
         let len = self.buf.len();
 
-        if let Some(tail_slice) = self.buf.get_mut(self.pos..len) {
-            tail_slice.fill(0);
+        match &mut self.buf {
+            // If the buffer is pre-allocated, erase anything after position.
+            ManagedSlice::Borrowed(borrowed) => {
+                if let Some(tail_slice) = borrowed.get_mut(self.pos..len) {
+                    tail_slice.fill(0);
+                }
+            }
+            // If the buffer is owned, truncate it.
+            #[cfg(any(feature = "std", feature = "alloc"))]
+            ManagedSlice::Owned(owned) => {
+                owned.truncate(self.pos);
+            }
         }
     }
 }

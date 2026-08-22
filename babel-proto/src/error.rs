@@ -1,13 +1,13 @@
 use thiserror::Error;
 
-use crate::data_structures::interface::InterfaceTableError;
+use crate::data_structures::interface::{InterfaceHandle, InterfaceTableError};
 use crate::data_structures::neighbour::NeighbourTableError;
 use crate::data_types::address_encoding::AddressEncodingError;
 use crate::extension::address::AddressExt;
 use crate::packet::error::len_error::LenError;
 use crate::packet::writer::PacketWriterError;
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum BabelError<A>
 where
@@ -23,6 +23,8 @@ where
         - expected: {expected}, received: {received}"
     )]
     IncorrectVersionNumber { expected: u8, received: u8 },
+    #[error("Attempted to reference a non-existant interface: {0}")]
+    InterfaceDoesntExist(InterfaceHandle),
     #[error(transparent)]
     Len(#[from] LenError),
     #[error(transparent)]
