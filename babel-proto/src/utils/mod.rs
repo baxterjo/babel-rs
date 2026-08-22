@@ -11,4 +11,7 @@ pub(crate) mod timer;
 pub(crate) use destination::{DestAddr, DestinationError};
 pub(crate) use managed_slice::ManagedSlice;
 pub(crate) use storage::{InternallyKeyed, ManagedSliceExt};
-pub use time::{Duration, DurationMultiplier as IntervalMultiplier, Instant};
+pub use time::{
+    Duration, DurationMultiplier as IntervalMultiplier, DurationMultiplier as HoldTimeMultiplier,
+    Instant,
+};
