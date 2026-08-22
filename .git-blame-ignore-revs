@@ -1,0 +1,10 @@
+# Commits listed here are skipped by `git blame`, so line attribution points at
+# the commit that last changed the code rather than the one that reformatted it.
+# Only whitespace/formatting-only commits belong in this file.
+#
+# Requires full 40-character hashes. Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# (GitHub applies this file automatically.)
+
+# chore: Applied rustfmt features
+a46118a734e49d97c476ef02eaac0a53e46bf921
