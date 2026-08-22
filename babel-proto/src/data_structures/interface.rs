@@ -1,4 +1,4 @@
-use core::{fmt::Display, hash::Hash, slice::IterMut};
+use core::{fmt::Display, hash::Hash, iter::FilterMap, slice::IterMut};
 
 use managed::ManagedSlice;
 use thiserror::Error;
@@ -83,8 +83,8 @@ impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
         }
     }
 
-    pub(crate) fn iter_mut(&mut self) -> IterMut<'_, Option<Interface<A>>> {
-        self.inner.iter_mut()
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Interface<A>> {
+        self.inner.iter_mut().filter_map(|v| v.as_mut())
     }
 }
 

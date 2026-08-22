@@ -32,9 +32,18 @@ use crate::{
 pub struct HelloFlags(u16);
 
 impl HelloFlags {
-    pub fn new(unicast: bool) -> Self {
+    pub const fn new(unicast: bool) -> Self {
         Self(0 | (unicast as u16) << 15)
     }
+
+    pub const fn new_unicast() -> Self {
+        Self::new(true)
+    }
+
+    pub const fn new_multicast() -> Self {
+        Self::new(false)
+    }
+
     pub fn is_unicast(&self) -> bool {
         (self.0 & 0x8000u16) > 0u16
     }

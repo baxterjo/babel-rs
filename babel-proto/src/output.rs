@@ -24,7 +24,7 @@ pub struct Transmit<'a, A: AddressExt> {
 }
 
 /// Destination of the transmitted datagram.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum TransmitDestination<A: AddressExt> {
     /// Send the datagram to a unicast address. On the well known Babel port for your routing
     /// domain.

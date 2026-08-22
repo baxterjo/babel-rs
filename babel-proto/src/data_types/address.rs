@@ -1,5 +1,7 @@
 //!
 
+use core::fmt::Display;
+
 use thiserror::Error;
 
 use crate::{data_types::address_encoding::AddressEncoding, extension::address::AddressExt};
@@ -80,6 +82,16 @@ where
     V4(Ipv4Addr),
     V6(Ipv6Addr),
     Extension(E),
+}
+
+impl<A: AddressExt> Display for Address<A> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::V4(v4) => write!(f, "{}", Into::<core::net::Ipv4Addr>::into(*v4)),
+            Self::V6(v6) => write!(f, "{}", Into::<core::net::Ipv6Addr>::into(*v6)),
+            Self::Extension(e) => write!(f, "{:?}", e),
+        }
+    }
 }
 
 #[derive(Debug, Error)]

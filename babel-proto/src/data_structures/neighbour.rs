@@ -1,5 +1,3 @@
-use core::slice::IterMut;
-
 use managed::ManagedSlice;
 use thiserror::Error;
 
@@ -117,8 +115,8 @@ where
         }
     }
 
-    pub(crate) fn iter_mut(&mut self) -> IterMut<'_, Option<Neighbour<A>>> {
-        self.inner.iter_mut()
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Neighbour<A>> {
+        self.inner.iter_mut().filter_map(|v| v.as_mut())
     }
 
     //  _    _          _   _ _____  _      ______
@@ -172,21 +170,6 @@ where
         );
         neighbour.handle_ihu(now, ihu, hold_time)?;
         Ok(())
-    }
-
-    //  _____   ____  _      _         ____  _    _ _______ _____  _    _ _______
-    // |  __ \ / __ \| |    | |       / __ \| |  | |__   __|  __ \| |  | |__   __|
-    // | |__) | |  | | |    | |      | |  | | |  | |  | |  | |__) | |  | |  | |
-    // |  ___/| |  | | |    | |      | |  | | |  | |  | |  |  ___/| |  | |  | |
-    // | |    | |__| | |____| |____  | |__| | |__| |  | |  | |    | |__| |  | |
-    // |_|     \____/|______|______|  \____/ \____/   |_|  |_|     \____/   |_|
-
-    pub(crate) fn update_history(&mut self, now: Instant) {
-        for neigh_opt in self.iter_mut() {
-            let Some(neighbour) = neigh_opt else {
-                continue;
-            };
-        }
     }
 }
 
@@ -247,7 +230,7 @@ pub(crate) struct HelloReceived {
     /// integer modulo 2^16
     ///
     /// None if this router has never received a unicast hello from this neighbour
-    ucast_hello: Option<HelloInfo>,
+    ucast_hello: Option<RxHelloInfo>,
     /// a history of recently received Multicast Hello packets from this neighbour; this
     /// can, for example, be a sequence of n bits, for some small value n, indicating which of the n
     /// hellos most recently sent by this neighbour have been received by the local node.
@@ -258,14 +241,20 @@ pub(crate) struct HelloReceived {
     /// Hello TLVs sent by this neighbour
     ///
     /// None if this router has never received a multicast hello from theis neighbour.
-    mcast_hello: Option<HelloInfo>,
+    mcast_hello: Option<RxHelloInfo>,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct HelloInfo {
+pub(crate) struct RxHelloInfo {
     history: BitHistory,
     expected_seqno: SeqNo,
     timer: Timer,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TxHelloInfo {
+    pub(crate) seqno: SeqNo,
+    pub(crate) timer: Timer,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -276,7 +265,7 @@ pub struct NeighbourPending {
     /// [Appendix B. - 4.4](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.4).
     /// But the spec is also written for only IP based transports where multicast can be assumed to
     /// work well.
-    pub(crate) ucast_hello: Option<Timer>,
+    pub(crate) ucast_hello: Option<TxHelloInfo>,
     /// Timer for sending periodic IHU's to this neighbour.
     ///
     /// None if router has never received a hello from this neighbour.
@@ -304,7 +293,10 @@ impl<A: AddressExt> Neighbour<A> {
             tx_cost: TxCost(u16::MAX),
             ihu_timer: None,
             pending: NeighbourPending {
-                ucast_hello,
+                ucast_hello: ucast_hello.map(|t| TxHelloInfo {
+                    seqno: SeqNo(0),
+                    timer: t,
+                }),
                 ihu_timer: None,
             },
         }
@@ -350,7 +342,7 @@ impl<A: AddressExt> Neighbour<A> {
 
             let timer = Timer::new(now, timer_dur).expect("Interval bounds were pre-checked");
 
-            hello_info.ucast_hello = Some(HelloInfo {
+            hello_info.ucast_hello = Some(RxHelloInfo {
                 history,
                 expected_seqno,
                 timer,
@@ -380,7 +372,7 @@ impl<A: AddressExt> Neighbour<A> {
 
             let timer = Timer::new(now, timer_dur).expect("Interval bounds were pre-checked");
 
-            hello_info.mcast_hello = Some(HelloInfo {
+            hello_info.mcast_hello = Some(RxHelloInfo {
                 history,
                 expected_seqno,
                 timer,
