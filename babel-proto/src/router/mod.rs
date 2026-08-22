@@ -9,18 +9,8 @@ use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
-use crate::input::Receive;
-use crate::output::{Output, Transmit, TransmitDestination};
 use crate::packet::packet_header::BabelPacketHeader;
-use crate::packet::packet_slice::PacketSlice;
-use crate::packet::parser::Parser;
-use crate::packet::tlv::hello_slice::HelloFlags;
-use crate::packet::tlv::reader::TlvReader;
-use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
-use crate::packet::writer::ready::Ready;
-use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
-use crate::utils::storage::ManagedSliceExt;
-use crate::utils::{Duration, Instant, ManagedSlice};
+use crate::utils::{Duration, Instant, ManagedSlice, ManagedSliceExt};
 
 pub mod handle_input;
 pub mod poll_output;
@@ -156,6 +146,11 @@ where
         expiry: Duration,
         ucast_hello_interval: Option<Duration>,
     ) -> Result<(), BabelError<A>> {
+        // If the interface doesn't exist then the neighbour can't be created.
+        if self.iface_table.inner.get_by_key(&interface).is_none() {
+            return Err(BabelError::InterfaceDoesntExist(interface));
+        }
+
         Ok(self.neighbor_table.add_neighbour(
             now,
             &NeighbourIndex(interface, address),
@@ -163,19 +158,4 @@ where
             ucast_hello_interval,
         )?)
     }
-
-    //  _    _          _   _ _____  _      ______
-    // | |  | |   /\   | \ | |  __ \| |    |  ____|
-    // | |__| |  /  \  |  \| | |  | | |    | |__
-    // |  __  | / /\ \ | . ` | |  | | |    |  __|
-    // | |  | |/ ____ \| |\  | |__| | |____| |____
-    // |_|  |_/_/    \_\_| \_|_____/|______|______|
-    //
-    //
-    //  _____ _   _ _____  _    _ _______
-    // |_   _| \ | |  __ \| |  | |__   __|
-    //   | | |  \| | |__) | |  | |  | |
-    //   | | | . ` |  ___/| |  | |  | |
-    //  _| |_| |\  | |    | |__| |  | |
-    // |_____|_| \_|_|     \____/   |_|
 }

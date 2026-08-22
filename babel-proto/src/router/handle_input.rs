@@ -9,7 +9,7 @@ use crate::packet::parser::Parser;
 use crate::packet::tlv::reader::TlvReader;
 use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
 use crate::router::BabelRouter;
-use crate::utils::Instant;
+use crate::utils::{Instant, ManagedSliceExt};
 
 impl<'storage, A, P, const MN: u8, const V: u8> BabelRouter<'storage, P, A, MN, V>
 where
@@ -22,6 +22,11 @@ where
         input: Receive<'input, A>,
     ) -> Result<(), BabelError<A>> {
         b_trace!("{:?}", input);
+
+        if self.iface_table.inner.get_by_key(&input.iface).is_none() {
+            return Err(BabelError::InterfaceDoesntExist(input.iface));
+        }
+
         let _parser: Parser<P> = Parser::default();
         let packet = PacketSlice::from_slice(input.contents)?;
         b_trace!("{:?}", packet);
