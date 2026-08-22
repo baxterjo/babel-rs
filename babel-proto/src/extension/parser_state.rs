@@ -1,9 +1,9 @@
 use core::fmt::Debug;
 
 use crate::MaybeDefmt;
-use crate::extension::{
-    NoStateExtension, address::AddressExt, address_encoding::AddressEncodingExt,
-};
+use crate::extension::NoStateExtension;
+use crate::extension::address::AddressExt;
+use crate::extension::address_encoding::AddressEncodingExt;
 
 /// Extends the parser state to operate with address encoding extensions.
 ///

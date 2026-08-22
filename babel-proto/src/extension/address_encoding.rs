@@ -1,8 +1,10 @@
-use core::{convert::Infallible, error::Error as ErrorT, fmt::Debug};
+use core::convert::Infallible;
+use core::error::Error as ErrorT;
+use core::fmt::Debug;
 
-use crate::{
-    MaybeDefmt, data_types::address_encoding::AddressEncodingError, extension::NoExtension,
-};
+use crate::MaybeDefmt;
+use crate::data_types::address_encoding::AddressEncodingError;
+use crate::extension::NoExtension;
 
 /// Extends the acceptable values in the AE field for TLVs.
 ///

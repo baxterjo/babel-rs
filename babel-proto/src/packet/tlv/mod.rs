@@ -18,24 +18,20 @@ use core::any::type_name;
 
 #[doc(inline)]
 pub use ack_req_slice::AckReqSlice;
-
 #[doc(inline)]
 pub use ack_slice::AckSlice;
-
 #[doc(inline)]
 pub use hello_slice::HelloSlice;
-
 #[doc(inline)]
 pub use ihu_slice::IhuSlice;
 
-use crate::packet::{
-    error::{layer::Layer, len_error::LenError, tlv_err::TlvError},
-    len_source::LenSource,
-    tlv::tlv_slice::TlvSlice,
-};
+use crate::packet::error::layer::Layer;
+use crate::packet::error::len_error::LenError;
+use crate::packet::error::tlv_err::TlvError;
+use crate::packet::len_source::LenSource;
+use crate::packet::tlv::tlv_slice::TlvSlice;
 
 /// Trait that defines a TLV with a known `Type` value and structure.
-///
 // IMPORTANT: When accessing fields **BEYOND** TlvHeader::LEN + Self::MIN_LEN, all accessors MUST
 // be checked and safe. These constructors DO NOT guarantee safety beyond that point.
 pub trait TypedTlv<'a>: Sized

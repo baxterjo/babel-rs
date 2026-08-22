@@ -1,20 +1,18 @@
-use core::{fmt::Display, hash::Hash, iter::FilterMap, slice::IterMut};
+use core::fmt::Display;
+use core::hash::Hash;
+use core::iter::FilterMap;
+use core::slice::IterMut;
 
 use managed::ManagedSlice;
 use thiserror::Error;
 
-use crate::{
-    data_types::Address,
-    extension::address::AddressExt,
-    utils::{
-        Duration, Instant,
-        rx_cost::RxCost,
-        storage::{InternallyKeyed, ManagedSliceExt},
-        timer::{Timer, TimerError},
-    },
-};
-
 use super::seqno::SeqNo;
+use crate::data_types::Address;
+use crate::extension::address::AddressExt;
+use crate::utils::rx_cost::RxCost;
+use crate::utils::storage::{InternallyKeyed, ManagedSliceExt};
+use crate::utils::timer::{Timer, TimerError};
+use crate::utils::{Duration, Instant};
 
 /// Recommended message intervals indicated in [Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.2)
 pub const DEFAULT_MULTICAST_HELLO_INTERVAL_SECS: u64 = 4;
@@ -60,7 +58,8 @@ impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
             hello_interval
                 .unwrap_or_else(|| Duration::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS)),
         )?;
-        // Update should not fire immediately as the router does not have a route table for this interface.
+        // Update should not fire immediately as the router does not have a route table for this
+        // interface.
         let update_timer = Timer::new(
             now,
             update_interval.unwrap_or_else(|| Duration::from_secs(DEFAULT_UPDATE_INTERVAL_SECS)),

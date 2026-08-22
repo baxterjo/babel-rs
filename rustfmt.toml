@@ -12,4 +12,4 @@ doc_comment_code_block_width = 100
 
 # --- Imports (nightly) ---
 group_imports = "StdExternalCrate"
-imports_granularity = "Crate"
+imports_granularity = "Module"

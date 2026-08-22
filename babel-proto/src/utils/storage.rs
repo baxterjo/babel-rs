@@ -89,8 +89,8 @@ where
                     None => {
                         match self {
                             ManagedSlice::Borrowed(_) => {
-                                // If the slice is borrowed then it has pre-allocated capacity, so we
-                                // cannot insert.
+                                // If the slice is borrowed then it has pre-allocated capacity, so
+                                // we cannot insert.
 
                                 // If it is full, there will be no elements that contain `None`,
                                 // return the value that would have been put in.

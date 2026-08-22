@@ -1,5 +1,6 @@
-use crate::packet::error::len_error::LenError;
 use thiserror::Error;
+
+use crate::packet::error::len_error::LenError;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

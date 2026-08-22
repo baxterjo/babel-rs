@@ -1,3 +1,5 @@
+use super::tlv::Tlv;
+use super::{PacketWriterError, PacketWriterStep};
 use crate::data_structures::seqno::SeqNo;
 use crate::data_types::Interval;
 use crate::packet::packet_header_slice::PacketHeaderSlice;
@@ -5,11 +7,6 @@ use crate::packet::tlv::hello_slice::HelloFlags;
 use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
 use crate::packet::writer::finished_packet_body::FinishedPacketBody;
 use crate::utils::rx_cost::RxCost;
-
-use super::PacketWriterError;
-
-use super::PacketWriterStep;
-use super::tlv::Tlv;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

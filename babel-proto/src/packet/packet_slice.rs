@@ -1,13 +1,12 @@
 use core::fmt::Debug;
 
-use crate::packet::{
-    error::{layer::Layer, len_error::LenError},
-    len_source::LenSource,
-    packet_header::BabelPacketHeader,
-    packet_header_slice::PacketHeaderSlice,
-    tlv::reader::TlvReader,
-    utils::get_unchecked_be_u16,
-};
+use crate::packet::error::layer::Layer;
+use crate::packet::error::len_error::LenError;
+use crate::packet::len_source::LenSource;
+use crate::packet::packet_header::BabelPacketHeader;
+use crate::packet::packet_header_slice::PacketHeaderSlice;
+use crate::packet::tlv::reader::TlvReader;
+use crate::packet::utils::get_unchecked_be_u16;
 
 /// A slice containing the header, body, and trailer of a Babel Packet
 pub struct PacketSlice<'a> {

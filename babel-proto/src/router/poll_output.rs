@@ -1,17 +1,17 @@
 use managed::ManagedSlice;
 
+use super::BabelRouter;
 use crate::data_structures::interface::InterfaceHandle;
-use crate::extension::{address::AddressExt, parser_state::ParserStateExt};
-use crate::output::Transmit;
+use crate::error::BabelError;
+use crate::extension::address::AddressExt;
+use crate::extension::parser_state::ParserStateExt;
+use crate::output::{Output, Transmit};
 use crate::packet::tlv::hello_slice::HelloFlags;
 use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
-use crate::utils::Duration;
 use crate::utils::destination::{Claim, DestAddr};
 use crate::utils::storage::ManagedSliceExt;
-use crate::{error::BabelError, output::Output, utils::Instant};
-
-use super::BabelRouter;
+use crate::utils::{Duration, Instant};
 
 impl<'storage, A, P, const MN: u8, const V: u8> BabelRouter<'storage, P, A, MN, V>
 where
@@ -414,17 +414,17 @@ mod test {
     use core::net::Ipv6Addr;
 
     use super::*;
-    use crate::{
-        data_structures::{neighbour::NeighbourIndex, seqno::SeqNo},
-        data_types::{Address, RouterId},
-        extension::NoExtension,
-        output::TransmitDestination,
-        packet::{
-            packet_slice::PacketSlice,
-            tlv::{HelloSlice, IhuSlice, TypedTlv, tlv_slice::TlvSlice},
-        },
-        utils::{rx_cost::RxCost, storage::ManagedSliceExt, timer::Timer},
-    };
+    use crate::data_structures::neighbour::NeighbourIndex;
+    use crate::data_structures::seqno::SeqNo;
+    use crate::data_types::{Address, RouterId};
+    use crate::extension::NoExtension;
+    use crate::output::TransmitDestination;
+    use crate::packet::packet_slice::PacketSlice;
+    use crate::packet::tlv::tlv_slice::TlvSlice;
+    use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
+    use crate::utils::rx_cost::RxCost;
+    use crate::utils::storage::ManagedSliceExt;
+    use crate::utils::timer::Timer;
 
     // Long enough that it never fires again during a test (still under the Timer max of
     // 655.35s), short enough to stay well clear of the small durations used for IHU/ucast hello.

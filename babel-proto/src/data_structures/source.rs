@@ -1,12 +1,10 @@
 use managed::ManagedSlice;
 
-use crate::{
-    data_types::{RouterId, address::Address},
-    extension::address::AddressExt,
-    utils::storage::InternallyKeyed,
-};
-
 use super::seqno::SeqNo;
+use crate::data_types::RouterId;
+use crate::data_types::address::Address;
+use crate::extension::address::AddressExt;
+use crate::utils::storage::InternallyKeyed;
 
 pub struct SourceTable<'storage, A>
 where

@@ -1,9 +1,7 @@
+use super::{PacketWriterError, PacketWriterStep};
 use crate::packet::tlv::TypedTlv;
 use crate::packet::tlv::pad_slice::PadNSlice;
 use crate::packet::writer::ready::Ready;
-
-use super::PacketWriterError;
-use super::PacketWriterStep;
 
 /// Tlv writer step.
 ///
@@ -17,8 +15,8 @@ pub(crate) struct Tlv {
 }
 
 impl<'a> PacketWriterStep<'a, Tlv> {
-    /// State transitions for when finishing a TLV succeeds or fails when the current TLV is the first
-    /// one.
+    /// State transitions for when finishing a TLV succeeds or fails when the current TLV is the
+    /// first one.
     pub(crate) fn finish_tlv(
         self,
     ) -> Result<PacketWriterStep<'a, Ready>, (PacketWriterError, PacketWriterStep<'a, Ready>)> {

@@ -1,14 +1,12 @@
 use core::fmt::Debug;
 
-use crate::{
-    data_structures::seqno::SeqNo,
-    data_types::Interval,
-    packet::{
-        tlv::{TypedTlv, tlv_header::TlvHeader, tlv_slice::TlvSlice},
-        utils::get_unchecked_be_u16,
-    },
-    utils::Duration,
-};
+use crate::data_structures::seqno::SeqNo;
+use crate::data_types::Interval;
+use crate::packet::tlv::TypedTlv;
+use crate::packet::tlv::tlv_header::TlvHeader;
+use crate::packet::tlv::tlv_slice::TlvSlice;
+use crate::packet::utils::get_unchecked_be_u16;
+use crate::utils::Duration;
 
 /// Hello flags as defined in section
 /// [4.6.5](https://datatracker.ietf.org/doc/html/rfc8966#name-hello)
@@ -23,7 +21,8 @@ use crate::{
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// ```
 /// U (Unicast) flag (8000 hexadecimal):
-///     if set, then this Hello represents a Unicast Hello, otherwise it represents a Multicast Hello;
+///     if set, then this Hello represents a Unicast Hello, otherwise it represents a Multicast
+/// Hello;
 ///
 /// X:
 ///     all other bits MUST be sent as 0 and silently ignored on reception.
@@ -199,9 +198,8 @@ impl<'a> HelloSlice<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::packet::tlv::tlv_slice::TlvSlice;
-
     use super::*;
+    use crate::packet::tlv::tlv_slice::TlvSlice;
 
     #[test]
     fn hello_flags_create_as_expected() {

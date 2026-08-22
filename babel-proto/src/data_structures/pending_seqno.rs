@@ -1,12 +1,12 @@
 use managed::ManagedSlice;
 
-use crate::{
-    data_types::{Interval, RouterId, address::Address},
-    extension::address::AddressExt,
-    utils::{Instant, storage::InternallyKeyed},
-};
-
-use super::{neighbour::NeighbourIndex, seqno::SeqNo};
+use super::neighbour::NeighbourIndex;
+use super::seqno::SeqNo;
+use crate::data_types::address::Address;
+use crate::data_types::{Interval, RouterId};
+use crate::extension::address::AddressExt;
+use crate::utils::Instant;
+use crate::utils::storage::InternallyKeyed;
 
 pub struct PendingSeqnoRequestTable<'storage, A: AddressExt> {
     inner: ManagedSlice<'storage, Option<SeqnoRequest<A>>>,
@@ -54,10 +54,12 @@ pub struct SeqnoRequest<A: AddressExt> {
     seqno: SeqNo,
     /// 3.2.7-2.2: the neighbour, if any, on behalf of which we are forwarding this request
     neighbor: Option<NeighbourIndex<A>>,
-    /// 3.2.7-2.3: a small integer indicating the number of times that this request will be resent if it remains unsatisfied
+    /// 3.2.7-2.3: a small integer indicating the number of times that this request will be resent
+    /// if it remains unsatisfied
     retries: u8,
 
-    /// 3.2.7-3: There is one timer associated with each pending seqno request; it governs both the resending of requests and their expiry
+    /// 3.2.7-3: There is one timer associated with each pending seqno request; it governs both the
+    /// resending of requests and their expiry
     last_try: Instant,
     retry_interval: Interval,
 }

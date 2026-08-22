@@ -1,6 +1,7 @@
 use core::iter::Iterator;
 
-use crate::packet::{error::tlv_err::TlvError, tlv::tlv_slice::TlvSlice};
+use crate::packet::error::tlv_err::TlvError;
+use crate::packet::tlv::tlv_slice::TlvSlice;
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct TlvReader<'a> {
@@ -29,7 +30,8 @@ impl<'a> Iterator for TlvReader<'a> {
         // Get next slice.
         let tlv_result = match TlvSlice::from_slice(&self.slice[self.pos..self.slice.len()]) {
             Ok(tlv) => {
-                // When the slice parses as expected, position is advanced by the length of the slice.
+                // When the slice parses as expected, position is advanced by the length of the
+                // slice.
                 self.pos += tlv.slice().len();
                 Ok(tlv)
             }
@@ -57,9 +59,8 @@ impl<'a> Iterator for TlvReader<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::packet::tlv::{
-        AckReqSlice, AckSlice, HelloSlice, IhuSlice, TypedTlv, reader::TlvReader,
-    };
+    use crate::packet::tlv::reader::TlvReader;
+    use crate::packet::tlv::{AckReqSlice, AckSlice, HelloSlice, IhuSlice, TypedTlv};
 
     #[test]
     fn test_normal_packet_body() {

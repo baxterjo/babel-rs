@@ -1,11 +1,11 @@
+use core::convert::Infallible;
+use core::error::Error;
 use core::fmt::Debug;
-use core::{convert::Infallible, error::Error};
 
 use crate::MaybeDefmt;
-use crate::{
-    data_types::address::AddressError,
-    extension::{NoExtension, address_encoding::AddressEncodingExt},
-};
+use crate::data_types::address::AddressError;
+use crate::extension::NoExtension;
+use crate::extension::address_encoding::AddressEncodingExt;
 
 /// Extends the domain of possible address types that can be used in the Babel router.
 ///

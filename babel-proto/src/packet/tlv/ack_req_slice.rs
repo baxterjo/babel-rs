@@ -1,13 +1,10 @@
 use thiserror::Error;
 
-use crate::{
-    data_types::Interval,
-    packet::{
-        tlv::{TypedTlv, tlv_header::TlvHeader},
-        utils::get_unchecked_be_u16,
-    },
-    utils::Duration,
-};
+use crate::data_types::Interval;
+use crate::packet::tlv::TypedTlv;
+use crate::packet::tlv::tlv_header::TlvHeader;
+use crate::packet::utils::get_unchecked_be_u16;
+use crate::utils::Duration;
 
 /// Acknowledgment request TLV as defined in section
 /// [4.6.3](https://datatracker.ietf.org/doc/html/rfc8966#name-acknowledgment-request)
@@ -22,7 +19,8 @@ use crate::{
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// ```
 ///
-/// This TLV requests that the receiver send an Acknowledgment TLV within the number of centiseconds specified by the Interval field.
+/// This TLV requests that the receiver send an Acknowledgment TLV within the number of centiseconds
+/// specified by the Interval field.
 ///
 /// NOTE: `Type`, `Length`, and `Reserved` fields are not represented here as they have no value
 /// beyond parsing and encoding.
@@ -76,9 +74,8 @@ impl<'a> AckReqSlice<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::packet::tlv::tlv_slice::TlvSlice;
-
     use super::*;
+    use crate::packet::tlv::tlv_slice::TlvSlice;
     #[test]
     fn normal_slice() {
         // With sub_tlvs

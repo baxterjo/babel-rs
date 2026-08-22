@@ -7,6 +7,4 @@ pub(crate) mod storage;
 pub(crate) mod time;
 pub(crate) mod timer;
 
-pub use time::Duration;
-pub use time::DurationMultiplier as IntervalMultiplier;
-pub use time::Instant;
+pub use time::{Duration, DurationMultiplier as IntervalMultiplier, Instant};

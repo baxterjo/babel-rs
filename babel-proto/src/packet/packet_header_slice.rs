@@ -1,11 +1,10 @@
 use core::fmt::Debug;
 
-use crate::packet::{
-    error::{layer::Layer, len_error::LenError},
-    len_source::LenSource,
-    packet_header::BabelPacketHeader,
-    utils::get_unchecked_be_u16,
-};
+use crate::packet::error::layer::Layer;
+use crate::packet::error::len_error::LenError;
+use crate::packet::len_source::LenSource;
+use crate::packet::packet_header::BabelPacketHeader;
+use crate::packet::utils::get_unchecked_be_u16;
 
 pub struct PacketHeaderSlice<'a> {
     slice: &'a [u8],

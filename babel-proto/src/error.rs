@@ -1,11 +1,11 @@
 use thiserror::Error;
 
-use crate::{
-    data_structures::{interface::InterfaceTableError, neighbour::NeighbourTableError},
-    data_types::address_encoding::AddressEncodingError,
-    extension::address::AddressExt,
-    packet::{error::len_error::LenError, writer::PacketWriterError},
-};
+use crate::data_structures::interface::InterfaceTableError;
+use crate::data_structures::neighbour::NeighbourTableError;
+use crate::data_types::address_encoding::AddressEncodingError;
+use crate::extension::address::AddressExt;
+use crate::packet::error::len_error::LenError;
+use crate::packet::writer::PacketWriterError;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

@@ -1,9 +1,9 @@
 use core::fmt::Debug;
 
-use crate::{
-    data_structures::interface::InterfaceHandle, data_types::Address,
-    extension::address::AddressExt, utils::Instant,
-};
+use crate::data_structures::interface::InterfaceHandle;
+use crate::data_types::Address;
+use crate::extension::address::AddressExt;
+use crate::utils::Instant;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

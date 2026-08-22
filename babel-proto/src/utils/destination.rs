@@ -2,10 +2,10 @@ use core::fmt::Display;
 
 use thiserror::Error;
 
-use crate::{
-    data_structures::interface::InterfaceHandle, data_types::Address,
-    extension::address::AddressExt, output::TransmitDestination,
-};
+use crate::data_structures::interface::InterfaceHandle;
+use crate::data_types::Address;
+use crate::extension::address::AddressExt;
+use crate::output::TransmitDestination;
 
 #[derive(Debug, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

@@ -1,21 +1,17 @@
 use managed::ManagedSlice;
 use thiserror::Error;
 
-use crate::{
-    data_structures::interface::DEFAULT_MULTICAST_HELLO_INTERVAL_SECS,
-    data_types::address::Address,
-    extension::address::AddressExt,
-    packet::tlv::{HelloSlice, IhuSlice},
-    utils::{
-        Duration, Instant, IntervalMultiplier as HoldTimeMultiplier,
-        bit_history::BitHistory,
-        rx_cost::RxCost as TxCost,
-        storage::{InternallyKeyed, ManagedSliceExt},
-        timer::{Timer, TimerError},
-    },
-};
-
-use super::{interface::InterfaceHandle, seqno::SeqNo};
+use super::interface::InterfaceHandle;
+use super::seqno::SeqNo;
+use crate::data_structures::interface::DEFAULT_MULTICAST_HELLO_INTERVAL_SECS;
+use crate::data_types::address::Address;
+use crate::extension::address::AddressExt;
+use crate::packet::tlv::{HelloSlice, IhuSlice};
+use crate::utils::bit_history::BitHistory;
+use crate::utils::rx_cost::RxCost as TxCost;
+use crate::utils::storage::{InternallyKeyed, ManagedSliceExt};
+use crate::utils::timer::{Timer, TimerError};
+use crate::utils::{Duration, Instant, IntervalMultiplier as HoldTimeMultiplier};
 
 pub const DEFAULT_NEIGHBOUR_EXPIRY_SECS: u64 = 10;
 
@@ -221,7 +217,8 @@ pub(crate) enum NeighbourInitState {
     /// If the neighbour was added through an out of band method. Then this router has never
     /// received a hello from it. So we set an expiry timer for it.
     Expiry(Timer),
-    /// If the this router has recevied a hello for this neighbour, then the hello info is stored here.
+    /// If the this router has recevied a hello for this neighbour, then the hello info is stored
+    /// here.
     HelloReceived(HelloReceived),
 }
 
@@ -236,8 +233,8 @@ pub(crate) struct HelloReceived {
     /// None if this router has never received a unicast hello from this neighbour
     ucast_hello: Option<RxHelloInfo>,
     /// a history of recently received Multicast Hello packets from this neighbour; this
-    /// can, for example, be a sequence of n bits, for some small value n, indicating which of the n
-    /// hellos most recently sent by this neighbour have been received by the local node.
+    /// can, for example, be a sequence of n bits, for some small value n, indicating which of the
+    /// n hellos most recently sent by this neighbour have been received by the local node.
     /// the expected incoming Multicast Hello sequence number for this neighbour, an
     /// integer modulo 2^16
     ///

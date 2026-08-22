@@ -1,7 +1,6 @@
-use crate::packet::{
-    tlv::{TypedTlv, tlv_header::TlvHeader},
-    utils::get_unchecked_be_u16,
-};
+use crate::packet::tlv::TypedTlv;
+use crate::packet::tlv::tlv_header::TlvHeader;
+use crate::packet::utils::get_unchecked_be_u16;
 
 /// Acknowledgement TLV as defined in section
 /// [4.6.4](https://datatracker.ietf.org/doc/html/rfc8966#name-acknowledgment)
@@ -58,9 +57,8 @@ impl<'a> AckSlice<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::packet::tlv::tlv_slice::TlvSlice;
-
     use super::*;
+    use crate::packet::tlv::tlv_slice::TlvSlice;
 
     #[test]
     fn normal_slice() {

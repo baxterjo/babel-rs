@@ -2,11 +2,10 @@ use core::marker::PhantomData;
 
 use managed::ManagedSlice;
 
-use crate::data_structures::interface::{Interface, InterfaceHandle};
-use crate::data_structures::neighbour::{Neighbour, NeighbourIndex};
+use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTable};
+use crate::data_structures::neighbour::{Neighbour, NeighbourIndex, NeighbourTable};
 use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
 use crate::data_structures::route::{Route, RouteTable};
-use crate::data_structures::{interface::InterfaceTable, neighbour::NeighbourTable};
 use crate::data_types::{Address, RouterId};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
@@ -62,8 +61,8 @@ where
     /// Create a new Babel Router with user provided storage.
     ///
     /// Arguments:
-    /// `id`: The router ID of this router. This should be globally unique within your routing domain.
-    /// `iface_storage`: User provided storage that will be used internally.
+    /// `id`: The router ID of this router. This should be globally unique within your routing
+    /// domain. `iface_storage`: User provided storage that will be used internally.
     /// `neighbour_storage`: User provided storage that will be used internally.
     /// `pending_seqno_storage`: User provided storage that will be used internally.
     pub fn new_with_storage<IF, N, PS, R>(
@@ -93,7 +92,8 @@ where
     /// Create a new Babel Router.
     ///
     /// Arguments:
-    /// `id`: The router ID of this router. This should be globally unique within your routing domain.
+    /// `id`: The router ID of this router. This should be globally unique within your routing
+    /// domain.
     #[cfg(any(feature = "std", feature = "alloc"))]
     pub fn new(id: RouterId) -> Self {
         Self {

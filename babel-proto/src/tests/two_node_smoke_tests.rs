@@ -1,14 +1,14 @@
 use core::net::Ipv6Addr;
 
-use crate::{
-    data_structures::{interface::InterfaceHandle, neighbour::NeighbourIndex},
-    data_types::RouterId,
-    input::Receive,
-    output::Output,
-    packet::packet_slice::PacketSlice,
-    router::BabelRouter,
-    utils::{Instant, storage::ManagedSliceExt},
-};
+use crate::data_structures::interface::InterfaceHandle;
+use crate::data_structures::neighbour::NeighbourIndex;
+use crate::data_types::RouterId;
+use crate::input::Receive;
+use crate::output::Output;
+use crate::packet::packet_slice::PacketSlice;
+use crate::router::BabelRouter;
+use crate::utils::Instant;
+use crate::utils::storage::ManagedSliceExt;
 
 #[test]
 fn two_nodes_say_hello_and_ihu() {

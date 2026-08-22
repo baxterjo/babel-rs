@@ -1,6 +1,7 @@
 // Attribution: Etherparse version 0.21.0
 
-use crate::packet::{error::layer::Layer, len_source::LenSource};
+use crate::packet::error::layer::Layer;
+use crate::packet::len_source::LenSource;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -109,9 +110,10 @@ impl core::error::Error for LenError {
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
-    use super::*;
     use alloc::format;
     use std::error::Error;
+
+    use super::*;
 
     #[test]
     fn add_offset() {

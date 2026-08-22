@@ -1,6 +1,7 @@
 use core::net::{Ipv4Addr, Ipv6Addr};
 
-use crate::{data_types::RouterId, extension::parser_state::ParserStateExt};
+use crate::data_types::RouterId;
+use crate::extension::parser_state::ParserStateExt;
 
 #[derive(Debug, Default)]
 pub struct Parser<E>

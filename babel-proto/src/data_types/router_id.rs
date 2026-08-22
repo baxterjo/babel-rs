@@ -1,5 +1,5 @@
-use core::fmt::Debug as DebugT;
-use core::fmt::Display;
+use core::fmt::{Debug as DebugT, Display};
+
 use thiserror::Error;
 
 use crate::MaybeDefmt;

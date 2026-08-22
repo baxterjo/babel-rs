@@ -1,10 +1,12 @@
 use core::fmt::Debug;
 
-use crate::packet::{
-    error::{layer::Layer, len_error::LenError, tlv_err::TlvError},
-    len_source::LenSource,
-    tlv::{TypedTlv, tlv_header::TlvHeader, tlv_header_slice::TlvHeaderSlice},
-};
+use crate::packet::error::layer::Layer;
+use crate::packet::error::len_error::LenError;
+use crate::packet::error::tlv_err::TlvError;
+use crate::packet::len_source::LenSource;
+use crate::packet::tlv::TypedTlv;
+use crate::packet::tlv::tlv_header::TlvHeader;
+use crate::packet::tlv::tlv_header_slice::TlvHeaderSlice;
 
 /// A slice containing the header and payload of a TLV.
 ///

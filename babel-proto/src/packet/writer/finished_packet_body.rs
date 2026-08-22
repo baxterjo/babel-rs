@@ -1,4 +1,5 @@
-use crate::{output::DatagramSend, packet::writer::PacketWriterStep};
+use crate::output::DatagramSend;
+use crate::packet::writer::PacketWriterStep;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

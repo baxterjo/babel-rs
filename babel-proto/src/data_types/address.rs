@@ -4,7 +4,8 @@ use core::fmt::Display;
 
 use thiserror::Error;
 
-use crate::{data_types::address_encoding::AddressEncoding, extension::address::AddressExt};
+use crate::data_types::address_encoding::AddressEncoding;
+use crate::extension::address::AddressExt;
 
 /// Have to create my own Ipv4Addr type because core lib doesn't allow borrowing a slice of its
 /// octets???
@@ -41,7 +42,6 @@ impl Into<core::net::Ipv4Addr> for Ipv4Addr {
 
 /// Have to create my own Ipv6Addr type because core lib doesn't allow borrowing a slice of its
 /// octets???
-///
 // Crashing out on this FR
 // TODO: Manually implement defmt to skip out on zeros in the middle.
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

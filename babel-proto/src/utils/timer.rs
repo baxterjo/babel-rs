@@ -1,9 +1,8 @@
 use thiserror::Error;
 
-use crate::{
-    data_types::Interval,
-    utils::{Duration, Instant, timer::TimerError::DurationTooLarge},
-};
+use crate::data_types::Interval;
+use crate::utils::timer::TimerError::DurationTooLarge;
+use crate::utils::{Duration, Instant};
 
 /// A simple timer.
 #[derive(Debug, Clone, Copy)]

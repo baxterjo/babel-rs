@@ -1,4 +1,5 @@
-use core::{cmp::Ordering, ops};
+use core::cmp::Ordering;
+use core::ops;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

@@ -101,17 +101,14 @@ pub enum PacketWriterError {
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
-    use crate::{
-        data_structures::seqno::SeqNo,
-        output::DatagramSend,
-        packet::{
-            packet_slice::PacketSlice,
-            tlv::{HelloSlice, IhuSlice, TypedTlv, hello_slice::HelloFlags},
-        },
-        utils::{Duration, rx_cost::RxCost},
-    };
-
     use super::*;
+    use crate::data_structures::seqno::SeqNo;
+    use crate::output::DatagramSend;
+    use crate::packet::packet_slice::PacketSlice;
+    use crate::packet::tlv::hello_slice::HelloFlags;
+    use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
+    use crate::utils::Duration;
+    use crate::utils::rx_cost::RxCost;
     #[test]
     fn packet_writer_and_slice_yield_same_results() {
         let buf = Vec::new();

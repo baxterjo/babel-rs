@@ -1,15 +1,16 @@
 use core::fmt::Debug;
 
-use crate::{
-    data_types::Interval,
-    packet::{
-        error::{layer::Layer, len_error::LenError, tlv_err::TlvError},
-        len_source::LenSource,
-        tlv::{TypedTlv, tlv_header::TlvHeader, tlv_slice::TlvSlice},
-        utils::get_unchecked_be_u16,
-    },
-    utils::{Duration, rx_cost::RxCost},
-};
+use crate::data_types::Interval;
+use crate::packet::error::layer::Layer;
+use crate::packet::error::len_error::LenError;
+use crate::packet::error::tlv_err::TlvError;
+use crate::packet::len_source::LenSource;
+use crate::packet::tlv::TypedTlv;
+use crate::packet::tlv::tlv_header::TlvHeader;
+use crate::packet::tlv::tlv_slice::TlvSlice;
+use crate::packet::utils::get_unchecked_be_u16;
+use crate::utils::Duration;
+use crate::utils::rx_cost::RxCost;
 
 /// IHU TLV as defined in section
 /// [4.6.6](https://datatracker.ietf.org/doc/html/rfc8966#name-ihu)
@@ -135,8 +136,8 @@ impl<'a> IhuSlice<'a> {
 
         b_debug!("Start: {}, Slice Len: {}", idx_start, len);
 
-        // This **MUST** be checked as the source of address_len can be user supplied through extensions
-        // and cause a footgun.
+        // This **MUST** be checked as the source of address_len can be user supplied through
+        // extensions and cause a footgun.
         Ok(self.slice.get(idx_start..len).ok_or(LenError {
             required_len: len,
             len,
@@ -149,12 +150,10 @@ impl<'a> IhuSlice<'a> {
 
 #[cfg(all(test, feature = "std"))]
 mod test {
-    use crate::{
-        data_types::address_encoding::AddressEncoding, extension::NoExtension,
-        packet::tlv::tlv_slice::TlvSlice,
-    };
-
     use super::*;
+    use crate::data_types::address_encoding::AddressEncoding;
+    use crate::extension::NoExtension;
+    use crate::packet::tlv::tlv_slice::TlvSlice;
 
     #[test]
     fn normal_slice() {
