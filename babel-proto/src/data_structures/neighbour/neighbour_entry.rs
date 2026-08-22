@@ -1,17 +1,13 @@
-use crate::{
-    data_structures::{
-        interface::{DEFAULT_MULTICAST_HELLO_INTERVAL_SECS, InterfaceHandle},
-        neighbour::NeighbourTableError,
-        seqno::SeqNo,
-    },
-    data_types::Address,
-    extension::address::AddressExt,
-    packet::tlv::{HelloSlice, IhuSlice},
-    utils::{
-        Duration, HoldTimeMultiplier, Instant, InternallyKeyed, bit_history::BitHistory,
-        rx_cost::RxCost as TxCost, timer::Timer,
-    },
-};
+use crate::data_structures::interface::{DEFAULT_MULTICAST_HELLO_INTERVAL_SECS, InterfaceHandle};
+use crate::data_structures::neighbour::NeighbourTableError;
+use crate::data_structures::seqno::SeqNo;
+use crate::data_types::Address;
+use crate::extension::address::AddressExt;
+use crate::packet::tlv::{HelloSlice, IhuSlice};
+use crate::utils::bit_history::BitHistory;
+use crate::utils::rx_cost::RxCost as TxCost;
+use crate::utils::timer::Timer;
+use crate::utils::{Duration, HoldTimeMultiplier, Instant, InternallyKeyed};
 
 pub const DEFAULT_NEIGHBOUR_EXPIRY_SECS: u64 = 10;
 
@@ -277,5 +273,226 @@ impl<A: AddressExt> Neighbour<A> {
         self.tx_cost = rx_cost;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::extension::NoExtension;
+    use crate::packet::tlv::TypedTlv;
+    use crate::packet::tlv::hello_slice::HelloFlags;
+    use crate::packet::tlv::tlv_slice::TlvSlice;
+
+    /// The largest interval a Timer will accept. The Interval field on the wire is 16 bits of
+    /// centiseconds, so this is also the largest interval a peer can legally advertise.
+    const MAX_TIMER: Duration = Duration::from_centis(u16::MAX as u64);
+
+    fn hello_tlv(unicast: bool, seqno: u16, interval_centis: u16) -> [u8; 8] {
+        let flags = HelloFlags::new(unicast).to_wire();
+        let seqno = seqno.to_be_bytes();
+        let interval = interval_centis.to_be_bytes();
+        [
+            HelloSlice::TYPE_ID,
+            HelloSlice::MIN_LEN as u8,
+            flags[0],
+            flags[1],
+            seqno[0],
+            seqno[1],
+            interval[0],
+            interval[1],
+        ]
+    }
+
+    fn hello(bytes: &[u8]) -> HelloSlice<'_> {
+        HelloSlice::from_untyped(TlvSlice::from_slice(bytes).expect("tlv should parse"))
+            .expect("hello should parse")
+    }
+
+    fn neighbour(now: Instant) -> Neighbour<NoExtension> {
+        Neighbour::new(
+            InterfaceHandle::try_from("iface_1").expect("bad interface handle"),
+            core::net::Ipv6Addr::LOCALHOST.into(),
+            None,
+            NeighbourInitState::Expiry(
+                Timer::new(now, Duration::from_secs(DEFAULT_NEIGHBOUR_EXPIRY_SECS))
+                    .expect("valid timer"),
+            ),
+        )
+    }
+
+    fn mcast_history(n: &Neighbour<NoExtension>) -> BitHistory {
+        match n.state {
+            NeighbourInitState::HelloReceived(info) => {
+                info.mcast_hello
+                    .expect("a multicast hello should have been recorded")
+                    .history
+            }
+            NeighbourInitState::Expiry(_) => panic!("expected the neighbour to have heard a hello"),
+        }
+    }
+
+    //  ___ _  _ _____ ___ _____   ___   _      ___  ___  _   _ _  _ ___  ___
+    // |_ _| \| |_   _| __| _ \ \ / /_\ | |    | _ )/ _ \| | | | \| |   \/ __|
+    //  | || .` | | | | _||   /\ V / _ \| |__  | _ \ (_) | |_| | .` | |) \__ \
+    // |___|_|\_| |_| |___|_|_\ \_/_/ \_\____| |___/\___/ \___/|_|\_|___/|___/
+
+    /// The IHU interval is derived by doubling the neighbour's Hello interval, but the Interval
+    /// field is 16 bits, so a peer may legally advertise up to `u16::MAX` centiseconds — double
+    /// that does not fit in a `Timer`. The doubling has to be clamped before it reaches
+    /// `Timer::set_duration`, whose error is unwrapped on the assumption that bounds were
+    /// pre-checked. A peer on the link controls this value, so an unclamped doubling is a remote
+    /// panic.
+    #[test]
+    fn hello_interval_that_doubles_past_the_timer_bound_is_clamped() {
+        let now = Instant::from_secs(0);
+        let mut n = neighbour(now);
+
+        // The first hello takes the `None` branch and arms `pending.ihu_timer`, so the second
+        // one goes through `set_duration` rather than `new_eager`.
+        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+        assert!(
+            n.pending.ihu_timer.is_some(),
+            "the first hello should arm the IHU timer"
+        );
+
+        // 32768 centis is the smallest interval whose double overflows the timer's bound.
+        n.handle_hello(now, hello(&hello_tlv(false, 1, 32_768)));
+
+        let timer = n
+            .pending
+            .ihu_timer
+            .expect("the IHU timer should still be set");
+        assert_eq!(timer.duration(), MAX_TIMER);
+    }
+
+    #[test]
+    fn maximum_advertised_hello_interval_is_clamped() {
+        let now = Instant::from_secs(0);
+        let mut n = neighbour(now);
+
+        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+        n.handle_hello(now, hello(&hello_tlv(false, 1, u16::MAX)));
+
+        let timer = n
+            .pending
+            .ihu_timer
+            .expect("the IHU timer should still be set");
+        assert_eq!(timer.duration(), MAX_TIMER);
+    }
+
+    /// Below the doubling boundary the interval must pass through untouched — the clamp should
+    /// not be quietly capping ordinary intervals.
+    #[test]
+    fn hello_interval_below_the_boundary_doubles_without_clamping() {
+        let now = Instant::from_secs(0);
+        let mut n = neighbour(now);
+
+        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+        n.handle_hello(now, hello(&hello_tlv(false, 1, 30_000)));
+
+        let timer = n
+            .pending
+            .ihu_timer
+            .expect("the IHU timer should still be set");
+        assert_eq!(timer.duration(), Duration::from_centis(60_000));
+    }
+
+    //  _  _ ___ ___ _____ ___  _____   __
+    // | || |_ _/ __|_   _/ _ \| _ \ \ / /
+    // | __ || |\__ \ | || (_) |   /\ V /
+    // |_||_|___|___/ |_| \___/|_|_\ |_|
+
+    #[test]
+    fn first_hello_starts_from_a_full_history() {
+        let now = Instant::from_secs(0);
+        let mut n = neighbour(now);
+
+        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+
+        assert_eq!(
+            mcast_history(&n).count(),
+            16,
+            "a new neighbour starts with a clean history for hysteresis"
+        );
+    }
+
+    #[test]
+    fn consecutive_hellos_keep_the_history_clean() {
+        let now = Instant::from_secs(0);
+        let mut n = neighbour(now);
+
+        for seqno in 0..8 {
+            n.handle_hello(now, hello(&hello_tlv(false, seqno, 100)));
+        }
+
+        assert_eq!(mcast_history(&n).count(), 16, "no hellos were missed");
+    }
+
+    #[test]
+    fn a_gap_in_seqnos_records_one_miss_per_skipped_hello() {
+        let now = Instant::from_secs(0);
+        let mut n = neighbour(now);
+
+        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+        // Seqnos 1, 2 and 3 never arrived.
+        n.handle_hello(now, hello(&hello_tlv(false, 4, 100)));
+
+        assert_eq!(
+            mcast_history(&n).count(),
+            13,
+            "three missed hellos should shift in three zeros"
+        );
+    }
+
+    /// `record(true)` has to actually be called on a successful hello. If only misses are
+    /// recorded, zeros shift in on the first loss and can never shift back out, so link quality
+    /// decreases monotonically and permanently.
+    #[test]
+    fn history_recovers_once_enough_hellos_arrive_in_order() {
+        let now = Instant::from_secs(0);
+        let mut n = neighbour(now);
+
+        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+        n.handle_hello(now, hello(&hello_tlv(false, 4, 100)));
+        assert_eq!(mcast_history(&n).count(), 13, "three hellos were missed");
+
+        // Sixteen clean hellos are enough to shift every zero back out of the window.
+        for seqno in 5..21 {
+            n.handle_hello(now, hello(&hello_tlv(false, seqno, 100)));
+        }
+
+        assert_eq!(
+            mcast_history(&n).count(),
+            16,
+            "a link that stops losing hellos should return to a full history"
+        );
+    }
+
+    #[test]
+    fn unicast_and_multicast_hellos_keep_separate_histories() {
+        let now = Instant::from_secs(0);
+        let mut n = neighbour(now);
+
+        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+        n.handle_hello(now, hello(&hello_tlv(true, 0, 100)));
+        // A gap on the multicast side only.
+        n.handle_hello(now, hello(&hello_tlv(false, 4, 100)));
+
+        let NeighbourInitState::HelloReceived(info) = n.state else {
+            panic!("expected the neighbour to have heard a hello");
+        };
+        assert_eq!(
+            info.mcast_hello
+                .expect("multicast recorded")
+                .history
+                .count(),
+            13
+        );
+        assert_eq!(
+            info.ucast_hello.expect("unicast recorded").history.count(),
+            16,
+            "a multicast gap must not be charged against the unicast history"
+        );
     }
 }

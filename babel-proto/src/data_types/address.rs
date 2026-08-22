@@ -223,3 +223,103 @@ impl<A: AddressExt> From<core::net::Ipv4Addr> for Address<A> {
         Self::V4(value.into())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::extension::NoExtension;
+
+    /// Asserts the three things that have to agree for an address to survive a trip over the wire:
+    /// the encoding it declares, the number of bytes it actually writes, and the address that comes
+    /// back out the other side.
+    ///
+    /// The middle one is the load-bearing assertion. `as_wire` and `encoding` are read at different
+    /// points of the TLV writer, so a disagreement between them is not a local error: the receiver
+    /// consumes `address_len()` bytes regardless, and misparses every sub-TLV behind it.
+    fn assert_wire_round_trip(addr: Address<NoExtension>, expected: AddressEncoding<NoExtension>) {
+        assert_eq!(addr.encoding(), expected, "unexpected encoding for {addr}");
+
+        let wire = addr.as_wire();
+        assert_eq!(
+            wire.len(),
+            addr.encoding().address_len(),
+            "{addr} writes {} byte(s) but declares an AE of {} byte(s)",
+            wire.len(),
+            addr.encoding().address_len()
+        );
+
+        let parsed = Address::from_bytes(addr.encoding(), wire).expect("wire form should parse");
+        assert_eq!(parsed, addr, "round trip changed the address");
+    }
+
+    #[test]
+    fn ipv4_round_trips_as_ae_1() {
+        assert_wire_round_trip(
+            core::net::Ipv4Addr::new(192, 168, 0, 5).into(),
+            AddressEncoding::Ipv4,
+        );
+    }
+
+    #[test]
+    fn global_ipv6_round_trips_as_ae_2() {
+        assert_wire_round_trip(
+            core::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1).into(),
+            AddressEncoding::Ipv6,
+        );
+    }
+
+    #[test]
+    fn link_local_ipv6_round_trips_as_ae_3() {
+        assert_wire_round_trip(
+            core::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1).into(),
+            AddressEncoding::LocalIpv6,
+        );
+    }
+
+    #[test]
+    fn link_local_wire_form_is_the_low_eight_bytes() {
+        let addr: Address<NoExtension> =
+            core::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0x0102, 0x0304, 0x0506, 0x0708).into();
+
+        assert_eq!(
+            addr.as_wire(),
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            "a link-local address goes on the wire as the 8-byte suffix after the fe80::/64 prefix"
+        );
+    }
+
+    /// `fe80::/64` is matched on the full 8-byte prefix, so an address that only shares the leading
+    /// two octets is a plain Ipv6 address and must be sent in full.
+    #[test]
+    fn address_outside_the_link_local_prefix_is_not_compressed() {
+        assert_wire_round_trip(
+            core::net::Ipv6Addr::new(0xfe80, 0, 0, 1, 0, 0, 0, 1).into(),
+            AddressEncoding::Ipv6,
+        );
+    }
+
+    #[test]
+    fn wildcard_cannot_produce_an_address() {
+        let err = Address::<NoExtension>::from_bytes(AddressEncoding::WildCard, &[])
+            .expect_err("the wildcard encoding names no single address");
+
+        assert!(matches!(err, AddressError::CannotCreateFromWildCard));
+    }
+
+    #[test]
+    fn from_bytes_rejects_a_length_the_encoding_does_not_expect() {
+        // A link-local suffix is 8 bytes; handing it a full 16-byte address must not silently
+        // truncate.
+        let err = Address::<NoExtension>::from_bytes(AddressEncoding::LocalIpv6, &[0; 16])
+            .expect_err("wrong byte count should be rejected");
+
+        assert!(matches!(
+            err,
+            AddressError::IncorrectByteLength {
+                required_len: 8,
+                len: 16,
+                ..
+            }
+        ));
+    }
+}

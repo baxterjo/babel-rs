@@ -430,6 +430,8 @@ mod test {
     const IFACE_INTERVAL: Duration = Duration::from_micros(600_000_000);
 
     const NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
+    /// The address family Babel normally runs on, and the only one the writer compresses.
+    const LINK_LOCAL_NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
     const NEIGHBOUR_1_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
     const NEIGHBOUR_2_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
 
@@ -872,6 +874,46 @@ mod test {
             // Timer restarted, so an immediate repoll doesn't refire it.
             let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(remaining, Duration::from_secs(30));
+        }
+
+        /// AE=3 declares an 8-byte address, so the IHU has to carry exactly the 8-byte suffix.
+        /// Writing fewer bytes than the encoding advertises desynchronises the receiver for the
+        /// address itself and for every sub-TLV behind it, and link-local is the common
+        /// deployment path rather than an edge case.
+        #[test]
+        fn link_local_interface_address_is_sent_as_eight_bytes_with_ae_3() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1", LINK_LOCAL_NODE_ADDR);
+            add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+            set_ihu_timer(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                Duration::from_secs(30),
+                true,
+            );
+
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
+
+            let ihu =
+                IhuSlice::from_untyped(nth_tlv(&transmit.contents, 0)).expect("should be an ihu");
+            assert_eq!(ihu.ae(), 3, "fe80::/64 uses the link-local encoding");
+            assert_eq!(
+                ihu.address(8).expect("should have an 8 byte address"),
+                &[0, 0, 0, 0, 0, 0, 0, 1]
+            );
+
+            // The IHU is self-terminating: if the address were written short, the declared TLV
+            // length would no longer line up with where the address ends.
+            assert!(
+                ihu.sub_tlvs(8)
+                    .expect("sub-tlv region should resolve")
+                    .is_empty(),
+                "the address should consume the rest of the TLV body"
+            );
         }
 
         #[test]

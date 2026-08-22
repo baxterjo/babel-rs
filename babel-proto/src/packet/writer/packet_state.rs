@@ -152,3 +152,112 @@ impl<'a> PacketState<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn borrowed(buf: &mut [u8]) -> PacketState<'_> {
+        PacketState::new(ManagedSlice::Borrowed(buf))
+    }
+
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    fn owned() -> PacketState<'static> {
+        PacketState::new(ManagedSlice::Owned(alloc::vec::Vec::new()))
+    }
+
+    /// `write_padn_sub_tlv` marks `start_pos = position()` and then immediately performs a write
+    /// that can fail with zero bytes remaining, rolling back to the position it is already at.
+    /// A rollback to the current position is a no-op, not a programming error.
+    #[test]
+    fn rolling_back_to_the_current_position_is_a_no_op() {
+        let mut buf = [0u8; 8];
+        let mut state = borrowed(&mut buf);
+        state.write(&[1, 2, 3]).expect("write should fit");
+
+        let pos = state.position();
+        state.roll_back(pos);
+
+        assert_eq!(state.position(), pos);
+        assert_eq!(&state[..3], &[1, 2, 3], "a no-op rollback must not erase");
+    }
+
+    #[test]
+    #[should_panic(expected = "roll back")]
+    fn rolling_forward_panics() {
+        let mut buf = [0u8; 8];
+        let mut state = borrowed(&mut buf);
+        state.write(&[1, 2, 3]).expect("write should fit");
+
+        state.roll_back(4);
+    }
+
+    #[test]
+    fn borrowed_rollback_rewinds_and_zeroes_the_tail() {
+        let mut buf = [0u8; 8];
+        let mut state = borrowed(&mut buf);
+        state.write(&[1, 2]).expect("write should fit");
+
+        let mark = state.position();
+        state.write(&[9, 9, 9]).expect("write should fit");
+        state.roll_back(mark);
+
+        assert_eq!(state.position(), 2);
+        assert_eq!(
+            &state[..],
+            &[1, 2, 0, 0, 0, 0, 0, 0],
+            "the abandoned bytes should be erased"
+        );
+    }
+
+    /// `write` appends to an owned buffer with `extend_from_slice`, so a rollback that only
+    /// rewinds `pos` would leave stale bytes behind: the next write would land past them while
+    /// `pos` claimed otherwise, and `finish_packet`'s body-length backfill would then disagree
+    /// with the bytes actually in the buffer.
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    #[test]
+    fn owned_rollback_truncates_so_the_next_write_lands_at_the_cursor() {
+        let mut state = owned();
+        state.write(&[1, 2]).expect("owned buffers grow");
+
+        let mark = state.position();
+        state.write(&[9, 9, 9]).expect("owned buffers grow");
+        state.roll_back(mark);
+
+        assert_eq!(state.position(), 2);
+        assert_eq!(state.len(), 2, "the abandoned bytes should be dropped");
+
+        state.write(&[3, 4]).expect("owned buffers grow");
+
+        assert_eq!(state.position(), 4);
+        assert_eq!(
+            &state[..],
+            &[1, 2, 3, 4],
+            "the write after a rollback must land at the cursor"
+        );
+        assert_eq!(
+            state.position(),
+            state.len(),
+            "position and buffer length must agree, or the length backfill is wrong"
+        );
+    }
+
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    #[test]
+    fn owned_rollback_keeps_backfill_targets_addressable() {
+        let mut state = owned();
+        // Stand in for a length field that gets backfilled after the body is written.
+        let mark = state.mark_and_skip::<2>().expect("owned buffers grow");
+        let body_start = state.position();
+        state.write(&[7, 7, 7]).expect("owned buffers grow");
+        state.roll_back(body_start);
+        state.write(&[5]).expect("owned buffers grow");
+
+        let body_len = (state.position() - body_start) as u16;
+        state
+            .backfill_at(mark, &body_len.to_be_bytes())
+            .expect("the length field should still be addressable");
+
+        assert_eq!(&state[..], &[0, 1, 5]);
+    }
+}

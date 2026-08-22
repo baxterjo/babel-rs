@@ -1,20 +1,15 @@
-use crate::{
-    data_structures::{
-        interface::InterfaceHandle,
-        neighbour::{
-            NeighbourTableError,
-            neighbour_entry::{
-                DEFAULT_NEIGHBOUR_EXPIRY_SECS, Neighbour, NeighbourIndex, NeighbourInitState,
-            },
-        },
-    },
-    data_types::{Address, address_encoding::AddressEncoding},
-    extension::address::AddressExt,
-    packet::tlv::{HelloSlice, IhuSlice},
-    utils::{
-        Duration, HoldTimeMultiplier, Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt as _,
-        timer::Timer,
-    },
+use crate::data_structures::interface::InterfaceHandle;
+use crate::data_structures::neighbour::NeighbourTableError;
+use crate::data_structures::neighbour::neighbour_entry::{
+    DEFAULT_NEIGHBOUR_EXPIRY_SECS, Neighbour, NeighbourIndex, NeighbourInitState,
+};
+use crate::data_types::Address;
+use crate::data_types::address_encoding::AddressEncoding;
+use crate::extension::address::AddressExt;
+use crate::packet::tlv::{HelloSlice, IhuSlice};
+use crate::utils::timer::Timer;
+use crate::utils::{
+    Duration, HoldTimeMultiplier, Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt as _,
 };
 
 pub struct NeighbourTable<'storage, A>

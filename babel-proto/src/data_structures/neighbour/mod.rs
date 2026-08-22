@@ -3,15 +3,14 @@ use thiserror::Error;
 pub(crate) mod neighbour_entry;
 pub(crate) mod neighbour_table;
 
+pub use neighbour_entry::{Neighbour, NeighbourIndex};
+pub use neighbour_table::NeighbourTable;
+
 use crate::data_types::address::AddressError;
 use crate::data_types::address_encoding::AddressEncodingError;
 use crate::extension::address::AddressExt;
 use crate::packet::error::tlv_err::TlvError;
 use crate::utils::timer::TimerError;
-
-pub use neighbour_entry::Neighbour;
-pub use neighbour_entry::NeighbourIndex;
-pub use neighbour_table::NeighbourTable;
 
 #[derive(Debug, Error)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
