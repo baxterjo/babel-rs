@@ -1,6 +1,7 @@
 use core::{cmp::Ordering, ops};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SeqNo(pub u16);
 
 impl SeqNo {

@@ -3,6 +3,7 @@ use core::fmt::Debug;
 use crate::extension::{
     address::AddressExt, address_encoding::AddressEncodingExt, NoStateExtension,
 };
+use crate::MaybeDefmt;
 
 /// Extends the parser state to operate with address encoding extensions.
 ///
@@ -10,7 +11,7 @@ use crate::extension::{
 /// re-initiated between Babel packets. (Hence the [`Default`] bound)
 pub trait ParserStateExt
 where
-    Self: Debug + Sized + Default,
+    Self: Debug + Sized + Default + MaybeDefmt,
 {
     type AddressEncoding: AddressEncodingExt;
     type Address: AddressExt<Encoding = Self::AddressEncoding>;

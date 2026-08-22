@@ -1,15 +1,17 @@
 use core::{convert::Infallible, error::Error as ErrorT, fmt::Debug};
 
-use crate::{data_types::address_encoding::AddressEncodingError, extension::NoExtension};
+use crate::{
+    data_types::address_encoding::AddressEncodingError, extension::NoExtension, MaybeDefmt,
+};
 
 /// Extends the acceptable values in the AE field for TLVs.
 ///
 /// Meant to be used in conjunction with [`AddressExt`](crate::extension::address::AddressExt)
 pub trait AddressEncodingExt
 where
-    Self: Debug + Sized + PartialEq + Eq,
+    Self: Debug + Sized + PartialEq + Eq + MaybeDefmt,
 {
-    type Error: ErrorT + PartialEq + Eq;
+    type Error: ErrorT + PartialEq + Eq + MaybeDefmt;
 
     fn from_value(value: u8) -> Result<Self, AddressEncodingError<Self>>;
     fn as_value(&self) -> u8;

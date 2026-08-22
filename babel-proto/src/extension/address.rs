@@ -1,6 +1,7 @@
 use core::fmt::Debug;
 use core::{convert::Infallible, error::Error};
 
+use crate::MaybeDefmt;
 use crate::{
     data_types::address::AddressError,
     extension::{address_encoding::AddressEncodingExt, NoExtension},
@@ -11,9 +12,9 @@ use crate::{
 /// This is useful for running Babel over transports that the spec is not written for (e.g.: BLE)
 pub trait AddressExt
 where
-    Self: Debug + Sized + Ord + Copy,
+    Self: Debug + Sized + Ord + Copy + MaybeDefmt,
 {
-    type Error: Error;
+    type Error: Error + MaybeDefmt;
     type Encoding: AddressEncodingExt;
     /// Return the address encoding and byte representation of the address.
     fn as_bytes(&self) -> &[u8];

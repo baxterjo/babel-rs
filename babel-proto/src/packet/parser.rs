@@ -13,6 +13,25 @@ where
     extension: E,
 }
 
+// The `core::net` address types do not implement `defmt::Format`, so they are rendered from their
+// octets instead of deriving.
+#[cfg(feature = "defmt")]
+impl<E> defmt::Format for Parser<E>
+where
+    E: ParserStateExt,
+{
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(
+            f,
+            "Parser{{ default_router_id: {}, default_v4_addr: {}, default_v6_addr: {}, extension: {}}}",
+            self.default_router_id,
+            self.default_v4_addr.map(|addr| addr.octets()),
+            self.default_v6_addr.map(|addr| addr.octets()),
+            self.extension
+        )
+    }
+}
+
 impl<E> Parser<E>
 where
     E: ParserStateExt,

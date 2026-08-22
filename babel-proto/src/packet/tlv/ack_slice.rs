@@ -18,6 +18,7 @@ use crate::packet::{
 ///
 /// Since Opaque values are not globally unique, this TLV **MUST** be sent to a unicast address.
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct AckSlice<'a> {
     slice: &'a [u8],
 }

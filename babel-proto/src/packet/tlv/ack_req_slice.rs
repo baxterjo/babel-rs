@@ -27,6 +27,7 @@ use crate::{
 /// NOTE: `Type`, `Length`, and `Reserved` fields are not represented here as they have no value
 /// beyond parsing and encoding.
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct AckReqSlice<'a> {
     slice: &'a [u8],
 }

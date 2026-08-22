@@ -6,6 +6,7 @@
 
 /// Layers on which an error can occur.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Layer {
     /// Error occured in the Babel packet header.
     BabelPacketHeader,
@@ -42,10 +43,9 @@ impl core::fmt::Display for Layer {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
     use super::Layer::*;
-    use alloc::format;
 
     #[test]
     fn error_title() {

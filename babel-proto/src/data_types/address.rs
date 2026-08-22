@@ -10,6 +10,7 @@ use crate::{data_types::address_encoding::AddressEncoding, extension::address::A
 /// octets???
 // Crashing out on this FR
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct Ipv4Addr {
     octets: [u8; 4],
 }
@@ -42,7 +43,9 @@ impl Into<core::net::Ipv4Addr> for Ipv4Addr {
 /// octets???
 ///
 // Crashing out on this FR
+// TODO: Manually implement defmt to skip out on zeros in the middle.
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct Ipv6Addr {
     octets: [u8; 16],
 }
@@ -75,6 +78,7 @@ impl Into<core::net::Ipv6Addr> for Ipv6Addr {
 /// [4.1.4](https://datatracker.ietf.org/doc/html/rfc8966#name-address) and used in data structures
 /// described in section [3.2](https://datatracker.ietf.org/doc/html/rfc8966#name-data-structures)
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Address<E>
 where
     E: AddressExt,
@@ -95,6 +99,7 @@ impl<A: AddressExt> Display for Address<A> {
 }
 
 #[derive(Debug, Error)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum AddressError<E>
 where
     E: AddressExt,

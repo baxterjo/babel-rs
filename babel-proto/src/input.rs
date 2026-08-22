@@ -6,6 +6,7 @@ use crate::{
 };
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Input<'input, A: AddressExt> {
     Timeout(Instant),
     Receive(Instant, Receive<'input, A>),
@@ -27,5 +28,18 @@ impl<A: AddressExt> Debug for Receive<'_, A> {
             .field("source_addr", &self.source_addr)
             .field("content_len", &self.contents.len())
             .finish()
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl<A: AddressExt> defmt::Format for Receive<'_, A> {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(
+            fmt,
+            "Receive{{ iface: {}, source_addr:{}, content_len: {}}}",
+            &self.iface,
+            &self.source_addr,
+            &self.contents.len()
+        )
     }
 }

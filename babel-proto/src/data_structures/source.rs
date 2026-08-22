@@ -43,6 +43,7 @@ where
 }
 
 #[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SourceIndex<A: AddressExt> {
     pub(crate) prefix: Address<A>,
     pub(crate) prefix_len: u8,

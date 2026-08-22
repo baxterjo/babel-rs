@@ -2,6 +2,7 @@
 
 /// Sources of length limiting values (e.g. "packet body length field").
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum LenSource {
     /// Limiting length was the slice length (we don't know what determined
     /// that one originally).
@@ -14,7 +15,7 @@ pub enum LenSource {
     AddressEncoding,
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
     use super::*;
     use alloc::format;

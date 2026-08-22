@@ -50,6 +50,21 @@ impl Debug for IhuSlice<'_> {
     }
 }
 
+#[cfg(feature = "defmt")]
+impl defmt::Format for IhuSlice<'_> {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(
+            f,
+            "IhuSlice{{ type: {}, length: {}, ae: {}, rx_cost: {}, interval: {}}}",
+            TlvSlice::from_typed(self).r#type(),
+            TlvSlice::from_typed(self).length(),
+            self.ae(),
+            self.rx_cost(),
+            self.interval()
+        )
+    }
+}
+
 impl<'a> TypedTlv<'a> for IhuSlice<'a> {
     const TYPE_ID: u8 = 5;
     const MIN_LEN: usize = 6;

@@ -1,13 +1,36 @@
+use core::fmt::Debug;
 use core::ops::Deref;
 
 use managed::ManagedSlice;
 
 use super::PacketWriterError;
 
-#[derive(Debug)]
 pub(crate) struct PacketState<'a> {
     pub(super) buf: ManagedSlice<'a, u8>,
     pos: usize,
+}
+
+// `ManagedSlice` does not implement `defmt::Format`, so the buffer is rendered as a byte slice
+// instead of deriving.
+#[cfg(feature = "defmt")]
+impl defmt::Format for PacketState<'_> {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(
+            f,
+            "PacketState{{ len: {}, pos: {}}}",
+            self.buf.len(),
+            self.pos
+        )
+    }
+}
+
+impl Debug for PacketState<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PacketState")
+            .field("len", &self.buf.len())
+            .field("pos", &self.pos)
+            .finish()
+    }
 }
 
 impl PartialEq<&[u8]> for PacketState<'_> {

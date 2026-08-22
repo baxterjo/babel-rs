@@ -15,6 +15,7 @@ use crate::packet::packet_header_slice::PacketHeaderSlice;
 
 /// A cursor utility to write to buffers easily.
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct PacketWriter;
 
 impl PacketWriter {
@@ -38,6 +39,7 @@ impl PacketWriter {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct PacketWriterStep<'a, LastStep> {
     state: PacketState<'a>,
     step_state: LastStep,
@@ -79,6 +81,7 @@ impl<LastStep> PacketWriterStep<'_, LastStep> {
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum PacketWriterError {
     #[error("Buffer is too small, needed {need}, have {remaining}")]
     BufferTooSmall { need: usize, remaining: usize },
@@ -96,7 +99,7 @@ pub enum PacketWriterError {
     IndexError(usize, usize),
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
     use crate::{
         data_structures::seqno::SeqNo,

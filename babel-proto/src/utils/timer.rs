@@ -7,12 +7,14 @@ use crate::{
 
 /// A simple timer.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Timer {
     start: Instant,
     duration: Duration,
 }
 
 #[derive(Debug, PartialEq, Eq, Error)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TimerError {
     #[error("The duration of a timer cannot be zero.")]
     DurationCannotBeZero,

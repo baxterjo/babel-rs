@@ -8,6 +8,7 @@ use crate::{
 };
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Output<'a, A: AddressExt> {
     SetTimer(Duration),
     Transmit(Transmit<'a, A>),
@@ -15,6 +16,7 @@ pub enum Output<'a, A: AddressExt> {
 
 /// Transmit payload.
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Transmit<'a, A: AddressExt> {
     /// Interface to transmit on.
     pub iface: InterfaceHandle,
@@ -25,6 +27,7 @@ pub struct Transmit<'a, A: AddressExt> {
 
 /// Destination of the transmitted datagram.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TransmitDestination<A: AddressExt> {
     /// Send the datagram to a unicast address. On the well known Babel port for your routing
     /// domain.
@@ -51,6 +54,13 @@ impl<'a> Debug for DatagramSend<'a> {
         f.debug_struct("DatagramSend")
             .field("len", &self.len())
             .finish()
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for DatagramSend<'_> {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "DatagramSend{{ len: {}}}", self.len())
     }
 }
 

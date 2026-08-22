@@ -24,6 +24,18 @@ impl Debug for TlvSlice<'_> {
     }
 }
 
+#[cfg(feature = "defmt")]
+impl defmt::Format for TlvSlice<'_> {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(
+            f,
+            "TlvSlice{{ type: {}, length: {}}}",
+            self.r#type(),
+            self.length()
+        )
+    }
+}
+
 impl<'a> TlvSlice<'a> {
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, TlvError> {
         let header = TlvHeaderSlice::from_slice(slice)?;

@@ -3,6 +3,7 @@
 use crate::packet::{error::layer::Layer, len_source::LenSource};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct LenError {
     /// Expected minimum or maximum length conflicting with the
     /// `len` value.
@@ -106,7 +107,7 @@ impl core::error::Error for LenError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
     use super::*;
     use alloc::format;
@@ -241,7 +242,6 @@ mod test {
         );
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn source() {
         assert!(LenError {

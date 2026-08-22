@@ -22,6 +22,20 @@ impl Debug for PacketHeaderSlice<'_> {
     }
 }
 
+#[cfg(feature = "defmt")]
+impl defmt::Format for PacketHeaderSlice<'_> {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(
+            f,
+            "PacketHeaderSlice{{ magic: {}, version: {}, body_length: {}, len: {}}}",
+            self.magic(),
+            self.version(),
+            self.body_length(),
+            self.slice.len()
+        )
+    }
+}
+
 impl<'a> PacketHeaderSlice<'a> {
     pub const LEN: usize = 4;
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, LenError> {

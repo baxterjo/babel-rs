@@ -12,6 +12,7 @@ use super::tlv::Tlv;
 use super::PacketWriterStep;
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct Ready;
 
 impl<'a> PacketWriterStep<'a, Ready> {

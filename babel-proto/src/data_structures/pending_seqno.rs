@@ -64,6 +64,7 @@ pub struct SeqnoRequest<A: AddressExt> {
 
 /// 3.2.7-1: [...] This table is indexed by triples of the form (prefix, plen, router-id) [...]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SeqnoRequestIndex<A: AddressExt> {
     prefix: Address<A>,
     prefix_len: u8,

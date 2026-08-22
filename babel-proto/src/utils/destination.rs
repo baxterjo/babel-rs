@@ -8,6 +8,7 @@ use crate::{
 };
 
 #[derive(Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum DestAddr<A: AddressExt> {
     #[default]
     None,
@@ -66,6 +67,7 @@ impl<A: AddressExt> TryInto<TransmitDestination<A>> for DestAddr<A> {
 }
 
 #[derive(Debug, Error)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum DestinationError {
     #[error("Destination has already been claimed.")]
     AlreadyClaimed,

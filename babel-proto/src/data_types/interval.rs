@@ -2,6 +2,7 @@ use crate::utils::Duration;
 
 /// Interval as defined in section [4.1.2](https://datatracker.ietf.org/doc/html/rfc8966#name-interval)
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Interval(Duration);
 
 impl Interval {

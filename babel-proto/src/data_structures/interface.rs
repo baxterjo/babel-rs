@@ -89,6 +89,7 @@ impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum InterfaceTableError {
     /// The storage given for the interface table is full.
     #[error("Interface table is full")]
@@ -109,6 +110,7 @@ pub enum InterfaceTableError {
 ///
 /// Users should use this handle to index the interfaces that will speak Babel.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Ord)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct InterfaceHandle([u8; 8]);
 
 impl TryFrom<&str> for InterfaceHandle {
@@ -153,6 +155,7 @@ impl Display for InterfaceHandle {
 
 /// Interfaces that speak the Babel Protocol
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Interface<A: AddressExt> {
     /// User defined interface ID. Used to correlate the router tracked interface with user defined
     /// interfaces.
@@ -178,6 +181,7 @@ impl<A: AddressExt> InternallyKeyed for Interface<A> {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct InterfaceConfig<A: AddressExt> {
     pub(crate) unicast_ihu: bool,
     pub(crate) address: Address<A>,

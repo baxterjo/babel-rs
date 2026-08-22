@@ -8,6 +8,7 @@ use crate::{
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum BabelError<A>
 where
     A: AddressExt,

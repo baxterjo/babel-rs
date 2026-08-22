@@ -16,6 +16,7 @@ use crate::packet::tlv::TypedTlv;
 ///
 /// This TLV is silently ignored on reception. It is allowed in the packet trailer.
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct PadNSlice<'a> {
     slice: &'a [u8],
 }

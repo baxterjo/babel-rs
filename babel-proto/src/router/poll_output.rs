@@ -409,7 +409,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
     use core::net::Ipv6Addr;
 
@@ -487,7 +487,10 @@ mod test {
             .expect("could not register interface");
 
         let transmit = expect_transmit(router.poll_output(now).expect("poll should succeed"));
-        assert_eq!(transmit.iface, handle, "expected the mandatory initial hello");
+        assert_eq!(
+            transmit.iface, handle,
+            "expected the mandatory initial hello"
+        );
 
         handle
     }
@@ -665,7 +668,10 @@ mod test {
 
             assert_eq!(transmit.iface, iface);
             let expected_dest: Address<_> = NEIGHBOUR_1_ADDR.into();
-            assert_eq!(transmit.destination, TransmitDestination::Unicast(expected_dest));
+            assert_eq!(
+                transmit.destination,
+                TransmitDestination::Unicast(expected_dest)
+            );
             assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
 
             let hello = HelloSlice::from_untyped(nth_tlv(&transmit.contents, 0))
@@ -986,8 +992,12 @@ mod test {
                 .expect("neighbour should exist");
             neighbour.pending.ihu_timer =
                 Some(Timer::new_eager(t0, Duration::from_secs(30)).expect("valid timer"));
-            neighbour.pending.ucast_hello.as_mut().expect("configured").timer =
-                Timer::new_eager(t0, ucast_interval).expect("valid timer");
+            neighbour
+                .pending
+                .ucast_hello
+                .as_mut()
+                .expect("configured")
+                .timer = Timer::new_eager(t0, ucast_interval).expect("valid timer");
 
             // IHU and a ucast hello addressed to the same neighbour bundle into one packet,
             // in IHU-then-hello order; the interface's mcast hello (different destination) is

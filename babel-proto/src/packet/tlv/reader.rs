@@ -2,6 +2,7 @@ use core::iter::Iterator;
 
 use crate::packet::{error::tlv_err::TlvError, tlv::tlv_slice::TlvSlice};
 #[derive(Debug, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct TlvReader<'a> {
     slice: &'a [u8],
     pos: usize,

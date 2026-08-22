@@ -9,6 +9,7 @@ use super::PacketWriterStep;
 ///
 /// The generic const indicates whether this is the first TLV or not.
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct Tlv {
     pub(crate) start_pos: usize,
     pub(crate) length_pos: usize,

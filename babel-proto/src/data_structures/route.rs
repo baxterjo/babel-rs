@@ -67,6 +67,7 @@ pub struct Route<A: AddressExt> {
 /// 3.2.6-1: The route table contains the routes known to this node. It is indexed by triples of the
 /// form (prefix, plen, neighbour)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct RouteIndex<A: AddressExt> {
     prefix: Address<A>,
     prefix_len: u8,

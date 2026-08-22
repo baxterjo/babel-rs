@@ -174,6 +174,7 @@ where
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct NeighbourIndex<A>(pub InterfaceHandle, pub Address<A>)
 where
     A: AddressExt;
@@ -184,6 +185,7 @@ where
 /// Note: To drive the sans-io state machine for this crate additional state is required for event
 /// driven TLVs.
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Neighbour<A: AddressExt> {
     // Protocol state as defined by SPEC
     /// the local node's interface over which this neighbour is reachable
@@ -214,6 +216,7 @@ pub struct Neighbour<A: AddressExt> {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum NeighbourInitState {
     /// If the neighbour was added through an out of band method. Then this router has never
     /// received a hello from it. So we set an expiry timer for it.
@@ -223,6 +226,7 @@ pub(crate) enum NeighbourInitState {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct HelloReceived {
     /// a history of recently received Unicast Hello packets from this neighbour
     ///
@@ -245,6 +249,7 @@ pub(crate) struct HelloReceived {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct RxHelloInfo {
     history: BitHistory,
     expected_seqno: SeqNo,
@@ -252,12 +257,14 @@ pub(crate) struct RxHelloInfo {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct TxHelloInfo {
     pub(crate) seqno: SeqNo,
     pub(crate) timer: Timer,
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct NeighbourPending {
     /// If this node should send unicast hellos to this neighbour, set its timer.
     ///
@@ -421,6 +428,7 @@ impl<A: AddressExt> Neighbour<A> {
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum NeighbourTableError<A: AddressExt> {
     /// The storage given for the interface table is full.
     #[error("Neighbour table is full")]

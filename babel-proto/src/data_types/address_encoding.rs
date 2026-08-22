@@ -5,6 +5,7 @@ use thiserror::Error;
 use crate::extension::address_encoding::AddressEncodingExt;
 
 #[derive(Debug, Error, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum AddressEncodingError<E>
 where
     E: AddressEncodingExt,
@@ -20,6 +21,7 @@ where
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum AddressEncoding<E>
 where
     E: AddressEncodingExt,

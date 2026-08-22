@@ -28,7 +28,6 @@ use crate::{
 /// X:
 ///     all other bits MUST be sent as 0 and silently ignored on reception.
 #[derive(PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct HelloFlags(u16);
 
 impl HelloFlags {
@@ -62,6 +61,13 @@ impl Debug for HelloFlags {
         f.debug_struct("HelloFlags")
             .field("unicast", &self.is_unicast())
             .finish()
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for HelloFlags {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "HelloFlags{{ unicast: {}}}", self.is_unicast())
     }
 }
 
@@ -100,6 +106,21 @@ impl Debug for HelloSlice<'_> {
             .field("seqno", &self.seqno())
             .field("interval", &self.interval())
             .finish()
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for HelloSlice<'_> {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(
+            f,
+            "HelloSlice{{ type: {}, length: {}, flags: {}, seqno: {}, interval: {}}}",
+            TlvSlice::from_typed(self).r#type(),
+            TlvSlice::from_typed(self).length(),
+            self.flags(),
+            self.seqno(),
+            self.interval()
+        )
     }
 }
 

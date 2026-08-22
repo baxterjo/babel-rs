@@ -368,6 +368,7 @@ impl From<Duration> for ::core::time::Duration {
 /// done in [`Duration`]'s native units (microseconds) so Babel units (centiseconds) have an
 /// acceptable level of fidelity.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct DurationMultiplier {
     pub num: u8,
     pub den: u8,

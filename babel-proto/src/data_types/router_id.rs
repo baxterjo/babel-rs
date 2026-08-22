@@ -2,14 +2,17 @@ use core::fmt::Debug as DebugT;
 use core::fmt::Display;
 use thiserror::Error;
 
+use crate::MaybeDefmt;
+
 /// Router-Id as described in section [4.1.3](https://datatracker.ietf.org/doc/html/rfc8966#name-router-id)
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Ord)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct RouterId([u8; 8]);
 
 impl RouterId {
     pub fn new<I>(id: I) -> Result<Self, RouterIdError>
     where
-        I: RouterIdT,
+        I: DebugT + Into<[u8; 8]> + MaybeDefmt,
     {
         let raw: [u8; 8] = id.into();
         if raw == [0u8; 8] {
@@ -66,16 +69,8 @@ impl Display for RouterId {
     }
 }
 
-#[cfg(not(feature = "defmt"))]
-pub trait RouterIdT: DebugT + Into<[u8; 8]> {}
-
-#[cfg(not(feature = "defmt"))]
-impl<T> RouterIdT for T where T: DebugT + Into<[u8; 8]> {}
-
-#[cfg(feature = "defmt")]
-pub trait RouterIdT: DebugT + Into<[u8; 8]> + Display + defmt::Format {}
-
 #[derive(Debug, Error, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum RouterIdError {
     #[error("RouterId cannot be all zeros")]
     CannotBeAllZeroes,
