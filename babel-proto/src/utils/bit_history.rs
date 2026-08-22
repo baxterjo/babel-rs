@@ -23,7 +23,8 @@ impl BitHistory {
     }
 
     pub fn record_many(&mut self, value: bool, number: usize) {
-        for _ in 0..number {
+        // Clamp the possible number of iterations of this to 16
+        for _ in 0..number.min(16) {
             self.record(value);
         }
     }
