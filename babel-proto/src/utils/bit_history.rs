@@ -10,14 +10,6 @@ impl BitHistory {
         Self(0xFFFF)
     }
 
-    /// Shifts new zeros into the bit history until the number of trailing zeros is equal to the
-    /// count.
-    pub fn set_trailing_zeros(&mut self, zeros: u64) {
-        while zeros > u64::from(self.0).trailing_zeros().into() {
-            self.0 = self.0.unbounded_shl(1);
-        }
-    }
-
     pub fn record(&mut self, value: bool) {
         self.0 = (self.0 << 1) | (value as u16);
     }

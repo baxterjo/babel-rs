@@ -23,8 +23,6 @@ pub enum NeighbourTableError<A: AddressExt> {
     /// they want to do with this error.
     #[error("A neighbour with the same index was added twice: {0}")]
     DuplicateNeighbour(NeighbourIndex<A>),
-    #[error("Interval cannot be zero")]
-    IntervalCannotBeZero,
     #[error(transparent)]
     Timer(#[from] TimerError),
     #[error(transparent)]

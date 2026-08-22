@@ -51,18 +51,24 @@ where
             let tlv = ok_or_continue!(tlv_result);
             b_trace!("{:?}", tlv);
             match tlv.r#type() {
+                // A TLV that cannot be handled is skipped rather than aborting the packet. TLVs
+                // are independent of one another, so letting one bad TLV discard the valid ones
+                // behind it hands any sender on the link a way to suppress them.
                 HelloSlice::TYPE_ID => {
                     let hello = ok_or_continue!(HelloSlice::from_untyped(tlv));
                     b_debug!("{:?}", hello);
-                    self.handle_hello(now, input.iface, input.source_addr, hello)?;
+                    ok_or_continue!(self.handle_hello(now, input.iface, input.source_addr, hello));
                 }
                 IhuSlice::TYPE_ID => {
                     let ihu = ok_or_continue!(IhuSlice::from_untyped(tlv));
                     b_debug!("{:?}", ihu);
-                    self.handle_ihu(now, input.iface, input.source_addr, ihu)?;
+                    ok_or_continue!(self.handle_ihu(now, input.iface, input.source_addr, ihu));
+                }
+                4..10 => {
+                    unimplemented!("Unimplemented base spec TLV found, Type: {}", tlv.r#type());
                 }
                 other => {
-                    unimplemented!("Unimplemented TLV found, Type: {}", other);
+                    b_debug!("Unrecognized TLV found: {}", other);
                 }
             }
         }
@@ -189,10 +195,6 @@ mod test {
     // | |_| | .` |   / _| (_ || |\__ \ | | | _||   / _|| |) |  | || _/ _ \ (__| _|
     //  \___/|_|\_|_|_\___\___|___|___/ |_| |___|_|_\___|___/  |___|_/_/ \_\___|___|
 
-    /// Nothing in the type system stops a caller passing an `InterfaceHandle` that was never
-    /// registered. If that reached the neighbour table, `get_or_insert_default` would happily
-    /// create a neighbour on an unknown interface and the next `poll_output` would panic looking
-    /// the interface back up.
     #[test]
     fn handle_input_on_an_unregistered_interface_is_rejected() {
         let mut r = router("node_1");
@@ -319,6 +321,54 @@ mod test {
 
         assert_eq!(tx_cost(&r, iface, NEIGHBOUR_1_ADDR), RxCost(11));
         assert_eq!(tx_cost(&r, iface, NEIGHBOUR_2_ADDR), RxCost(22));
+    }
+
+    //  ___   _   ___    _____ _ __   __  ___ _  _____ ___ ___
+    // | _ ) /_\ |   \  |_   _| |\ \ / / / __| |/ /_ _| _ \ _ \
+    // | _ \/ _ \| |) |   | | | |_\ V /  \__ \ ' < | ||  _/  _/
+    // |___/_/ \_\___/    |_| |____|_|   |___/_|\_\___|_| |_|
+
+    /// TLVs in a packet are independent, so one the router cannot handle must be skipped rather
+    /// than aborting the rest. Otherwise a single malformed TLV placed at the front of a packet
+    /// discards every valid TLV behind it.
+    #[test]
+    fn a_tlv_that_fails_to_handle_does_not_discard_the_rest_of_the_packet() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+
+        // An interval of zero is rejected by the IHU hold timer, so this TLV fails to handle.
+        let mut body = ihu_tlv(50, 0, NODE_ADDR);
+        body.extend_from_slice(&hello_tlv(0, 100));
+        let pkt = packet(&body);
+
+        r.handle_input(
+            t0,
+            Receive {
+                iface,
+                source_addr: NEIGHBOUR_1_ADDR.into(),
+                contents: &pkt,
+            },
+        )
+        .expect("a TLV that fails to handle should not fail the packet");
+
+        let neighbour = r
+            .neighbor_table
+            .inner
+            .get_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
+            .expect("neighbour should exist");
+
+        // Only `handle_hello` arms the pending IHU timer, so this proves the hello behind the
+        // bad IHU was still processed.
+        assert!(
+            neighbour.pending.ihu_timer.is_some(),
+            "the hello behind the bad IHU should still have been handled"
+        );
+        assert_eq!(
+            neighbour.tx_cost,
+            RxCost(u16::MAX),
+            "the rejected IHU must not have applied its rxcost"
+        );
     }
 
     /// A unicast IHU is already unambiguous, so the source address wins and the TLV's Address
