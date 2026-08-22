@@ -280,35 +280,38 @@ where
         (PacketWriterError, PacketWriterStep<'output, Ready>),
     > {
         let mut local_min = Duration::from_micros(u64::MAX);
-        for (neighbour, ucast) in self
-            .neighbor_table
-            .iter_mut()
-            // Neighbour wants to send ucast hellos
-            .filter_map(|n| n.pending.ucast_hello.map(|u| (n, u)))
-        {
+        for neighbour in self.neighbor_table.iter_mut() {
+            let iface = neighbour.iface;
+            let address = neighbour.address;
+
+            // Neighbour wants to send ucast hellos.
+            let Some(ucast) = neighbour.pending.ucast_hello.as_mut() else {
+                continue;
+            };
+
             // If the timer is not done, update local min and skip.
             if let Some(remaining) = ucast.timer.time_remaining(now) {
                 local_min = local_min.min(remaining);
                 continue;
             }
             // Skip if active interface is not this neighbour's.
-            if active_iface.is_some_and(|iface| iface != neighbour.iface) {
+            if active_iface.is_some_and(|active| active != iface) {
                 continue;
             }
 
             if active_addr.is_free()
                 || active_addr
                     .unicast_addr()
-                    .is_some_and(|addr| *addr == neighbour.address)
+                    .is_some_and(|addr| *addr == address)
             {
                 let flags = HelloFlags::new_unicast();
                 let seqno = ucast.seqno;
                 let duration = ucast.timer.duration();
-                let dest = DestAddr::Unicast(neighbour.address);
+                let dest = DestAddr::Unicast(address);
 
                 b_trace!(
-                    "[SEND] MCAST HELLO - iface {}, dest: {} - {:?}, {:?}, interval: {}",
-                    neighbour.iface,
+                    "[SEND] UCAST HELLO - iface {}, dest: {} - {:?}, {:?}, interval: {}",
+                    iface,
                     dest,
                     flags,
                     seqno,
@@ -317,6 +320,12 @@ where
                 writer = writer
                     .write_hello(flags, seqno, duration.into())?
                     .finish_tlv()?;
+
+                active_iface.claim(iface).unwrap();
+                active_addr.claim(DestAddr::Unicast(address)).unwrap();
+
+                ucast.timer.restart(now);
+                ucast.seqno += 1;
             }
         }
 
@@ -401,4 +410,676 @@ where
 }
 
 #[cfg(test)]
-mod test {}
+mod test {
+    use core::net::Ipv6Addr;
+
+    use super::*;
+    use crate::{
+        data_structures::{neighbour::NeighbourIndex, seqno::SeqNo},
+        data_types::{Address, RouterId},
+        extension::NoExtension,
+        output::TransmitDestination,
+        packet::{
+            packet_slice::PacketSlice,
+            tlv::{tlv_slice::TlvSlice, HelloSlice, IhuSlice, TypedTlv},
+        },
+        utils::{rx_cost::RxCost, storage::ManagedSliceExt, timer::Timer},
+    };
+
+    // Long enough that it never fires again during a test (still under the Timer max of
+    // 655.35s), short enough to stay well clear of the small durations used for IHU/ucast hello.
+    const IFACE_INTERVAL: Duration = Duration::from_micros(600_000_000);
+
+    const NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
+    const NEIGHBOUR_1_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+    const NEIGHBOUR_2_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
+
+    fn router(name: &'static str) -> BabelRouter<'static> {
+        BabelRouter::new(RouterId::try_from(name).expect("bad router id"))
+    }
+
+    fn iface_handle(name: &str) -> InterfaceHandle {
+        InterfaceHandle::try_from(name).expect("bad interface handle")
+    }
+
+    fn expect_transmit<A: AddressExt>(output: Output<'_, A>) -> Transmit<'_, A> {
+        match output {
+            Output::Transmit(t) => t,
+            Output::SetTimer(d) => panic!("expected Transmit, got SetTimer({d:?})"),
+        }
+    }
+
+    fn expect_set_timer<A: AddressExt>(output: Output<'_, A>) -> Duration {
+        match output {
+            Output::SetTimer(d) => d,
+            Output::Transmit(t) => panic!("expected SetTimer, got Transmit({t:?})"),
+        }
+    }
+
+    fn tlv_types(contents: &[u8]) -> Vec<u8> {
+        PacketSlice::from_slice(contents)
+            .expect("packet should parse")
+            .body_reader()
+            .map(|tlv| tlv.expect("tlv should parse").r#type())
+            .collect()
+    }
+
+    fn nth_tlv(contents: &[u8], n: usize) -> TlvSlice<'_> {
+        PacketSlice::from_slice(contents)
+            .expect("packet should parse")
+            .body_reader()
+            .nth(n)
+            .expect("tlv should exist")
+            .expect("tlv should parse")
+    }
+
+    /// Registers an interface with an interval too long to fire again in a test, then drains its
+    /// mandatory eager initial multicast hello so it doesn't pollute later assertions.
+    fn drained_iface(
+        router: &mut BabelRouter<'static>,
+        now: Instant,
+        name: &str,
+        address: Ipv6Addr,
+    ) -> InterfaceHandle {
+        let handle = iface_handle(name);
+        router
+            .register_interface(now, handle, address, Some(IFACE_INTERVAL), None)
+            .expect("could not register interface");
+
+        let transmit = expect_transmit(router.poll_output(now).expect("poll should succeed"));
+        assert_eq!(transmit.iface, handle, "expected the mandatory initial hello");
+
+        handle
+    }
+
+    //  __  __  ___    _   ___ _____   _  _ ___ _    _    ___
+    // |  \/  |/ __|  /_\ / __|_   _| | || | __| |  | |  / _ \
+    // | |\/| | (__  / _ \\__ \ | |   | __ | _|| |__| |_| (_) |
+    // |_|  |_|\___|/_/ \_\___/ |_|   |_||_|___|____|____\___/
+
+    mod mcast_hello {
+        use super::*;
+
+        #[test]
+        fn fires_immediately_on_first_poll() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let handle = iface_handle("iface_1");
+            r.register_interface(t0, handle, NODE_ADDR, Some(IFACE_INTERVAL), None)
+                .expect("register should succeed");
+
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+
+            assert_eq!(transmit.iface, handle);
+            assert_eq!(transmit.destination, TransmitDestination::Multicast);
+            assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
+
+            let hello = HelloSlice::from_untyped(nth_tlv(&transmit.contents, 0))
+                .expect("should be a hello");
+            assert!(hello.flags().is_multicast());
+            assert_eq!(hello.seqno(), SeqNo(0));
+            assert_eq!(hello.interval(), IFACE_INTERVAL.into());
+        }
+
+        #[test]
+        fn not_due_after_firing_returns_set_timer_with_remaining() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, IFACE_INTERVAL);
+        }
+
+        #[test]
+        fn refires_after_interval_with_incremented_seqno() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let handle = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+
+            let t1 = t0 + IFACE_INTERVAL;
+            let transmit = expect_transmit(r.poll_output(t1).expect("poll should succeed"));
+            assert_eq!(transmit.iface, handle);
+
+            let hello = HelloSlice::from_untyped(nth_tlv(&transmit.contents, 0))
+                .expect("should be a hello");
+            assert_eq!(hello.seqno(), SeqNo(1));
+        }
+
+        #[test]
+        fn only_one_interface_fires_per_poll_others_drained_next_poll() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let handle_a = iface_handle("iface_a");
+            let handle_b = iface_handle("iface_b");
+            r.register_interface(t0, handle_a, NODE_ADDR, Some(IFACE_INTERVAL), None)
+                .expect("register should succeed");
+            r.register_interface(t0, handle_b, NEIGHBOUR_1_ADDR, Some(IFACE_INTERVAL), None)
+                .expect("register should succeed");
+
+            let first = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(first.iface, handle_a);
+
+            let second = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(second.iface, handle_b);
+
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, IFACE_INTERVAL);
+        }
+
+        #[test]
+        fn for_iface_scoped_poll_ignores_other_due_interfaces() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let handle_a = iface_handle("iface_a");
+            let handle_b = iface_handle("iface_b");
+            r.register_interface(t0, handle_a, NODE_ADDR, Some(IFACE_INTERVAL), None)
+                .expect("register should succeed");
+            r.register_interface(t0, handle_b, NEIGHBOUR_1_ADDR, Some(IFACE_INTERVAL), None)
+                .expect("register should succeed");
+
+            // iface_a is due too, but scoping to iface_b must still find and fire iface_b's hello.
+            let transmit = expect_transmit(
+                r.poll_output_for_iface(t0, handle_b)
+                    .expect("poll should succeed"),
+            );
+            assert_eq!(transmit.iface, handle_b);
+
+            // iface_a was left completely untouched by the scoped poll.
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(transmit.iface, handle_a);
+        }
+    }
+
+    //  _   _  ___ _   ___ _____   _  _ ___ _    _    ___
+    // | | | |/ __/_\ / __|_   _| | || | __| |  | |  / _ \
+    // | |_| | (_/ _ \\__ \ | |   | __ | _|| |__| |_| (_) |
+    //  \___/ \___/_/ \_\___/ |_|   |_||_|___|____|____\___/
+
+    mod ucast_hello {
+        use super::*;
+
+        const UCAST_INTERVAL: Duration = Duration::from_secs(20);
+
+        #[test]
+        fn not_configured_never_sent() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            r.add_neighbour(
+                t0,
+                iface_handle("iface_1"),
+                NEIGHBOUR_1_ADDR.into(),
+                Duration::from_secs(10),
+                None,
+            )
+            .expect("add_neighbour should succeed");
+
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, IFACE_INTERVAL);
+        }
+
+        #[test]
+        fn not_due_immediately_after_registration() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            r.add_neighbour(
+                t0,
+                iface_handle("iface_1"),
+                NEIGHBOUR_1_ADDR.into(),
+                Duration::from_secs(10),
+                Some(UCAST_INTERVAL),
+            )
+            .expect("add_neighbour should succeed");
+
+            // Unlike interface hellos, a fresh ucast hello timer is NOT eager.
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, UCAST_INTERVAL);
+        }
+
+        #[test]
+        fn fires_when_due_with_correct_fields() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            r.add_neighbour(
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR.into(),
+                Duration::from_secs(10),
+                Some(UCAST_INTERVAL),
+            )
+            .expect("add_neighbour should succeed");
+            r.neighbor_table
+                .inner
+                .get_mut_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
+                .expect("neighbour should exist")
+                .pending
+                .ucast_hello
+                .as_mut()
+                .expect("ucast hello should be configured")
+                .timer = Timer::new_eager(t0, UCAST_INTERVAL).expect("timer should be valid");
+
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+
+            assert_eq!(transmit.iface, iface);
+            let expected_dest: Address<_> = NEIGHBOUR_1_ADDR.into();
+            assert_eq!(transmit.destination, TransmitDestination::Unicast(expected_dest));
+            assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
+
+            let hello = HelloSlice::from_untyped(nth_tlv(&transmit.contents, 0))
+                .expect("should be a hello");
+            assert!(hello.flags().is_unicast());
+            assert_eq!(hello.seqno(), SeqNo(0));
+            assert_eq!(hello.interval(), UCAST_INTERVAL.into());
+
+            // The timer restarted, so an immediate repoll does not refire it.
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, UCAST_INTERVAL);
+        }
+
+        #[test]
+        fn conflicting_destination_defers_to_next_poll() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
+                r.add_neighbour(
+                    t0,
+                    iface,
+                    addr.into(),
+                    Duration::from_secs(10),
+                    Some(UCAST_INTERVAL),
+                )
+                .expect("add_neighbour should succeed");
+                r.neighbor_table
+                    .inner
+                    .get_mut_by_key(&NeighbourIndex(iface, addr.into()))
+                    .expect("neighbour should exist")
+                    .pending
+                    .ucast_hello
+                    .as_mut()
+                    .expect("ucast hello should be configured")
+                    .timer = Timer::new_eager(t0, UCAST_INTERVAL).expect("timer should be valid");
+            }
+
+            let first = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(
+                first.destination,
+                TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
+            );
+
+            let second = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(
+                second.destination,
+                TransmitDestination::Unicast(NEIGHBOUR_2_ADDR.into())
+            );
+
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, UCAST_INTERVAL);
+        }
+
+        #[test]
+        fn iface_mismatch_skips_for_scoped_poll() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface_a = drained_iface(&mut r, t0, "iface_a", NODE_ADDR);
+            let iface_b = drained_iface(&mut r, t0, "iface_b", NEIGHBOUR_2_ADDR);
+            r.add_neighbour(
+                t0,
+                iface_a,
+                NEIGHBOUR_1_ADDR.into(),
+                Duration::from_secs(10),
+                Some(UCAST_INTERVAL),
+            )
+            .expect("add_neighbour should succeed");
+            r.neighbor_table
+                .inner
+                .get_mut_by_key(&NeighbourIndex(iface_a, NEIGHBOUR_1_ADDR.into()))
+                .expect("neighbour should exist")
+                .pending
+                .ucast_hello
+                .as_mut()
+                .expect("ucast hello should be configured")
+                .timer = Timer::new_eager(t0, UCAST_INTERVAL).expect("timer should be valid");
+
+            // Scoping to iface_b must not fire iface_a's due ucast hello.
+            let remaining = expect_set_timer(
+                r.poll_output_for_iface(t0, iface_b)
+                    .expect("poll should succeed"),
+            );
+            assert_eq!(remaining, IFACE_INTERVAL);
+
+            // It's still there, untouched, for an unrestricted poll.
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(
+                transmit.destination,
+                TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
+            );
+        }
+    }
+
+    //  ___ _  _ _   _
+    // |_ _| || | | | |
+    //  | || __ | |_| |
+    // |___|_||_|\___/
+
+    mod ihu {
+        use super::*;
+
+        fn add_neighbour_no_ucast(
+            r: &mut BabelRouter<'static>,
+            now: Instant,
+            iface: InterfaceHandle,
+            addr: Ipv6Addr,
+        ) {
+            r.add_neighbour(now, iface, addr.into(), Duration::from_secs(10), None)
+                .expect("add_neighbour should succeed");
+        }
+
+        fn set_ihu_timer(
+            r: &mut BabelRouter<'static>,
+            now: Instant,
+            iface: InterfaceHandle,
+            addr: Ipv6Addr,
+            duration: Duration,
+            eager: bool,
+        ) {
+            let neighbour = r
+                .neighbor_table
+                .inner
+                .get_mut_by_key(&NeighbourIndex(iface, addr.into()))
+                .expect("neighbour should exist");
+            neighbour.pending.ihu_timer = Some(if eager {
+                Timer::new_eager(now, duration).expect("timer should be valid")
+            } else {
+                Timer::new(now, duration).expect("timer should be valid")
+            });
+        }
+
+        #[test]
+        fn never_sent_without_received_hello() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            // A neighbour added out-of-band has no pending IHU timer until a hello is received.
+            add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, IFACE_INTERVAL);
+        }
+
+        #[test]
+        fn not_due_contributes_remaining_to_set_timer() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+            set_ihu_timer(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                Duration::from_secs(5),
+                false,
+            );
+
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, Duration::from_secs(5));
+        }
+
+        #[test]
+        fn fires_multicast_with_correct_fields_and_restarts_timer() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+            set_ihu_timer(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                Duration::from_secs(30),
+                true,
+            );
+
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(transmit.destination, TransmitDestination::Multicast);
+            assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
+
+            let ihu =
+                IhuSlice::from_untyped(nth_tlv(&transmit.contents, 0)).expect("should be an ihu");
+            assert_eq!(ihu.ae(), 2, "NODE_ADDR is a non-link-local IPv6 address");
+            assert_eq!(ihu.rx_cost(), RxCost(10), "default starting_rx_cost");
+            assert_eq!(ihu.interval(), Duration::from_secs(30).into());
+            assert_eq!(
+                ihu.address(16).expect("should have a 16 byte address"),
+                &Address::<NoExtension>::from(NODE_ADDR).as_wire()[..]
+            );
+
+            // Timer restarted, so an immediate repoll doesn't refire it.
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, Duration::from_secs(30));
+        }
+
+        #[test]
+        fn fires_unicast_when_interface_wants_unicast_ihu() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            r.iface_table
+                .inner
+                .get_mut_by_key(&iface)
+                .expect("interface should exist")
+                .config
+                .unicast_ihu = true;
+            add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+            set_ihu_timer(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                Duration::from_secs(30),
+                true,
+            );
+
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(
+                transmit.destination,
+                TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
+            );
+            assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
+        }
+
+        #[test]
+        fn conflicting_unicast_destination_defers_second_neighbour_to_next_poll() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            r.iface_table
+                .inner
+                .get_mut_by_key(&iface)
+                .expect("interface should exist")
+                .config
+                .unicast_ihu = true;
+            for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
+                add_neighbour_no_ucast(&mut r, t0, iface, addr);
+                set_ihu_timer(&mut r, t0, iface, addr, Duration::from_secs(30), true);
+            }
+
+            let first = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(
+                first.destination,
+                TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
+            );
+
+            let second = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(
+                second.destination,
+                TransmitDestination::Unicast(NEIGHBOUR_2_ADDR.into())
+            );
+
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, Duration::from_secs(30));
+        }
+
+        #[test]
+        fn iface_scoped_poll_is_independent_per_interface() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface_a = drained_iface(&mut r, t0, "iface_a", NODE_ADDR);
+            let iface_b = drained_iface(&mut r, t0, "iface_b", NEIGHBOUR_2_ADDR);
+            add_neighbour_no_ucast(&mut r, t0, iface_a, NEIGHBOUR_1_ADDR);
+            set_ihu_timer(
+                &mut r,
+                t0,
+                iface_a,
+                NEIGHBOUR_1_ADDR,
+                Duration::from_secs(30),
+                true,
+            );
+
+            let remaining = expect_set_timer(
+                r.poll_output_for_iface(t0, iface_b)
+                    .expect("poll should succeed"),
+            );
+            assert_eq!(remaining, IFACE_INTERVAL);
+
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(transmit.iface, iface_a);
+        }
+    }
+
+    //  ___ _  _ _____ ___ ___ ___    _ _____ ___ ___  _  _
+    // |_ _| \| |_   _| __/ __| _ \  /_\_   _|_ _/ _ \| \| |
+    //  | || .` | | | | _| (_ |   / / _ \| |  | | (_) | .` |
+    // |___|_|\_| |_| |___\___|_|_\/_/ \_\_| |___\___/|_|\_|
+
+    mod integration {
+        use super::*;
+
+        #[test]
+        fn ihu_precedes_ucast_and_mcast_hello_when_bundleable() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            r.iface_table
+                .inner
+                .get_mut_by_key(&iface)
+                .expect("interface should exist")
+                .config
+                .unicast_ihu = true;
+            let ucast_interval = Duration::from_secs(20);
+            r.add_neighbour(
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR.into(),
+                Duration::from_secs(10),
+                Some(ucast_interval),
+            )
+            .expect("add_neighbour should succeed");
+            let neighbour = r
+                .neighbor_table
+                .inner
+                .get_mut_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
+                .expect("neighbour should exist");
+            neighbour.pending.ihu_timer =
+                Some(Timer::new_eager(t0, Duration::from_secs(30)).expect("valid timer"));
+            neighbour.pending.ucast_hello.as_mut().expect("configured").timer =
+                Timer::new_eager(t0, ucast_interval).expect("valid timer");
+
+            // IHU and a ucast hello addressed to the same neighbour bundle into one packet,
+            // in IHU-then-hello order; the interface's mcast hello (different destination) is
+            // blocked this pass since the packet's destination is already unicast.
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(
+                transmit.destination,
+                TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
+            );
+            assert_eq!(
+                tlv_types(&transmit.contents),
+                vec![IhuSlice::TYPE_ID, HelloSlice::TYPE_ID]
+            );
+            let hello = HelloSlice::from_untyped(nth_tlv(&transmit.contents, 1))
+                .expect("should be a hello");
+            assert!(hello.flags().is_unicast());
+
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, ucast_interval);
+        }
+
+        #[test]
+        fn unicast_ihu_defers_mcast_hello_to_next_immediate_poll() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface_handle = iface_handle("iface_1");
+            // Not pre-drained: the interface's mcast hello is eager-due at the same time as the
+            // manually-forced IHU below, so both are competing for this poll's destination.
+            r.register_interface(t0, iface_handle, NODE_ADDR, Some(IFACE_INTERVAL), None)
+                .expect("register should succeed");
+            r.iface_table
+                .inner
+                .get_mut_by_key(&iface_handle)
+                .expect("interface should exist")
+                .config
+                .unicast_ihu = true;
+            r.add_neighbour(
+                t0,
+                iface_handle,
+                NEIGHBOUR_1_ADDR.into(),
+                Duration::from_secs(10),
+                None,
+            )
+            .expect("add_neighbour should succeed");
+            r.neighbor_table
+                .inner
+                .get_mut_by_key(&NeighbourIndex(iface_handle, NEIGHBOUR_1_ADDR.into()))
+                .expect("neighbour should exist")
+                .pending
+                .ihu_timer = Some(Timer::new_eager(t0, Duration::from_secs(30)).expect("valid"));
+
+            // Pass 1: IHU wins the packet's unicast destination, blocking the mcast hello.
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
+            assert_eq!(
+                transmit.destination,
+                TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
+            );
+
+            // Pass 2, same `now`: mcast hello's timer was never touched, so it fires on the very
+            // next poll with a fresh, unclaimed destination.
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
+            assert_eq!(transmit.destination, TransmitDestination::Multicast);
+
+            // Pass 3: everything drained.
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, Duration::from_secs(30));
+        }
+
+        #[test]
+        fn undersized_buffer_write_failure_yields_set_timer_without_panicking() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            r.register_interface(
+                t0,
+                iface_handle("iface_1"),
+                NODE_ADDR,
+                Some(IFACE_INTERVAL),
+                None,
+            )
+            .expect("register should succeed");
+
+            // 4 bytes is exactly the packet header, leaving 0 remaining for any TLV.
+            let mut buf = [0u8; 4];
+            let output = r
+                .poll_output_with_buf(t0, &mut buf[..])
+                .expect("a write failure should not surface as an Err from poll_output");
+
+            // The mcast hello write fails before contributing to next_poll, so the sentinel
+            // "nothing is due" value is returned rather than a short retry.
+            assert_eq!(expect_set_timer(output), Duration::from_micros(u64::MAX));
+        }
+    }
+}
