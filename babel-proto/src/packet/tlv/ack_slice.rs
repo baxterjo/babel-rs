@@ -1,3 +1,5 @@
+use core::fmt::Debug;
+
 use crate::packet::tlv::TypedTlv;
 use crate::packet::tlv::tlv_header::TlvHeader;
 use crate::packet::utils::get_unchecked_be_u16;
@@ -16,10 +18,29 @@ use crate::packet::utils::get_unchecked_be_u16;
 /// This TLV is sent by a node upon receiving an Acknowledgment Request TLV.
 ///
 /// Since Opaque values are not globally unique, this TLV **MUST** be sent to a unicast address.
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct AckSlice<'a> {
     slice: &'a [u8],
+}
+
+impl Debug for AckSlice<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AckSlice")
+            .field("opaque", &self.opaque())
+            .field("sub_tlv_len", &self.sub_tlvs().len())
+            .finish()
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for AckSlice<'_> {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(
+            fmt,
+            "AckSlice{{opaque: {}, sub_tlv_len: {}}}",
+            &self.opaque(),
+            &self.sub_tlvs().len()
+        )
+    }
 }
 
 impl<'a> TypedTlv<'a> for AckSlice<'a> {
@@ -39,19 +60,16 @@ impl<'a> AckSlice<'a> {
         // SAFETY:
         // Safe as the constructor has checked to ensure the length of the slice is at minimum
         // TlvHeader::LEN (2) + Self::MIN_LEN (2).
-        unsafe { get_unchecked_be_u16(self.slice.as_ptr().add(2)) }
+        unsafe { get_unchecked_be_u16(self.slice.as_ptr().add(TlvHeader::LEN)) }
     }
 
     /// This TLV is self-terminating and allows sub-TLVs.
     pub fn sub_tlvs(&self) -> &'a [u8] {
-        // SAFETY:
+        // PANIC SAFETY:
         // Safe as the constructor has checked to ensure the length of the slice is at minimum
         // TlvHeader::LEN (2) + Self::MIN_LEN (2). If they are the same length this will return an
         // empty slice.
-        unsafe {
-            self.slice
-                .get_unchecked(TlvHeader::LEN + Self::MIN_LEN..self.slice.len())
-        }
+        &self.slice[TlvHeader::LEN + Self::MIN_LEN..]
     }
 }
 
