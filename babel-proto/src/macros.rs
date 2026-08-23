@@ -1,15 +1,7 @@
-#[cfg(not(test))]
 #[cfg(feature = "log")]
 macro_rules! b_log {
     (trace, $($arg:expr),*) => { log::trace!($($arg),*) };
     (debug, $($arg:expr),*) => { log::debug!($($arg),*) };
-}
-
-#[cfg(test)]
-#[cfg(all(feature = "log", feature = "std"))]
-macro_rules! b_log {
-    (trace, $($arg:expr),*) => { println!($($arg),*) };
-    (debug, $($arg:expr),*) => { println!($($arg),*) };
 }
 
 #[cfg(feature = "defmt")]

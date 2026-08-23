@@ -21,6 +21,16 @@ where
     pub(crate) hold_time: HoldTimeMultiplier,
 }
 
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl<'storage, A> Default for NeighbourTable<'storage, A>
+where
+    A: AddressExt,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'storage, A> NeighbourTable<'storage, A>
 where
     A: AddressExt,
@@ -80,7 +90,7 @@ where
         ucast_hello_interval: Option<Duration>,
     ) -> Result<(), NeighbourTableError<A>> {
         let timer_opt = ucast_hello_interval
-            .map(|int| Timer::new(now, int.into()))
+            .map(|int| Timer::new(now, int))
             .transpose()?;
 
         let expiry = Timer::new(now, expiry)?;

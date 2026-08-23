@@ -1,4 +1,8 @@
+//! Addresses as they appear in Babel data structures and on the wire.
 //!
+//! [`Address`] is the resolved form used throughout the router. It carries its own address family,
+//! which determines both the encoding advertised in a TLV and the number of bytes written for it —
+//! see [`Address::encoding`] and [`Address::as_wire`], which must always agree.
 
 use core::fmt::Display;
 
@@ -7,9 +11,10 @@ use thiserror::Error;
 use crate::data_types::address_encoding::AddressEncoding;
 use crate::extension::address::AddressExt;
 
-/// Have to create my own Ipv4Addr type because core lib doesn't allow borrowing a slice of its
-/// octets???
-// Crashing out on this FR
+/// An IPv4 address that can lend out its octets as a slice.
+///
+/// `core::net::Ipv4Addr` only yields octets by value, but the TLV writer needs to borrow them to
+/// write an address without copying, so the octets are stored directly here.
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Ipv4Addr {
@@ -34,15 +39,15 @@ impl From<core::net::Ipv4Addr> for Ipv4Addr {
     }
 }
 
-impl Into<core::net::Ipv4Addr> for Ipv4Addr {
-    fn into(self) -> core::net::Ipv4Addr {
-        core::net::Ipv4Addr::from_octets(self.octets)
+impl From<Ipv4Addr> for core::net::Ipv4Addr {
+    fn from(val: Ipv4Addr) -> Self {
+        core::net::Ipv4Addr::from_octets(val.octets)
     }
 }
 
-/// Have to create my own Ipv6Addr type because core lib doesn't allow borrowing a slice of its
-/// octets???
-// Crashing out on this FR
+/// An IPv6 address that can lend out its octets as a slice.
+///
+/// See [`Ipv4Addr`] for why this exists rather than using `core::net::Ipv6Addr` directly.
 // TODO: Manually implement defmt to skip out on zeros in the middle.
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -68,9 +73,9 @@ impl From<core::net::Ipv6Addr> for Ipv6Addr {
     }
 }
 
-impl Into<core::net::Ipv6Addr> for Ipv6Addr {
-    fn into(self) -> core::net::Ipv6Addr {
-        core::net::Ipv6Addr::from_octets(self.octets)
+impl From<Ipv6Addr> for core::net::Ipv6Addr {
+    fn from(val: Ipv6Addr) -> Self {
+        core::net::Ipv6Addr::from_octets(val.octets)
     }
 }
 

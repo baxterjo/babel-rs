@@ -139,7 +139,9 @@ impl<'a> IhuSlice<'a> {
         // This **MUST** be checked as the source of address_len can be user supplied through
         // extensions and cause a footgun.
         Ok(self.slice.get(idx_start..len).ok_or(LenError {
-            required_len: len,
+            // The sub-TLV region starts after the address, so the TLV has to be at least that
+            // long. Reporting `len` for both fields renders as "N bytes is too big (maximum N)".
+            required_len: idx_start,
             len,
             len_source: LenSource::AddressEncoding,
             layer: Layer::BabelTlvBody,

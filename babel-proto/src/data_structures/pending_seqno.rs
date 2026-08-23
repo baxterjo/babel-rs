@@ -10,6 +10,16 @@ pub struct PendingSeqnoRequestTable<'storage, A: AddressExt> {
     inner: ManagedSlice<'storage, Option<SeqnoRequest<A>>>,
 }
 
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl<'storage, A> Default for PendingSeqnoRequestTable<'storage, A>
+where
+    A: AddressExt,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'storage, A> PendingSeqnoRequestTable<'storage, A>
 where
     A: AddressExt,

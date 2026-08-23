@@ -3,6 +3,7 @@ use core::fmt::{Debug as DebugT, Display};
 use thiserror::Error;
 
 use crate::MaybeDefmt;
+use crate::utils::short_id::fmt_short_id;
 
 /// Router-Id as described in section [4.1.3](https://datatracker.ietf.org/doc/html/rfc8966#name-router-id)
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Ord)]
@@ -24,14 +25,14 @@ impl RouterId {
         Ok(Self(raw))
     }
 
-    pub(crate) fn octets<'a>(&'a self) -> &'a [u8; 8] {
-        (&self.0).into()
+    pub(crate) fn octets(&self) -> &[u8; 8] {
+        &self.0
     }
 }
 
-impl TryFrom<&'static str> for RouterId {
+impl TryFrom<&str> for RouterId {
     type Error = RouterIdError;
-    fn try_from(value: &'static str) -> Result<Self, Self::Error> {
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         if value.len() > 8 {
             return Err(RouterIdError::IdTooLong { len: value.len() });
         }
@@ -48,24 +49,7 @@ impl TryFrom<&'static str> for RouterId {
 
 impl Display for RouterId {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let start = self.0.iter().position(|&b| b != 0).unwrap_or(self.0.len());
-        let trimmed = &self.0[start..];
-
-        let displayable = trimmed.iter().all(|&b| b.is_ascii_graphic() || b == b' ');
-
-        if displayable {
-            // Known to be displayable due to above check.
-            f.write_str(core::str::from_utf8(trimmed).unwrap_or(""))
-        } else {
-            for (idx, b) in self.0.iter().enumerate() {
-                if idx != self.0.len() - 1 {
-                    write!(f, "x{:02X} ", b)?;
-                } else {
-                    write!(f, "x{:02X}", b)?;
-                }
-            }
-            Ok(())
-        }
+        fmt_short_id(&self.0, f)
     }
 }
 

@@ -64,7 +64,9 @@ where
                     b_debug!("{:?}", ihu);
                     ok_or_continue!(self.handle_ihu(now, input.iface, input.source_addr, ihu));
                 }
-                4..10 => {
+                // Hello and IHU are matched above, so this covers the base-spec TLVs that are not
+                // implemented yet.
+                6..10 => {
                     unimplemented!("Unimplemented base spec TLV found, Type: {}", tlv.r#type());
                 }
                 other => {

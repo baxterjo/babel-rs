@@ -46,11 +46,11 @@ impl ops::Sub<SeqNo> for SeqNo {
 
 /// 3.2.1-7: Given two sequence numbers s and s', the relation s is less than s' (s < s') is defined
 /// by the following:
-
+///
 /// s < s' (modulo 2^16) when 0 < ((s' - s) MOD 2^16) < 32768
-
+///
 /// or, equivalently,
-
+///
 /// s < s' (modulo 2^16) when s /= s' and ((s' - s) AND 32768) = 0.
 impl PartialOrd for SeqNo {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -84,6 +84,12 @@ mod test {
     }
 
     #[test]
+    // The negated comparison is the point of this test: it pins the behaviour of the incomparable
+    // case, which `partial_cmp` would express but not exercise.
+    #[allow(
+        clippy::neg_cmp_op_on_partial_ord,
+        reason = "asserting that both directions are false is what is under test"
+    )]
     fn partial_order_returns_returns_false_for_boolean_opposites() {
         // Since SeqNo only implements PartialOrd, this means that two opposite boolean statements
         // for the case in which <SeqNo as PartialOrd>.partial_cmp() returns None will both return
@@ -99,6 +105,10 @@ mod test {
     }
 
     #[test]
+    #[allow(
+        clippy::neg_cmp_op_on_partial_ord,
+        reason = "asserting the reverse comparison is false is what is under test"
+    )]
     fn wraparound_less_than() {
         // 65534 < 2, since 2 comes shortly "after" 65534 going forward.
         assert!(SeqNo(65534) < SeqNo(2));

@@ -102,9 +102,9 @@ where
     /// * `name`: Human readable name for debugging.
     /// * `id`: Interface ID. This should be unique for each instantiation of the router.
     /// * `hello_interval`: Optional multicast hello interval. `None` will use
-    /// [`DEFAULT_MULTICAST_HELLO_INTERVAL_SECS`](crate::data_structures::interface::DEFAULT_MULTICAST_HELLO_INTERVAL_SECS)
+    ///   [`DEFAULT_MULTICAST_HELLO_INTERVAL_SECS`](crate::data_structures::interface::DEFAULT_MULTICAST_HELLO_INTERVAL_SECS)
     /// * `update_interval`: Optional update interval. `None` will use
-    /// [`DEFAULT_UPDATE_INTERVAL_SECS`](crate::data_structures::interface::DEFAULT_UPDATE_INTERVAL_SECS)
+    ///   [`DEFAULT_UPDATE_INTERVAL_SECS`](crate::data_structures::interface::DEFAULT_UPDATE_INTERVAL_SECS)
     pub fn register_interface<I, IA>(
         &mut self,
         now: Instant,

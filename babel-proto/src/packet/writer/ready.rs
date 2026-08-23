@@ -46,16 +46,16 @@ impl<'a> PacketWriterStep<'a, Ready> {
         let step = self;
 
         // Early escape hatch
-        if let Some(val) = step.state.remaining() {
-            if val < HelloSlice::MIN_LEN {
-                return Err((
-                    PacketWriterError::BufferTooSmall {
-                        need: HelloSlice::MIN_LEN,
-                        remaining: val,
-                    },
-                    step,
-                ));
-            }
+        if let Some(val) = step.state.remaining()
+            && val < HelloSlice::MIN_LEN
+        {
+            return Err((
+                PacketWriterError::BufferTooSmall {
+                    need: HelloSlice::MIN_LEN,
+                    remaining: val,
+                },
+                step,
+            ));
         }
 
         // Track starting position for backtrack.
@@ -103,16 +103,16 @@ impl<'a> PacketWriterStep<'a, Ready> {
         let step = self;
 
         // Early escape hatch
-        if let Some(val) = step.state.remaining() {
-            if val < IhuSlice::MIN_LEN {
-                return Err((
-                    PacketWriterError::BufferTooSmall {
-                        need: HelloSlice::MIN_LEN,
-                        remaining: val,
-                    },
-                    step,
-                ));
-            }
+        if let Some(val) = step.state.remaining()
+            && val < IhuSlice::MIN_LEN
+        {
+            return Err((
+                PacketWriterError::BufferTooSmall {
+                    need: IhuSlice::MIN_LEN,
+                    remaining: val,
+                },
+                step,
+            ));
         }
 
         // Track starting position for backtrack.

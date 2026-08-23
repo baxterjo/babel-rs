@@ -12,8 +12,9 @@ impl<'a> TlvHeaderSlice<'a> {
     /// Creates the header slice from the given slice, ensuring the length of the header is long
     /// enough for parsing.
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, TlvError> {
-        let type_id = slice.get(0).ok_or(LenError {
-            required_len: 0,
+        let type_id = slice.first().ok_or(LenError {
+            // Reading the type field needs at least one byte.
+            required_len: 1,
             len: slice.len(),
             len_source: LenSource::Slice,
             layer: Layer::BabelTlvHeader,

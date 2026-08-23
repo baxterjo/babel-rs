@@ -50,7 +50,8 @@ impl<'a> PacketSlice<'a> {
         // It can also contain the packet trailer, so the entire slice is still put into the packet.
         if slice.len() < min_len + BabelPacketHeader::LEN {
             return Err(LenError {
-                required_len: min_len,
+                // The slice has to hold the header as well as the declared body.
+                required_len: min_len + BabelPacketHeader::LEN,
                 len: slice.len(),
                 len_source: LenSource::Slice,
                 layer: Layer::BabelPacketBody,

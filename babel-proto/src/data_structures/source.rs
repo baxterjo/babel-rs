@@ -12,6 +12,13 @@ where
     inner: ManagedSlice<'storage, Option<Source<A>>>,
 }
 
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl<A: AddressExt> Default for SourceTable<'_, A> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'storage, A> SourceTable<'storage, A>
 where
     A: AddressExt,

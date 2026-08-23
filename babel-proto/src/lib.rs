@@ -2,7 +2,7 @@
 //#![cfg_attr(not(any(test, feature = "std")), no_std)]
 
 //#[cfg(not(any(test, feature = "alloc")))]
-#[cfg(any(feature = "alloc"))]
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
 #[cfg(all(feature = "defmt", feature = "log"))]

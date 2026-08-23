@@ -1,5 +1,3 @@
-use thiserror::Error;
-
 use crate::data_types::Interval;
 use crate::packet::tlv::TypedTlv;
 use crate::packet::tlv::tlv_header::TlvHeader;

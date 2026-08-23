@@ -33,8 +33,14 @@ where
     P: ParserStateExt,
 {
     /// Polls output from the router.
+    ///
+    /// The returned [`Output`] owns its payload, so it does not borrow from the router and can
+    /// outlive this call.
     #[cfg(any(feature = "std", feature = "alloc"))]
-    pub fn poll_output(&mut self, now: Instant) -> Result<Output<'_, A>, BabelError<A>> {
+    pub fn poll_output<'output>(
+        &mut self,
+        now: Instant,
+    ) -> Result<Output<'output, A>, BabelError<A>> {
         let buf = alloc::vec::Vec::new();
         self.poll_output_with_buf(now, buf)
     }
@@ -43,12 +49,15 @@ where
     ///
     /// This is a useful optimization if other interfaces are busy. If the returned [`Output`] is
     /// of the `SetTimer` variant. That duration **is not** specific to the provided interface.
+    ///
+    /// The returned [`Output`] owns its payload, so it does not borrow from the router and can
+    /// outlive this call.
     #[cfg(any(feature = "std", feature = "alloc"))]
-    pub fn poll_output_for_iface(
+    pub fn poll_output_for_iface<'output>(
         &mut self,
         now: Instant,
         iface: InterfaceHandle,
-    ) -> Result<Output<'_, A>, BabelError<A>> {
+    ) -> Result<Output<'output, A>, BabelError<A>> {
         let buf = alloc::vec::Vec::new();
         self.poll_output_inner(now, Some(iface), buf)
     }
@@ -907,7 +916,7 @@ mod test {
             assert_eq!(ihu.interval(), Duration::from_secs(30).into());
             assert_eq!(
                 ihu.address(16).expect("should have a 16 byte address"),
-                &Address::<NoExtension>::from(NODE_ADDR).as_wire()[..]
+                Address::<NoExtension>::from(NODE_ADDR).as_wire()
             );
 
             // Timer restarted, so an immediate repoll doesn't refire it.

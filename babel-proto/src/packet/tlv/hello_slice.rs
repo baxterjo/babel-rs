@@ -31,7 +31,7 @@ pub struct HelloFlags(u16);
 
 impl HelloFlags {
     pub const fn new(unicast: bool) -> Self {
-        Self(0 | (unicast as u16) << 15)
+        Self((unicast as u16) << 15)
     }
 
     pub const fn new_unicast() -> Self {

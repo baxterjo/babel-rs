@@ -79,8 +79,8 @@ where
         let old_opt = match V::locate(&self[..], &value.key()) {
             Some(idx) => {
                 // If it exists, replace it and return the old value.
-                let old = core::mem::replace(&mut self[idx], Some(value));
-                old
+
+                self[idx].replace(value)
             }
             None => {
                 // If it does not exist, find the first empty slot in the slice.
@@ -118,9 +118,7 @@ where
     }
 
     fn remove(&mut self, key: &K) -> Option<V> {
-        let out = V::locate(&self[..], key)
-            .map(|idx| core::mem::replace(&mut self[idx], None))
-            .flatten();
+        let out = V::locate(&self[..], key).and_then(|idx| self[idx].take());
         // Ensure the slice is sorted after modifying it.
         V::my_sort(&mut self[..]);
         out

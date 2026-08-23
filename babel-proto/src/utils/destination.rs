@@ -81,7 +81,7 @@ pub(crate) trait Claim {
 
 impl Claim for Option<InterfaceHandle> {
     fn claim(&mut self, new: InterfaceHandle) -> Result<(), DestinationError> {
-        if *self != None && *self != Some(new) {
+        if self.is_some() && *self != Some(new) {
             return Err(DestinationError::AlreadyClaimed);
         }
         *self = Some(new);

@@ -11,6 +11,13 @@ pub struct RouteTable<'storage, A: AddressExt> {
     inner: ManagedSlice<'storage, Option<Route<A>>>,
 }
 
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl<A: AddressExt> Default for RouteTable<'_, A> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'storage, A> RouteTable<'storage, A>
 where
     A: AddressExt,

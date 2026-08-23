@@ -5,7 +5,7 @@
 //! [etherparse](https://docs.rs/etherparse/latest/etherparse/index.html). Types that end in
 //! "slice" are read only accessors into incoming packets.:
 //! - Constructors of packets perform safety checks on slice length. These slices cannot exist
-//! unless they are safe to access using `unsafe`.
+//!   unless they are safe to access using `unsafe`.
 //! - Accessors get field values (via copy) on demand.
 
 pub mod error;

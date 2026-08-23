@@ -4,7 +4,7 @@ description = "A Sans-IO implementation of the Babel routing protocol as defined
 readme = "README.md"
 license = "MIT"
 keywords = ["babel", "routing", "networking", "sans-io"]
-catagories = ["network-programming"]
+categories = ["network-programming"]
 version = "0.0.1"
 edition = "2024"
 

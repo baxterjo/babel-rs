@@ -6,10 +6,10 @@ pub struct RxCost(pub u16);
 
 impl RxCost {
     pub fn from_wire(wire: [u8; 2]) -> Self {
-        Self(u16::from_be_bytes(wire.into()))
+        Self(u16::from_be_bytes(wire))
     }
 
-    pub fn to_wire(&self) -> [u8; 2] {
+    pub fn to_wire(self) -> [u8; 2] {
         self.0.to_be_bytes()
     }
 

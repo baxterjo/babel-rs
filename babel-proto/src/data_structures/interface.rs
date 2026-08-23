@@ -7,6 +7,7 @@ use super::seqno::SeqNo;
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::utils::rx_cost::RxCost;
+use crate::utils::short_id::fmt_short_id;
 use crate::utils::storage::{InternallyKeyed, ManagedSliceExt};
 use crate::utils::timer::{Timer, TimerError};
 use crate::utils::{Duration, Instant, ManagedSlice};
@@ -18,6 +19,13 @@ pub const DEFAULT_UPDATE_INTERVAL_SECS: u64 = DEFAULT_MULTICAST_HELLO_INTERVAL_S
 
 pub struct InterfaceTable<'storage, A: AddressExt> {
     pub(crate) inner: ManagedSlice<'storage, Option<Interface<A>>>,
+}
+
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl<A: AddressExt> Default for InterfaceTable<'_, A> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
@@ -132,24 +140,7 @@ impl TryFrom<&str> for InterfaceHandle {
 
 impl Display for InterfaceHandle {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let start = self.0.iter().position(|&b| b != 0).unwrap_or(self.0.len());
-        let trimmed = &self.0[start..];
-
-        let displayable = trimmed.iter().all(|&b| b.is_ascii_graphic() || b == b' ');
-
-        if displayable {
-            // Known to be displayable due to above check.
-            f.write_str(core::str::from_utf8(trimmed).unwrap_or(""))
-        } else {
-            for (idx, b) in self.0.iter().enumerate() {
-                if idx != self.0.len() - 1 {
-                    write!(f, "x{:02X} ", b)?;
-                } else {
-                    write!(f, "x{:02X}", b)?;
-                }
-            }
-            Ok(())
-        }
+        fmt_short_id(&self.0, f)
     }
 }
 
