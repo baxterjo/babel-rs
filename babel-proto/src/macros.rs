@@ -22,3 +22,15 @@ macro_rules! b_trace {
 macro_rules! b_debug {
     ($($arg:expr),*) => (b_log!(debug, $($arg),*));
 }
+
+macro_rules! ok_or_continue {
+    ($result:expr) => {
+        match $result {
+            Ok(val) => val,
+            Err(err) => {
+                b_debug!("{:?} : {}", err, err);
+                continue;
+            }
+        }
+    };
+}

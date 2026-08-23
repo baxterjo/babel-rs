@@ -1,7 +1,7 @@
 use core::fmt::Debug as DebugT;
 use core::ops::{Deref, DerefMut};
 
-use managed::ManagedSlice;
+use crate::utils::ManagedSlice;
 
 /// A type that knows how to be located within a slice containing itself and can derive its own key.
 /// And knows how to sort a slice of itself in a way that the locate method is expecting.
@@ -63,6 +63,10 @@ where
     ///
     /// Returns None if there is no value for the given key.
     fn get_mut_by_key(&mut self, key: &K) -> Option<&mut V>;
+    /// Retains only the elements specified by the predicate.
+    fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut(&V) -> bool;
 }
 
 impl<'storage, K, V> ManagedSliceExt<K, V> for ManagedSlice<'storage, Option<V>>
@@ -75,8 +79,8 @@ where
         let old_opt = match V::locate(&self[..], &value.key()) {
             Some(idx) => {
                 // If it exists, replace it and return the old value.
-                let old = core::mem::replace(&mut self[idx], Some(value));
-                old
+
+                self[idx].replace(value)
             }
             None => {
                 // If it does not exist, find the first empty slot in the slice.
@@ -89,8 +93,8 @@ where
                     None => {
                         match self {
                             ManagedSlice::Borrowed(_) => {
-                                // If the slice is borrowed then it has pre-allocated capacity, so we
-                                // cannot insert.
+                                // If the slice is borrowed then it has pre-allocated capacity, so
+                                // we cannot insert.
 
                                 // If it is full, there will be no elements that contain `None`,
                                 // return the value that would have been put in.
@@ -101,10 +105,7 @@ where
                                 return Err(value);
                             }
                             #[cfg(any(feature = "std", feature = "alloc"))]
-                            ManagedSlice::Owned(o) => {
-                                b_debug!("Slice is owned, pushing.");
-                                o.push(Some(value))
-                            }
+                            ManagedSlice::Owned(o) => o.push(Some(value)),
                         }
                     }
                 }
@@ -117,9 +118,7 @@ where
     }
 
     fn remove(&mut self, key: &K) -> Option<V> {
-        let out = V::locate(&self[..], key)
-            .map(|idx| core::mem::replace(&mut self[idx], None))
-            .flatten();
+        let out = V::locate(&self[..], key).and_then(|idx| self[idx].take());
         // Ensure the slice is sorted after modifying it.
         V::my_sort(&mut self[..]);
         out
@@ -134,8 +133,25 @@ where
         let idx = V::locate(&self[..], key)?;
         self.get_mut(idx)?.as_mut()
     }
+
+    fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&V) -> bool,
+    {
+        for item_opt in self.iter_mut() {
+            let Some(v) = item_opt.as_ref() else {
+                continue;
+            };
+            // If the
+            if !f(v) {
+                *item_opt = None;
+            }
+        }
+        V::my_sort(&mut self[..]);
+    }
 }
 
+#[cfg(test)]
 mod test {
 
     use super::*;
@@ -191,6 +207,7 @@ mod test {
     #[cfg(any(feature = "std", feature = "alloc"))]
     #[test]
     fn insert_until_full_allocates() {
+        use alloc::vec::Vec;
         let _ = env_logger::try_init();
         // In std or alloc this becomes an owned vec anc can be resized.
         let mut managed_slice: ManagedSlice<'_, Option<TestValue>> = Vec::new().into();
@@ -209,6 +226,7 @@ mod test {
     #[cfg(any(feature = "std", feature = "alloc"))]
     #[test]
     fn insert_many_then_get_succeeds() {
+        use alloc::vec::Vec;
         let _ = env_logger::try_init();
         // In std or alloc this becomes an owned vec anc can be resized.
         let mut managed_slice: ManagedSlice<'_, Option<TestValue>> = Vec::new().into();
@@ -244,6 +262,7 @@ mod test {
     #[cfg(any(feature = "std", feature = "alloc"))]
     #[test]
     fn managed_slice_remove_works() {
+        use alloc::vec::Vec;
         let _ = env_logger::try_init();
         // In std or alloc this becomes an owned vec anc can be resized.
         let mut managed_slice: ManagedSlice<'_, Option<TestValue>> = Vec::new().into();

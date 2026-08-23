@@ -1,0 +1,14 @@
+{
+  // rustfmt.toml uses nightly-only options. rust-analyzer would otherwise call
+  // the default (stable) rustfmt, which drops those options silently and
+  // reformats differently than `just fmt`. `--edition` is required here:
+  // rust-analyzer does not pass it when overrideCommand is set.
+  "rust-analyzer.rustfmt.overrideCommand": [
+    "rustup",
+    "run",
+    "nightly",
+    "rustfmt",
+    "--edition",
+    "2024"
+  ]
+}

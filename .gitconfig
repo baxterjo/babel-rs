@@ -1,0 +1,16 @@
+# Repo-wide git config, applied per clone via one bootstrap command:
+#
+#   just setup        (or: git config --local include.path ../.gitconfig)
+#
+# Git never reads committed config automatically -- a repo that could set
+# core.pager/core.hooksPath/aliases would get code execution on clone. The
+# include above is an explicit opt-in, so settings added to this file reach
+# everyone who has already run the bootstrap without them re-running anything.
+#
+# Treat changes to this file as code: they apply to every contributor who
+# opted in.
+
+[blame]
+	# Skip formatting-only commits so line attribution points at the commit
+	# that last changed the code. See .git-blame-ignore-revs.
+	ignoreRevsFile = .git-blame-ignore-revs

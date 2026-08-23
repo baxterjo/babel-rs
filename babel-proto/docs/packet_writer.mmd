@@ -1,0 +1,18 @@
+---
+title: Packet Writer
+---
+
+%%{init: {"layout": "elk"}}%%
+stateDiagram-v2
+  [*] --> Ready: write_headers
+  Ready --> Tlv: write_tlv
+  Ready --> FinishedPacketBody: finish_body
+  Tlv --> Tlv: write_sub_tlv
+  Tlv --> Ready: finish_tlv
+  FinishedPacketBody --> [*]
+  FinishedPacketBody --> TrailerTlv: write_trailer_tlv
+  TrailerTlv --> TrailerTlv: write_trailer_sub_tlv
+  TrailerTlv --> FinishedPacketBody: finish_trailer_tlv
+  
+
+

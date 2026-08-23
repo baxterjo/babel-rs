@@ -1,21 +1,28 @@
-use managed::ManagedSlice;
+use super::neighbour::NeighbourIndex;
+use super::seqno::SeqNo;
+use crate::data_types::address::Address;
+use crate::data_types::{Interval, RouterId};
+use crate::extension::address::AddressExt;
+use crate::utils::storage::InternallyKeyed;
+use crate::utils::{Instant, ManagedSlice};
 
-use crate::{
-    neighbour::NeighbourIndex,
-    router::RouterId,
-    seqno::SeqNo,
-    storage::InternallyKeyed,
-    time::{Duration as Interval, Instant},
-    Address,
-};
-
-pub struct PendingSeqnoRequestTable<'storage, A: Address> {
+pub struct PendingSeqnoRequestTable<'storage, A: AddressExt> {
     inner: ManagedSlice<'storage, Option<SeqnoRequest<A>>>,
+}
+
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl<'storage, A> Default for PendingSeqnoRequestTable<'storage, A>
+where
+    A: AddressExt,
+{
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<'storage, A> PendingSeqnoRequestTable<'storage, A>
 where
-    A: Address,
+    A: AddressExt,
 {
     /// Create a new [`PendingSeqnoRequestTable`] with user provided storage.
     ///
@@ -44,9 +51,9 @@ where
 /// and to which no reply has been received yet. This table is indexed by triples of the form
 /// (prefix, plen, router-id) (see [`SeqnoRequestIndex`]), and every entry in this table contains
 /// the following data:
-pub struct SeqnoRequest<A: Address> {
+pub struct SeqnoRequest<A: AddressExt> {
     /// 3.2.7-2.1: the prefix [...] being requested
-    prefix: A,
+    prefix: Address<A>,
     /// 3.2.7-2.1: the [...] plen [...] being requested
     prefix_len: u8,
     /// 3.2.7-2.1: the [...] router-id [...] being requested
@@ -55,23 +62,26 @@ pub struct SeqnoRequest<A: Address> {
     seqno: SeqNo,
     /// 3.2.7-2.2: the neighbour, if any, on behalf of which we are forwarding this request
     neighbor: Option<NeighbourIndex<A>>,
-    /// 3.2.7-2.3: a small integer indicating the number of times that this request will be resent if it remains unsatisfied
+    /// 3.2.7-2.3: a small integer indicating the number of times that this request will be resent
+    /// if it remains unsatisfied
     retries: u8,
 
-    /// 3.2.7-3: There is one timer associated with each pending seqno request; it governs both the resending of requests and their expiry
+    /// 3.2.7-3: There is one timer associated with each pending seqno request; it governs both the
+    /// resending of requests and their expiry
     last_try: Instant,
     retry_interval: Interval,
 }
 
 /// 3.2.7-1: [...] This table is indexed by triples of the form (prefix, plen, router-id) [...]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SeqnoRequestIndex<A: Address> {
-    prefix: A,
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct SeqnoRequestIndex<A: AddressExt> {
+    prefix: Address<A>,
     prefix_len: u8,
     router_id: RouterId,
 }
 
-impl<A: Address> InternallyKeyed for SeqnoRequest<A> {
+impl<A: AddressExt> InternallyKeyed for SeqnoRequest<A> {
     type Key = SeqnoRequestIndex<A>;
     fn key(&self) -> Self::Key {
         SeqnoRequestIndex {

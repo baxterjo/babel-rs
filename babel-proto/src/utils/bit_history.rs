@@ -1,0 +1,27 @@
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct BitHistory(u16);
+
+impl BitHistory {
+    /// Starts with a full history.
+    ///
+    /// This gives some natural hysteresis for neibour churn.
+    pub fn new() -> Self {
+        Self(0xFFFF)
+    }
+
+    pub fn record(&mut self, value: bool) {
+        self.0 = (self.0 << 1) | (value as u16);
+    }
+
+    pub fn record_many(&mut self, value: bool, number: usize) {
+        // Clamp the possible number of iterations of this to 16
+        for _ in 0..number.min(16) {
+            self.record(value);
+        }
+    }
+
+    pub fn count(&self) -> u32 {
+        self.0.count_ones()
+    }
+}

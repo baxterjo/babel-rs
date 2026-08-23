@@ -1,5 +1,9 @@
+# Test the powerset of features in the crate.
+#
+# log and std have to be grouped in this job as std is required for printing during tests.
 test-all:
-    cargo hack --feature-powerset --mutually-exclusive-features log,defmt nextest run
+    RUSTFLAGS=-Awarnings cargo hack --feature-powerset --group-features log,std --mutually-exclusive-features log,defmt nextest run
 
+# Check the powerset of features for this crate.# Check the powerset of features for this crate.# Check the powerset of features for this crate.
 check-all:
     cargo hack --feature-powerset --mutually-exclusive-features log,defmt check

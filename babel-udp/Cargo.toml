@@ -4,7 +4,7 @@ description = "A UDP speaker of the Babel routing protocol"
 readme = "README.md"
 license = "MIT"
 keywords = ["babel", "routing", "networking"]
-catagories = ["network-programming"]
+categories = ["network-programming"]
 version = "0.0.1"
 edition = "2024"
 

@@ -21,8 +21,7 @@ use core::{fmt, ops};
 /// since an arbitrary moment in time, such as system startup.
 ///
 /// * A value of `0` is inherently arbitrary.
-/// * A value less than `0` indicates a time before the starting
-///   point.
+/// * A value less than `0` indicates a time before the starting point.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Instant {
     micros: i64,
@@ -181,7 +180,6 @@ impl ops::Sub<Instant> for Instant {
     }
 }
 
-/// A relative amount of time.
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Duration {
     micros: u64,
@@ -308,6 +306,15 @@ impl ops::Div<u8> for Duration {
     }
 }
 
+impl ops::Div<Duration> for Duration {
+    type Output = u64;
+    fn div(self, rhs: Duration) -> Self::Output {
+        let lhs_micros = self.as_micros();
+        let rhs_micros = rhs.as_micros();
+        lhs_micros / rhs_micros
+    }
+}
+
 impl ops::DivAssign<u8> for Duration {
     fn div_assign(&mut self, rhs: u8) {
         self.micros /= rhs as u64;
@@ -359,6 +366,8 @@ impl From<Duration> for ::core::time::Duration {
 /// Note: Arithmetic operations may not be exact, to get as accurate as possible, arithmetic is
 /// done in [`Duration`]'s native units (microseconds) so Babel units (centiseconds) have an
 /// acceptable level of fidelity.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct DurationMultiplier {
     pub num: u8,
     pub den: u8,

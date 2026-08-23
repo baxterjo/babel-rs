@@ -1,17 +1,27 @@
-use managed::ManagedSlice;
-
-use crate::{router::RouterId, seqno::SeqNo, storage::InternallyKeyed, Address};
+use super::seqno::SeqNo;
+use crate::data_types::RouterId;
+use crate::data_types::address::Address;
+use crate::extension::address::AddressExt;
+use crate::utils::ManagedSlice;
+use crate::utils::storage::InternallyKeyed;
 
 pub struct SourceTable<'storage, A>
 where
-    A: Address,
+    A: AddressExt,
 {
     inner: ManagedSlice<'storage, Option<Source<A>>>,
 }
 
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl<A: AddressExt> Default for SourceTable<'_, A> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'storage, A> SourceTable<'storage, A>
 where
-    A: Address,
+    A: AddressExt,
 {
     /// Create a new source table with user provided storage.
     ///
@@ -37,21 +47,22 @@ where
 }
 
 #[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord, Clone, Copy)]
-pub struct SourceIndex<A: Address> {
-    pub(crate) prefix: A,
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct SourceIndex<A: AddressExt> {
+    pub(crate) prefix: Address<A>,
     pub(crate) prefix_len: u8,
     router_id: RouterId,
 }
 
-pub struct Source<A: Address> {
-    prefix: A,
+pub struct Source<A: AddressExt> {
+    prefix: Address<A>,
     prefix_len: u8,
     router_id: RouterId,
     seqno: SeqNo,
     metric: u16,
 }
 
-impl<A: Address> InternallyKeyed for Source<A> {
+impl<A: AddressExt> InternallyKeyed for Source<A> {
     type Key = SourceIndex<A>;
     fn key(&self) -> Self::Key {
         SourceIndex {

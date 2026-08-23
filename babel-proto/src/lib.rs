@@ -2,42 +2,45 @@
 //#![cfg_attr(not(any(test, feature = "std")), no_std)]
 
 //#[cfg(not(any(test, feature = "alloc")))]
-#[cfg(any(feature = "alloc"))]
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
 #[cfg(all(feature = "defmt", feature = "log"))]
 compile_error!("You must enable at most one of the following features: defmt, log");
 
-use core::fmt::{Debug as DebugT, Display};
-use core::hash::Hash as HashT;
-use core::net::Ipv6Addr;
-
 #[macro_use]
 mod macros;
 
-pub mod interface;
-pub mod neighbour;
-pub mod pending_seqno;
-pub mod route;
+pub mod data_structures;
+pub mod data_types;
+pub mod error;
+pub mod extension;
+pub mod input;
+pub mod output;
+pub mod packet;
 pub mod router;
-mod seqno;
-pub mod source;
-mod storage;
-pub mod time;
+pub mod utils;
 
-/// Trait wrapper around a generic Address type.
-pub trait Address: HashT + DebugT + Display + Copy + Ord + Eq {}
+#[cfg(test)]
+/// Collection of white box tests that need access to `pub(crate)` visibility.
+mod tests;
 
-#[cfg(not(feature = "defmt"))]
-pub trait RouterIdT: DebugT + Into<[u8; 8]> + Display {}
-
+/// Conditional format trait for when defmt is active.
+///
+/// This is a blanket implemented bound used throughout the public extension traits, so it is
+/// exported to keep those traits nameable by downstream users. It is not meant to be implemented
+/// manually.
 #[cfg(feature = "defmt")]
-pub trait RouterIdT: DebugT + Into<[u8; 8]> + Display + defmt::Format {}
-
-#[cfg(not(feature = "defmt"))]
-pub trait InterfaceId: DebugT + Into<[u8; 8]> + Display {}
-
+pub trait MaybeDefmt: defmt::Format {}
 #[cfg(feature = "defmt")]
-pub trait InterfaceId: DebugT + Into<[u8; 8]> + Display + defmt::Format {}
+impl<T: defmt::Format> MaybeDefmt for T {}
 
-impl Address for Ipv6Addr {}
+/// Conditional format trait for when defmt is active.
+///
+/// This is a blanket implemented bound used throughout the public extension traits, so it is
+/// exported to keep those traits nameable by downstream users. It is not meant to be implemented
+/// manually.
+#[cfg(not(feature = "defmt"))]
+pub trait MaybeDefmt {}
+#[cfg(not(feature = "defmt"))]
+impl<T> MaybeDefmt for T {}

@@ -1,0 +1,57 @@
+use crate::packet::error::layer::Layer;
+use crate::packet::error::len_error::LenError;
+use crate::packet::error::tlv_err::TlvError;
+use crate::packet::len_source::LenSource;
+use crate::packet::tlv::tlv_header::TlvHeader;
+
+pub struct TlvHeaderSlice<'a> {
+    slice: &'a [u8],
+}
+
+impl<'a> TlvHeaderSlice<'a> {
+    /// Creates the header slice from the given slice, ensuring the length of the header is long
+    /// enough for parsing.
+    pub fn from_slice(slice: &'a [u8]) -> Result<Self, TlvError> {
+        let type_id = slice.first().ok_or(LenError {
+            // Reading the type field needs at least one byte.
+            required_len: 1,
+            len: slice.len(),
+            len_source: LenSource::Slice,
+            layer: Layer::BabelTlvHeader,
+            layer_start_offset: 0,
+        })?;
+
+        // In this instance there will be no length field.
+        if *type_id == 0 {
+            return Err(TlvError::Pad1);
+        }
+
+        let slice = slice.get(0..TlvHeader::LEN).ok_or(LenError {
+            required_len: TlvHeader::LEN,
+            len: slice.len(),
+            len_source: LenSource::Slice,
+            layer: Layer::BabelTlvHeader,
+            layer_start_offset: 0,
+        })?;
+
+        Ok(Self { slice })
+    }
+
+    /// Returns the `Type` field.
+    #[inline]
+    pub fn r#type(&self) -> u8 {
+        // SAFETY:
+        // Safe as the constructor checks that the slice has at least the length of the
+        // TlvHeader::LEN (2)
+        unsafe { *self.slice.get_unchecked(0) }
+    }
+
+    /// Returns the `Length` field.
+    #[inline]
+    pub fn length(&self) -> u8 {
+        // SAFETY:
+        // Safe as the constructor checks that the slice has at least the length of the
+        // TlvHeader::LEN (2)
+        unsafe { *self.slice.get_unchecked(1) }
+    }
+}

@@ -1,0 +1,39 @@
+use core::convert::Infallible;
+use core::error::Error;
+use core::fmt::Debug;
+
+use crate::MaybeDefmt;
+use crate::data_types::address::AddressError;
+use crate::extension::NoExtension;
+use crate::extension::address_encoding::AddressEncodingExt;
+
+/// Extends the domain of possible address types that can be used in the Babel router.
+///
+/// This is useful for running Babel over transports that the spec is not written for (e.g.: BLE)
+pub trait AddressExt
+where
+    Self: Debug + Sized + Ord + Copy + MaybeDefmt,
+{
+    type Error: Error + MaybeDefmt;
+    type Encoding: AddressEncodingExt;
+    /// Return the big endian byte representation of the address.
+    fn as_octets(&self) -> &[u8];
+    /// Create the address type from un-compressed bytes.
+    fn from_bytes(ae: &Self::Encoding, bytes: &[u8]) -> Result<Self, AddressError<Self>>;
+    /// Get the encoding for this address.
+    fn encoding(&self) -> Self::Encoding;
+}
+
+impl AddressExt for NoExtension {
+    type Error = Infallible;
+    type Encoding = NoExtension;
+    fn as_octets(&self) -> &[u8] {
+        unreachable!("The NoExtension struct should not be constructable.")
+    }
+    fn from_bytes(_ae: &NoExtension, _bytes: &[u8]) -> Result<Self, AddressError<Self>> {
+        unreachable!("The NoExtension struct should not be constructable.")
+    }
+    fn encoding(&self) -> Self::Encoding {
+        unreachable!("The NoExtension struct should not be constructable.")
+    }
+}

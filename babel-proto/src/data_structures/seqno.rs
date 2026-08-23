@@ -1,7 +1,15 @@
-use core::{cmp::Ordering, ops};
+use core::cmp::Ordering;
+use core::ops;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SeqNo(pub u16);
+
+impl SeqNo {
+    pub fn to_wire(&self) -> [u8; 2] {
+        self.0.to_be_bytes()
+    }
+}
 
 impl ops::Add for SeqNo {
     type Output = Self;
@@ -29,13 +37,20 @@ impl ops::AddAssign<u16> for SeqNo {
     }
 }
 
+impl ops::Sub<SeqNo> for SeqNo {
+    type Output = Self;
+    fn sub(self, rhs: SeqNo) -> Self::Output {
+        Self(self.0.wrapping_sub(rhs.0))
+    }
+}
+
 /// 3.2.1-7: Given two sequence numbers s and s', the relation s is less than s' (s < s') is defined
 /// by the following:
-
+///
 /// s < s' (modulo 2^16) when 0 < ((s' - s) MOD 2^16) < 32768
-
+///
 /// or, equivalently,
-
+///
 /// s < s' (modulo 2^16) when s /= s' and ((s' - s) AND 32768) = 0.
 impl PartialOrd for SeqNo {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -56,6 +71,7 @@ impl PartialOrd for SeqNo {
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 
@@ -68,12 +84,31 @@ mod test {
     }
 
     #[test]
+    // The negated comparison is the point of this test: it pins the behaviour of the incomparable
+    // case, which `partial_cmp` would express but not exercise.
+    #[allow(
+        clippy::neg_cmp_op_on_partial_ord,
+        reason = "asserting that both directions are false is what is under test"
+    )]
+    fn partial_order_returns_returns_false_for_boolean_opposites() {
+        // Since SeqNo only implements PartialOrd, this means that two opposite boolean statements
+        // for the case in which <SeqNo as PartialOrd>.partial_cmp() returns None will both return
+        // false.
+        assert!(!(SeqNo(0) <= SeqNo(32768)));
+        assert!(!(SeqNo(0) >= SeqNo(32768)));
+    }
+
+    #[test]
     fn simple_case_matches_normal_order() {
         assert!(SeqNo(5) < SeqNo(10));
         assert!(SeqNo(10) > SeqNo(5));
     }
 
     #[test]
+    #[allow(
+        clippy::neg_cmp_op_on_partial_ord,
+        reason = "asserting the reverse comparison is false is what is under test"
+    )]
     fn wraparound_less_than() {
         // 65534 < 2, since 2 comes shortly "after" 65534 going forward.
         assert!(SeqNo(65534) < SeqNo(2));

@@ -1,21 +1,26 @@
-use managed::ManagedSlice;
+use super::neighbour::NeighbourIndex;
+use super::seqno::SeqNo;
+use super::source::SourceIndex;
+use crate::data_types::Interval;
+use crate::data_types::address::Address;
+use crate::extension::address::AddressExt;
+use crate::utils::storage::InternallyKeyed;
+use crate::utils::{Instant, ManagedSlice};
 
-use crate::{
-    neighbour::NeighbourIndex,
-    seqno::SeqNo,
-    source::SourceIndex,
-    storage::InternallyKeyed,
-    time::{Duration as Interval, Instant},
-    Address,
-};
-
-pub struct RouteTable<'storage, A: Address> {
+pub struct RouteTable<'storage, A: AddressExt> {
     inner: ManagedSlice<'storage, Option<Route<A>>>,
+}
+
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl<A: AddressExt> Default for RouteTable<'_, A> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<'storage, A> RouteTable<'storage, A>
 where
-    A: Address,
+    A: AddressExt,
 {
     /// Create a new source table with user provided storage.
     ///
@@ -43,7 +48,7 @@ where
 /// 3.2.6-1: The route table contains the routes known to this node. It is indexed by triples of the
 /// form (prefix, plen, neighbour) (See [`RouteIndex`]), and every route table entry contains the
 /// following data:
-pub struct Route<A: Address> {
+pub struct Route<A: AddressExt> {
     /// 3.2.6-2.1: the source (prefix, plen, router-id) for which this route is advertised
     source: SourceIndex<A>,
     /// 3.2.6-2.2: the neighbour (an entry in the neighbour table) that advertised this route
@@ -68,13 +73,14 @@ pub struct Route<A: Address> {
 /// 3.2.6-1: The route table contains the routes known to this node. It is indexed by triples of the
 /// form (prefix, plen, neighbour)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct RouteIndex<A: Address> {
-    prefix: A,
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub(crate) struct RouteIndex<A: AddressExt> {
+    prefix: Address<A>,
     prefix_len: u8,
     neighbour: NeighbourIndex<A>,
 }
 
-impl<A: Address> InternallyKeyed for Route<A> {
+impl<A: AddressExt> InternallyKeyed for Route<A> {
     type Key = RouteIndex<A>;
     fn key(&self) -> Self::Key {
         RouteIndex {
