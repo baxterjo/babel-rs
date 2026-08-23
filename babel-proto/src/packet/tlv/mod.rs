@@ -13,6 +13,8 @@ pub mod hello_slice;
 pub mod ihu_slice;
 #[doc(hidden)]
 pub mod pad_slice;
+#[doc(hidden)]
+pub mod router_id;
 
 use core::any::type_name;
 
