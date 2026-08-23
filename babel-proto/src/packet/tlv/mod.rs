@@ -37,6 +37,8 @@ pub use ihu_slice::IhuSlice;
 #[doc(inline)]
 pub use next_hop_slice::NextHopSlice;
 #[doc(inline)]
+pub use pad_slice::PadNSlice;
+#[doc(inline)]
 pub use route_request_slice::RouteRequestSlice;
 #[doc(inline)]
 pub use router_id_slice::RouterIdSlice;
@@ -50,6 +52,21 @@ use crate::packet::error::len_error::LenError;
 use crate::packet::error::tlv_err::TlvError;
 use crate::packet::len_source::LenSource;
 use crate::packet::tlv::tlv_slice::TlvSlice;
+
+/// All TLV types listed in RFC 8966
+pub enum Tlv<'a> {
+    Pad0,
+    PadN(PadNSlice<'a>),
+    AckReq(AckReqSlice<'a>),
+    Ack(AckSlice<'a>),
+    Hello(HelloSlice<'a>),
+    Ihu(IhuSlice<'a>),
+    RouterId(RouterIdSlice<'a>),
+    NextHop(NextHopSlice<'a>),
+    Update(UpdateSlice<'a>),
+    RouteRequest(RouteRequestSlice<'a>),
+    SeqnoRequest(SeqnoRequestSlice<'a>),
+}
 
 /// Trait that defines a TLV with a known `Type` value and structure.
 // IMPORTANT: When accessing fields **BEYOND** TlvHeader::LEN + Self::MIN_LEN, all accessors MUST
