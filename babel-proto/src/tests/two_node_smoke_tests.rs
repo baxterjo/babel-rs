@@ -3,7 +3,7 @@ use core::net::Ipv6Addr;
 use crate::data_structures::interface::InterfaceHandle;
 use crate::data_structures::neighbour::NeighbourIndex;
 use crate::data_types::RouterId;
-use crate::input::Receive;
+use crate::input::{Receive, ReceiveDestination};
 use crate::output::Output;
 use crate::packet::packet_slice::PacketSlice;
 use crate::router::BabelRouter;
@@ -49,6 +49,7 @@ fn two_nodes_say_hello_and_ihu() {
             Receive {
                 iface: node_2_iface,
                 source_addr: node_1_addr.into(),
+                destination: ReceiveDestination::Multicast,
                 contents: &transmit.contents,
             },
         )
@@ -80,6 +81,7 @@ fn two_nodes_say_hello_and_ihu() {
             Receive {
                 iface: node_1_iface,
                 source_addr: node_2_addr.into(),
+                destination: ReceiveDestination::Multicast,
                 contents: &transmit.contents,
             },
         )

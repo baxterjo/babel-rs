@@ -4,7 +4,6 @@ use crate::data_structures::neighbour::neighbour_entry::{
     DEFAULT_NEIGHBOUR_EXPIRY_SECS, Neighbour, NeighbourIndex, NeighbourInitState,
 };
 use crate::data_types::Address;
-use crate::data_types::address_encoding::AddressEncoding;
 use crate::extension::address::AddressExt;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
 use crate::utils::timer::Timer;
@@ -156,6 +155,11 @@ where
         Ok(())
     }
 
+    /// Applies an IHU that has already been confirmed as addressed to this node.
+    ///
+    /// `address` is the sender's address. The IHU's own Address field names its *destination*
+    /// rather than its sender, so it plays no part in identifying the neighbour; the caller uses
+    /// it to decide whether the IHU was meant for us at all.
     pub fn handle_ihu(
         &mut self,
         now: Instant,
@@ -165,18 +169,7 @@ where
     ) -> Result<(), NeighbourTableError<A>> {
         let hold_time = self.hold_time;
 
-        // If the address the IHU was received on is a multicast address, then the neighbour
-        // address needs to be resolved from the TLV.
-        let resolved_address = if address.is_multicast() {
-            let ae = AddressEncoding::try_from(ihu.ae())?;
-            let addr_len = ae.address_len();
-            let address_bytes = ihu.address(addr_len)?;
-            Address::from_bytes(ae, address_bytes)?
-        } else {
-            address
-        };
-        let neighbour =
-            self.get_or_insert_default(now, &NeighbourIndex(interface, resolved_address))?;
+        let neighbour = self.get_or_insert_default(now, &NeighbourIndex(interface, address))?;
         b_debug!(
             "[RECV] IHU - iface: {:?}, addr: {:?} - {:?}",
             interface,

@@ -1,9 +1,10 @@
 use crate::data_structures::interface::InterfaceHandle;
 use crate::data_types::Address;
+use crate::data_types::address_encoding::AddressEncoding;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
-use crate::input::Receive;
+use crate::input::{Receive, ReceiveDestination};
 use crate::packet::packet_slice::PacketSlice;
 use crate::packet::parser::Parser;
 use crate::packet::tlv::reader::TlvReader;
@@ -62,7 +63,13 @@ where
                 IhuSlice::TYPE_ID => {
                     let ihu = ok_or_continue!(IhuSlice::from_untyped(tlv));
                     b_debug!("{:?}", ihu);
-                    ok_or_continue!(self.handle_ihu(now, input.iface, input.source_addr, ihu));
+                    ok_or_continue!(self.handle_ihu(
+                        now,
+                        input.iface,
+                        input.source_addr,
+                        input.destination,
+                        ihu
+                    ));
                 }
                 // Hello and IHU are matched above, so this covers the base-spec TLVs that are not
                 // implemented yet.
@@ -94,13 +101,57 @@ where
         &mut self,
         now: Instant,
         interface: InterfaceHandle,
-        address: Address<A>,
+        source_addr: Address<A>,
+        destination: ReceiveDestination,
         ihu: IhuSlice<'_>,
     ) -> Result<(), BabelError<A>> {
+        // Our address on the interface the packet arrived on. The interface is validated at the
+        // top of `handle_input`, so it is still present here.
+        let our_addr = self
+            .iface_table
+            .inner
+            .get_by_key(&interface)
+            .ok_or(BabelError::InterfaceDoesntExist(interface))?
+            .config
+            .address;
+
+        if !ihu_is_addressed_to_us(&ihu, destination, our_addr)? {
+            b_debug!("Ignoring IHU addressed to another neighbour");
+            return Ok(());
+        }
+
+        // The rxcost belongs to whoever sent the packet. Nothing inside a Babel packet names its
+        // sender, so the transport's source address is the only thing that identifies them.
         self.neighbor_table
-            .handle_ihu(now, interface, address, ihu)?;
+            .handle_ihu(now, interface, source_addr, ihu)?;
         Ok(())
     }
+}
+
+/// Decides whether an IHU was meant for this node.
+///
+/// RFC 8966 [4.6.6](https://datatracker.ietf.org/doc/html/rfc8966#name-ihu): an IHU names its
+/// destination explicitly so that IHUs for several neighbours can be aggregated into one multicast
+/// packet, each receiver keeping only the one addressed to it. The Address field therefore holds
+/// *our* address, not the sender's, and is purely a relevance filter.
+fn ihu_is_addressed_to_us<A: AddressExt>(
+    ihu: &IhuSlice<'_>,
+    destination: ReceiveDestination,
+    our_addr: Address<A>,
+) -> Result<bool, BabelError<A>> {
+    let ae = AddressEncoding::<A::Encoding>::try_from(ihu.ae())?;
+
+    if matches!(ae, AddressEncoding::WildCard) {
+        // The sender omitted the address. That is only unambiguous when the datagram was
+        // addressed to us alone; in a multicast packet there is no way to tell which neighbour a
+        // wildcard IHU was for, so it cannot be claimed.
+        return Ok(destination == ReceiveDestination::Unicast);
+    }
+
+    let addr_len = ae.address_len();
+    let address_bytes = ihu.address(addr_len)?;
+
+    Ok(Address::from_bytes(ae, address_bytes)? == our_addr)
 }
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
@@ -112,6 +163,7 @@ mod test {
     use super::*;
     use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_types::RouterId;
+    use crate::extension::NoExtension;
     use crate::packet::packet_header::BabelPacketHeader;
     use crate::packet::tlv::hello_slice::HelloFlags;
     use crate::utils::Duration;
@@ -123,8 +175,6 @@ mod test {
     const NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
     const NEIGHBOUR_1_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
     const NEIGHBOUR_2_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
-    /// The link-local all-nodes group an aggregated IHU packet would arrive on.
-    const MULTICAST_ADDR: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
 
     fn router(name: &'static str) -> BabelRouter<'static> {
         BabelRouter::new(RouterId::try_from(name).expect("bad router id"))
@@ -159,6 +209,33 @@ mod test {
             interval[0],
             interval[1],
         ]
+    }
+
+    fn receive<'a>(
+        iface: InterfaceHandle,
+        source: Ipv6Addr,
+        destination: ReceiveDestination,
+        contents: &'a [u8],
+    ) -> Receive<'a, NoExtension> {
+        Receive {
+            iface,
+            source_addr: source.into(),
+            destination,
+            contents,
+        }
+    }
+
+    /// An IHU with the wildcard encoding (AE=0), which omits the address entirely.
+    fn wildcard_ihu_tlv(rx_cost: u16, interval_centis: u16) -> Vec<u8> {
+        let mut out = vec![
+            IhuSlice::TYPE_ID,
+            IhuSlice::MIN_LEN as u8,
+            0, // AE = wildcard
+            0, // Reserved
+        ];
+        out.extend_from_slice(&rx_cost.to_be_bytes());
+        out.extend_from_slice(&interval_centis.to_be_bytes());
+        out
     }
 
     /// An IHU carrying a full 16-byte IPv6 destination address (AE=2).
@@ -209,11 +286,12 @@ mod test {
         let err = r
             .handle_input(
                 t0,
-                Receive {
-                    iface: unknown,
-                    source_addr: NEIGHBOUR_1_ADDR.into(),
-                    contents: &pkt,
-                },
+                receive(
+                    unknown,
+                    NEIGHBOUR_1_ADDR,
+                    ReceiveDestination::Multicast,
+                    &pkt,
+                ),
             )
             .expect_err("an unregistered interface should be rejected");
 
@@ -256,12 +334,12 @@ mod test {
     //  | || __ | |_| | / _ \| |) | |) |   / _|\__ \__ \| |
     // |___|_||_|\___/ /_/ \_\___/|___/|_|_\___|___/___/___|
 
-    /// RFC 8966 4.6.6 allows IHUs to be sent to a multicast address so they can be aggregated for
-    /// distinct neighbours; the explicit Address field is what disambiguates them. Attributing a
-    /// multicast IHU to the packet's source address would credit one neighbour's rxcost to
-    /// whichever neighbour happened to be looked up.
+    /// The rxcost in an IHU is the sender's cost for hearing us, so it becomes our tx_cost toward
+    /// the sender. Nothing inside a Babel packet names the sender, so the neighbour is always
+    /// identified by the transport's source address — never by the TLV's Address field, which
+    /// names the destination.
     #[test]
-    fn multicast_ihu_is_attributed_to_the_address_in_the_tlv() {
+    fn ihu_rxcost_is_applied_to_the_sender() {
         let mut r = router("node_1");
         let t0 = Instant::from_secs(0);
         let iface = drained_iface(&mut r, t0, "iface_1");
@@ -271,58 +349,107 @@ mod test {
                 .expect("add_neighbour should succeed");
         }
 
-        let pkt = packet(&ihu_tlv(77, 100, NEIGHBOUR_2_ADDR));
+        // Addressed to us (NODE_ADDR), sent by neighbour 1.
+        let pkt = packet(&ihu_tlv(77, 100, NODE_ADDR));
         r.handle_input(
             t0,
-            Receive {
-                iface,
-                source_addr: MULTICAST_ADDR.into(),
-                contents: &pkt,
-            },
+            receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Multicast, &pkt),
         )
         .expect("handle_input should succeed");
 
         assert_eq!(
-            tx_cost(&r, iface, NEIGHBOUR_2_ADDR),
+            tx_cost(&r, iface, NEIGHBOUR_1_ADDR),
             RxCost(77),
-            "the IHU names neighbour 2, so its rxcost belongs to neighbour 2"
+            "neighbour 1 sent the IHU, so the rxcost is our cost toward neighbour 1"
         );
         assert_eq!(
-            tx_cost(&r, iface, NEIGHBOUR_1_ADDR),
+            tx_cost(&r, iface, NEIGHBOUR_2_ADDR),
             RxCost(u16::MAX),
-            "neighbour 1 was not addressed and must stay at infinity"
+            "neighbour 2 had nothing to do with this packet"
         );
     }
 
-    /// The aggregation case the multicast Address field exists for: one packet, two IHUs, two
-    /// neighbours.
+    /// The aggregation case the Address field exists for: one multicast packet carrying IHUs for
+    /// several neighbours. Each receiver keeps the one naming its own address and ignores the
+    /// rest, which are other nodes' business.
     #[test]
-    fn aggregated_multicast_ihus_land_on_their_own_neighbours() {
+    fn aggregated_multicast_ihu_for_another_node_is_ignored() {
         let mut r = router("node_1");
         let t0 = Instant::from_secs(0);
         let iface = drained_iface(&mut r, t0, "iface_1");
 
-        for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
-            r.add_neighbour(t0, iface, addr.into(), Duration::from_secs(10), None)
-                .expect("add_neighbour should succeed");
-        }
+        r.add_neighbour(
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR.into(),
+            Duration::from_secs(10),
+            None,
+        )
+        .expect("add_neighbour should succeed");
 
-        let mut body = ihu_tlv(11, 100, NEIGHBOUR_1_ADDR);
+        // Neighbour 1 multicasts two IHUs: one for us, one for neighbour 2.
+        let mut body = ihu_tlv(11, 100, NODE_ADDR);
         body.extend_from_slice(&ihu_tlv(22, 100, NEIGHBOUR_2_ADDR));
         let pkt = packet(&body);
 
         r.handle_input(
             t0,
-            Receive {
-                iface,
-                source_addr: MULTICAST_ADDR.into(),
-                contents: &pkt,
-            },
+            receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Multicast, &pkt),
         )
         .expect("handle_input should succeed");
 
-        assert_eq!(tx_cost(&r, iface, NEIGHBOUR_1_ADDR), RxCost(11));
-        assert_eq!(tx_cost(&r, iface, NEIGHBOUR_2_ADDR), RxCost(22));
+        assert_eq!(
+            tx_cost(&r, iface, NEIGHBOUR_1_ADDR),
+            RxCost(11),
+            "only the IHU naming our own address should have been applied"
+        );
+        assert!(
+            r.neighbor_table
+                .inner
+                .get_by_key(&NeighbourIndex(iface, NEIGHBOUR_2_ADDR.into()))
+                .is_none(),
+            "an IHU addressed to another node must not create a neighbour for it"
+        );
+    }
+
+    /// A wildcard IHU carries no address, so it can only be claimed when the datagram was
+    /// addressed to us alone. Over multicast there is no way to tell which neighbour it was for.
+    #[test]
+    fn wildcard_ihu_is_accepted_over_unicast() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+
+        let pkt = packet(&wildcard_ihu_tlv(33, 100));
+        r.handle_input(
+            t0,
+            receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Unicast, &pkt),
+        )
+        .expect("handle_input should succeed");
+
+        assert_eq!(tx_cost(&r, iface, NEIGHBOUR_1_ADDR), RxCost(33));
+    }
+
+    #[test]
+    fn wildcard_ihu_is_ignored_over_multicast() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+
+        let pkt = packet(&wildcard_ihu_tlv(33, 100));
+        r.handle_input(
+            t0,
+            receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Multicast, &pkt),
+        )
+        .expect("handle_input should succeed");
+
+        assert!(
+            r.neighbor_table
+                .inner
+                .get_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
+                .is_none(),
+            "an unaddressable IHU must not be claimed"
+        );
     }
 
     //  ___   _   ___    _____ _ __   __  ___ _  _____ ___ ___
@@ -346,11 +473,7 @@ mod test {
 
         r.handle_input(
             t0,
-            Receive {
-                iface,
-                source_addr: NEIGHBOUR_1_ADDR.into(),
-                contents: &pkt,
-            },
+            receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Unicast, &pkt),
         )
         .expect("a TLV that fails to handle should not fail the packet");
 
@@ -390,11 +513,7 @@ mod test {
         let pkt = packet(&ihu_tlv(42, 100, NODE_ADDR));
         r.handle_input(
             t0,
-            Receive {
-                iface,
-                source_addr: NEIGHBOUR_1_ADDR.into(),
-                contents: &pkt,
-            },
+            receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Unicast, &pkt),
         )
         .expect("handle_input should succeed");
 

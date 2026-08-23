@@ -208,13 +208,6 @@ where
             Address::Extension(e) => AddressEncoding::Extension(e.encoding()),
         }
     }
-    pub(crate) fn is_multicast(&self) -> bool {
-        match self {
-            Self::V4(v4) => core::net::Ipv4Addr::from_octets(v4.octets).is_multicast(),
-            Self::V6(v6) => core::net::Ipv6Addr::from_octets(v6.octets).is_multicast(),
-            Self::Extension(e) => e.is_multicast(),
-        }
-    }
 }
 
 impl<A: AddressExt> From<core::net::Ipv6Addr> for Address<A> {

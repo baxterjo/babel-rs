@@ -259,15 +259,26 @@ where
             // - Unicast and matches this address
             // - Multicast and this neighbour's interface does not want unicast ihus
 
-            // TODO: Figure out error handling
-            let ae: u8 = iface.config.address.encoding().try_into().unwrap();
+            // The Address field names the IHU's destination, so that IHUs for several neighbours
+            // can be aggregated into one multicast packet and each receiver can pick out its own.
+            // A unicast IHU is already unambiguous, so it uses the wildcard encoding (AE 0) and
+            // omits the address entirely, as permitted by RFC 8966 4.6.6.
+            let neighbour_addr = neighbour.address;
+            let (ae, address): (u8, &[u8]) = if iface.config.unicast_ihu {
+                (0, &[])
+            } else {
+                // TODO: Figure out error handling
+                (
+                    neighbour_addr.encoding().try_into().unwrap(),
+                    neighbour_addr.as_wire(),
+                )
+            };
             // TODO: Derive this from the neighbour's hello history rather than advertising the
             // interface's starting cost forever. `BitHistory::count` already measures the link,
             // but nothing feeds it into a cost yet, so every IHU currently claims the same
             // constant regardless of how the link is actually performing.
             let rx_cost = iface.config.starting_rx_cost;
             let duration = ihu_timer.duration();
-            let address = iface.config.address;
             b_debug!(
                 "[SEND] IHU - iface: {}, dest_addr: {:?} - ae: {}, rx_cost: {:?}, interval: {}, addr: {:?}",
                 iface.handle,
@@ -275,10 +286,10 @@ where
                 ae,
                 rx_cost,
                 duration.as_centis(),
-                address
+                neighbour_addr
             );
             writer = writer
-                .write_ihu(ae, rx_cost, duration.into(), address.as_wire())?
+                .write_ihu(ae, rx_cost, duration.into(), address)?
                 .finish_tlv()?;
 
             // Claim the active address after the write succeeds.
@@ -480,6 +491,7 @@ mod test {
     const NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
     /// The address family Babel normally runs on, and the only one the writer compresses.
     const LINK_LOCAL_NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+    const LINK_LOCAL_NEIGHBOUR_ADDR: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2);
     const NEIGHBOUR_1_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
     const NEIGHBOUR_2_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
 
@@ -911,12 +923,18 @@ mod test {
 
             let ihu =
                 IhuSlice::from_untyped(nth_tlv(&transmit.contents, 0)).expect("should be an ihu");
-            assert_eq!(ihu.ae(), 2, "NODE_ADDR is a non-link-local IPv6 address");
+            assert_eq!(
+                ihu.ae(),
+                2,
+                "the neighbour's address is a non-link-local IPv6 address"
+            );
             assert_eq!(ihu.rx_cost(), RxCost(10), "default starting_rx_cost");
             assert_eq!(ihu.interval(), Duration::from_secs(30).into());
+            // The Address field names the IHU's destination — the neighbour it is for — so that
+            // receivers can pick their own out of an aggregated multicast packet.
             assert_eq!(
                 ihu.address(16).expect("should have a 16 byte address"),
-                Address::<NoExtension>::from(NODE_ADDR).as_wire()
+                Address::<NoExtension>::from(NEIGHBOUR_1_ADDR).as_wire()
             );
 
             // Timer restarted, so an immediate repoll doesn't refire it.
@@ -929,16 +947,16 @@ mod test {
         /// address itself and for every sub-TLV behind it, and link-local is the common
         /// deployment path rather than an edge case.
         #[test]
-        fn link_local_interface_address_is_sent_as_eight_bytes_with_ae_3() {
+        fn link_local_neighbour_address_is_sent_as_eight_bytes_with_ae_3() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
             let iface = drained_iface(&mut r, t0, "iface_1", LINK_LOCAL_NODE_ADDR);
-            add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+            add_neighbour_no_ucast(&mut r, t0, iface, LINK_LOCAL_NEIGHBOUR_ADDR);
             set_ihu_timer(
                 &mut r,
                 t0,
                 iface,
-                NEIGHBOUR_1_ADDR,
+                LINK_LOCAL_NEIGHBOUR_ADDR,
                 Duration::from_secs(30),
                 true,
             );
@@ -951,7 +969,7 @@ mod test {
             assert_eq!(ihu.ae(), 3, "fe80::/64 uses the link-local encoding");
             assert_eq!(
                 ihu.address(8).expect("should have an 8 byte address"),
-                &[0, 0, 0, 0, 0, 0, 0, 1]
+                &[0, 0, 0, 0, 0, 0, 0, 2]
             );
 
             // The IHU is self-terminating: if the address were written short, the declared TLV
@@ -991,6 +1009,44 @@ mod test {
                 TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
             );
             assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
+        }
+
+        /// A unicast IHU is already unambiguous, so RFC 8966 4.6.6 lets it use the wildcard
+        /// encoding and omit the address, saving 16 bytes on every IHU.
+        #[test]
+        fn unicast_ihu_uses_the_wildcard_encoding_and_omits_the_address() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            r.iface_table
+                .inner
+                .get_mut_by_key(&iface)
+                .expect("interface should exist")
+                .config
+                .unicast_ihu = true;
+            add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+            set_ihu_timer(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                Duration::from_secs(30),
+                true,
+            );
+
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            let ihu =
+                IhuSlice::from_untyped(nth_tlv(&transmit.contents, 0)).expect("should be an ihu");
+
+            assert_eq!(ihu.ae(), 0, "a unicast IHU needs no explicit destination");
+            assert!(
+                ihu.address(0)
+                    .expect("wildcard carries no address")
+                    .is_empty(),
+                "no address bytes should follow the header"
+            );
+            // 4 byte packet header + 2 byte TLV header + 6 byte IHU body, and nothing more.
+            assert_eq!(transmit.contents.len(), 12);
         }
 
         #[test]
