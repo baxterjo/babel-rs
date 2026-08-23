@@ -17,6 +17,8 @@ pub mod next_hop_slice;
 pub mod pad_slice;
 #[doc(hidden)]
 pub mod router_id_slice;
+#[doc(hidden)]
+pub mod update_slice;
 
 use core::any::type_name;
 
@@ -53,6 +55,15 @@ where
     /// This is minimum because some packets use address compression and have variable size.
     const MIN_LEN: usize;
 
+    fn slice(&self) -> &'a [u8];
+
+    /// This method needs to be implemented to store a slice in the TLV.
+    ///
+    /// The method should never be called directly by users and will only be called by
+    /// `<Self as TypedTlv>::from_slice()`. It can be assumed that length checks have been done on
+    /// the slice before this function has been called.
+    fn from_slice_unchecked(slice: &'a [u8]) -> Self;
+
     /// Converts the untyped TlvSlice into a typed slice. After checking the slice has at least the
     /// minimum length to be that Tlv.
     fn from_untyped(raw: TlvSlice<'a>) -> Result<Self, TlvError> {
@@ -80,12 +91,7 @@ where
         Ok(Self::from_slice_unchecked(raw.slice()))
     }
 
-    fn slice(&self) -> &'a [u8];
-
-    /// This method needs to be implemented to store a slice in the TLV.
-    ///
-    /// The method should never be called directly by users and will only be called by
-    /// `<Self as TypedTlv>::from_slice()`. It can be assumed that length checks have been done on
-    /// the slice before this function has been called.
-    fn from_slice_unchecked(slice: &'a [u8]) -> Self;
+    fn as_untyped(&'a self) -> TlvSlice<'a> {
+        TlvSlice::from_typed(self)
+    }
 }

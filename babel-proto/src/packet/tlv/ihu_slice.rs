@@ -107,6 +107,9 @@ impl<'a> IhuSlice<'a> {
     /// send a new IHU; this MUST NOT be 0. The receiving node will use this value in order to
     /// compute a hold time for this symmetric association.
     pub fn interval(&self) -> Interval {
+        // SAFETY:
+        // Safe as the constructor has checked to ensure the length of the slice is at minimum
+        // TlvHeader::LEN (2) + Self::MIN_LEN (6).
         let centis = unsafe { get_unchecked_be_u16(self.slice.as_ptr().add(TlvHeader::LEN + 4)) };
         Duration::from_centis(centis.into()).into()
     }
