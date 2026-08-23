@@ -12,6 +12,8 @@ pub mod hello_slice;
 #[doc(hidden)]
 pub mod ihu_slice;
 #[doc(hidden)]
+pub mod next_hop_slice;
+#[doc(hidden)]
 pub mod pad_slice;
 #[doc(hidden)]
 pub mod router_id_slice;
