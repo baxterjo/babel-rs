@@ -22,10 +22,6 @@ where
     fn from_bytes(ae: &Self::Encoding, bytes: &[u8]) -> Result<Self, AddressError<Self>>;
     /// Get the encoding for this address.
     fn encoding(&self) -> Self::Encoding;
-    /// Returns `true` if this is a multicast address.
-    ///
-    /// This is synonymous to [`Ipv6Addr::is_multicast`](core::net::Ipv6Addr::is_multicast)
-    fn is_multicast(&self) -> bool;
 }
 
 impl AddressExt for NoExtension {
@@ -38,9 +34,6 @@ impl AddressExt for NoExtension {
         unreachable!("The NoExtension struct should not be constructable.")
     }
     fn encoding(&self) -> Self::Encoding {
-        unreachable!("The NoExtension struct should not be constructable.")
-    }
-    fn is_multicast(&self) -> bool {
         unreachable!("The NoExtension struct should not be constructable.")
     }
 }

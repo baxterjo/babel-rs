@@ -25,10 +25,6 @@ impl Ipv4Addr {
     pub(crate) fn as_octets(&self) -> &[u8] {
         &self.octets
     }
-
-    pub(crate) fn octets(&self) -> [u8; 4] {
-        self.octets
-    }
 }
 
 impl From<core::net::Ipv4Addr> for Ipv4Addr {
