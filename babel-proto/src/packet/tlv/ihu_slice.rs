@@ -134,8 +134,6 @@ impl<'a> IhuSlice<'a> {
         let idx_start = TlvHeader::LEN + Self::MIN_LEN + address_len;
         let len = self.slice.len();
 
-        b_debug!("Start: {}, Slice Len: {}", idx_start, len);
-
         // This **MUST** be checked as the source of address_len can be user supplied through
         // extensions and cause a footgun.
         Ok(self.slice.get(idx_start..len).ok_or(LenError {

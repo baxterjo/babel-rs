@@ -14,7 +14,7 @@ pub mod ihu_slice;
 #[doc(hidden)]
 pub mod pad_slice;
 #[doc(hidden)]
-pub mod router_id;
+pub mod router_id_slice;
 
 use core::any::type_name;
 
@@ -26,6 +26,8 @@ pub use ack_slice::AckSlice;
 pub use hello_slice::HelloSlice;
 #[doc(inline)]
 pub use ihu_slice::IhuSlice;
+#[doc(inline)]
+pub use router_id_slice::RouterIdSlice;
 
 use crate::packet::error::layer::Layer;
 use crate::packet::error::len_error::LenError;

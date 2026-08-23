@@ -2,6 +2,13 @@ use crate::packet::tlv::TypedTlv;
 use crate::packet::tlv::tlv_header::TlvHeader;
 use crate::packet::utils::slice_to_array;
 
+/// Router ID TLV as defined in
+/// [Section 4.6.7](https://datatracker.ietf.org/doc/html/rfc8966#name-router-id-2)
+///
+/// A Router-Id TLV establishes a router-id that is implied by subsequent Update TLVs, as described
+/// in [Section 4.5](https://datatracker.ietf.org/doc/html/rfc8966#parser-state).
+/// This TLV sets the router-id even if it is otherwise ignored due to an unknown mandatory sub-TLV.
+///
 /// ```sh
 ///  0                   1                   2                   3
 ///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -31,8 +38,10 @@ impl<'a> TypedTlv<'a> for RouterIdSlice<'a> {
 }
 
 impl<'a> RouterIdSlice<'a> {
-    /// The Router-Id of the sending node, which is the value that will be used by subsequent
-    /// Update TLVs until it is changed by another Router-Id TLV.
+    /// The router-id for routes advertised in subsequent Update TLVs. This MUST NOT consist of all
+    /// zeroes or all ones.
+    ///
+    /// This accessor method does not check for correct router ID bounds.
     pub(crate) fn router_id(&self) -> &'a [u8; 8] {
         // SAFETY:
         // Safe as the constructor has checked to ensure the length of the slice is at minimum
