@@ -1,5 +1,8 @@
+use core::fmt::Debug;
+
 use crate::packet::tlv::TypedTlv;
 use crate::packet::tlv::tlv_header::TlvHeader;
+use crate::packet::tlv::tlv_slice::TlvSlice;
 use crate::packet::utils::slice_to_array;
 
 /// Router ID TLV as defined in
@@ -20,10 +23,31 @@ use crate::packet::utils::slice_to_array;
 /// |                                                               |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// ```
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct RouterIdSlice<'a> {
     slice: &'a [u8],
+}
+
+impl Debug for RouterIdSlice<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RouterIdSlice")
+            .field("type", &TlvSlice::from_typed(self).r#type())
+            .field("length", &TlvSlice::from_typed(self).length())
+            .field("router_id", &self.router_id())
+            .finish()
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for RouterIdSlice<'_> {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(
+            f,
+            "RouterIdSlice{{ type: {}, length: {}, router_id: {}}}",
+            TlvSlice::from_typed(self).r#type(),
+            TlvSlice::from_typed(self).length(),
+            self.router_id()
+        )
+    }
 }
 
 impl<'a> TypedTlv<'a> for RouterIdSlice<'a> {
