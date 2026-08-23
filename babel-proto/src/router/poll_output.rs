@@ -1,5 +1,5 @@
 use super::BabelRouter;
-use crate::data_structures::interface::InterfaceHandle;
+use crate::data_structures::interface::{InterfaceHandle, InterfaceTableError};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -10,6 +10,22 @@ use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
 use crate::utils::destination::{Claim, DestAddr};
 use crate::utils::storage::ManagedSliceExt;
 use crate::utils::{Duration, Instant, ManagedSlice};
+
+/// How long to wait before polling again after a TLV write failed.
+///
+/// A failed write leaves its TLV due — the timer behind it is only restarted once the write
+/// succeeds — so the router has to be polled again for that TLV to ever go out. Reporting "nothing
+/// is due" would silence it permanently, while a zero duration would spin if the caller keeps
+/// handing back a buffer that is too small for the TLV.
+const WRITE_FAILURE_RETRY: Duration = Duration::from_millis(100);
+
+/// Folds a candidate wake-up time into a running minimum, where `None` means "nothing due yet".
+fn merge_next_poll(slot: &mut Option<Duration>, candidate: Duration) {
+    *slot = Some(match *slot {
+        Some(current) => current.min(candidate),
+        None => candidate,
+    });
+}
 
 impl<'storage, A, P, const MN: u8, const V: u8> BabelRouter<'storage, P, A, MN, V>
 where
@@ -88,28 +104,41 @@ where
             self.id,
             active_interface
         );
-        // If active address ever becomes Some, then it is a unicast packet.
+
+        // A router with no interfaces has nothing it could ever send, and nothing to base a
+        // wake-up time on either.
+        if self.iface_table.iter_mut().next().is_none() {
+            return Err(InterfaceTableError::NoInterfacesRegistered.into());
+        }
+
         let mut active_dest = DestAddr::default();
         let mut active_iface = active_interface;
         let writer = PacketWriter::new_packet(MN, V, buf.into())?;
-        let mut next_poll = Duration::from_micros(u64::MAX);
+        let mut next_poll = None;
 
-        let body = match self.build_packet_body(
+        let (body, write_failed) = match self.build_packet_body(
             now,
             &mut active_iface,
             &mut active_dest,
             &mut next_poll,
             writer,
         ) {
-            Ok(writer) => writer,
+            Ok(writer) => (writer, false),
             Err((err, writer)) => {
                 b_debug!("Err building packet body: {}", err);
-                writer
+                (writer, true)
             }
         };
 
         let Some(finished_packet) = body.finish_packet()? else {
-            return Ok(Output::SetTimer(next_poll));
+            // A write failure aborts the rest of the body, so the TLV that failed never got to
+            // contribute its timer to `next_poll` and is still due. Ask to be polled again soon,
+            // unless something else is already due sooner.
+            if write_failed {
+                merge_next_poll(&mut next_poll, WRITE_FAILURE_RETRY);
+            }
+
+            return Ok(Output::SetTimer(next_poll.unwrap_or(WRITE_FAILURE_RETRY)));
         };
 
         let output = Output::Transmit(Transmit {
@@ -130,7 +159,7 @@ where
         now: Instant,
         active_iface: &mut Option<InterfaceHandle>,
         active_dest: &mut DestAddr<A>,
-        next_poll: &mut Duration,
+        next_poll: &mut Option<Duration>,
         mut writer: PacketWriterStep<'output, Ready>,
     ) -> Result<
         PacketWriterStep<'output, Ready>,
@@ -159,13 +188,13 @@ where
         now: Instant,
         active_iface: &mut Option<InterfaceHandle>,
         active_dest: &mut DestAddr<A>,
-        next_poll: &mut Duration,
+        next_poll: &mut Option<Duration>,
         mut writer: PacketWriterStep<'output, Ready>,
     ) -> Result<
         PacketWriterStep<'output, Ready>,
         (PacketWriterError, PacketWriterStep<'output, Ready>),
     > {
-        let mut local_min = Duration::from_micros(u64::MAX);
+        let mut local_min: Option<Duration> = None;
 
         for neighbour in self.neighbor_table.iter_mut() {
             // If this neighbour has not yet set it's IHU timer, skip it.
@@ -178,7 +207,7 @@ where
 
             // If there is some time remaining in the timer, update local min and skip it.
             if let Some(remaining) = ihu_timer.time_remaining(now) {
-                local_min = local_min.min(remaining);
+                merge_next_poll(&mut local_min, remaining);
                 continue;
             }
 
@@ -223,6 +252,10 @@ where
 
             // TODO: Figure out error handling
             let ae: u8 = iface.config.address.encoding().try_into().unwrap();
+            // TODO: Derive this from the neighbour's hello history rather than advertising the
+            // interface's starting cost forever. `BitHistory::count` already measures the link,
+            // but nothing feeds it into a cost yet, so every IHU currently claims the same
+            // constant regardless of how the link is actually performing.
             let rx_cost = iface.config.starting_rx_cost;
             let duration = ihu_timer.duration();
             let address = iface.config.address;
@@ -256,7 +289,9 @@ where
         }
 
         // Choose the minimum between next poll and local min.
-        *next_poll = local_min.min(*next_poll);
+        if let Some(local_min) = local_min {
+            merge_next_poll(next_poll, local_min);
+        }
 
         Ok(writer)
     }
@@ -271,13 +306,13 @@ where
         now: Instant,
         active_iface: &mut Option<InterfaceHandle>,
         active_addr: &mut DestAddr<A>,
-        next_poll: &mut Duration,
+        next_poll: &mut Option<Duration>,
         mut writer: PacketWriterStep<'output, Ready>,
     ) -> Result<
         PacketWriterStep<'output, Ready>,
         (PacketWriterError, PacketWriterStep<'output, Ready>),
     > {
-        let mut local_min = Duration::from_micros(u64::MAX);
+        let mut local_min: Option<Duration> = None;
         for neighbour in self.neighbor_table.iter_mut() {
             let iface = neighbour.iface;
             let address = neighbour.address;
@@ -289,7 +324,7 @@ where
 
             // If the timer is not done, update local min and skip.
             if let Some(remaining) = ucast.timer.time_remaining(now) {
-                local_min = local_min.min(remaining);
+                merge_next_poll(&mut local_min, remaining);
                 continue;
             }
             // Skip if active interface is not this neighbour's.
@@ -327,7 +362,9 @@ where
             }
         }
 
-        *next_poll = local_min.min(*next_poll);
+        if let Some(local_min) = local_min {
+            merge_next_poll(next_poll, local_min);
+        }
 
         Ok(writer)
     }
@@ -342,18 +379,18 @@ where
         now: Instant,
         active_iface: &mut Option<InterfaceHandle>,
         active_dest: &mut DestAddr<A>,
-        next_poll: &mut Duration,
+        next_poll: &mut Option<Duration>,
         mut writer: PacketWriterStep<'output, Ready>,
     ) -> Result<
         PacketWriterStep<'output, Ready>,
         (PacketWriterError, PacketWriterStep<'output, Ready>),
     > {
-        let mut local_min = Duration::from_micros(u64::MAX);
+        let mut local_min: Option<Duration> = None;
         for iface in self.iface_table.iter_mut() {
             // If the timer on the interface hello has not fired, get the minimum between it and
             // min_dur.
             if let Some(remaining) = iface.hello_timer.time_remaining(now) {
-                local_min = local_min.min(remaining);
+                merge_next_poll(&mut local_min, remaining);
                 continue;
             }
 
@@ -401,7 +438,9 @@ where
             }
         }
 
-        *next_poll = local_min.min(*next_poll);
+        if let Some(local_min) = local_min {
+            merge_next_poll(next_poll, local_min);
+        }
 
         Ok(writer)
     }
@@ -1157,9 +1196,85 @@ mod test {
                 .poll_output_with_buf(t0, &mut buf[..])
                 .expect("a write failure should not surface as an Err from poll_output");
 
-            // The mcast hello write fails before contributing to next_poll, so the sentinel
-            // "nothing is due" value is returned rather than a short retry.
-            assert_eq!(expect_set_timer(output), Duration::from_micros(u64::MAX));
+            // The write failure aborts the body before the mcast hello contributes its timer to
+            // next_poll, but the hello is still due — its timer was never restarted. The router
+            // must ask to be polled again rather than reporting that nothing is scheduled, which
+            // would silence it for good.
+            assert_eq!(expect_set_timer(output), WRITE_FAILURE_RETRY);
+        }
+
+        /// The retry is a floor, not an override: a timer that comes due sooner than the retry
+        /// window still wins, so a write failure can't delay unrelated work.
+        #[test]
+        fn write_failure_retry_does_not_delay_a_sooner_timer() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            // Deliberately not drained: the mcast hello is eager-due, so it is the write that
+            // fails against the undersized buffer below.
+            let iface = iface_handle("iface_1");
+            r.register_interface(t0, iface, NODE_ADDR, Some(IFACE_INTERVAL), None)
+                .expect("register should succeed");
+
+            // Not yet due, and due sooner than the retry window. It is polled before the mcast
+            // hello, so it contributes to next_poll before the failure aborts the body.
+            let soon = Duration::from_millis(5);
+            r.add_neighbour(
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR.into(),
+                Duration::from_secs(10),
+                None,
+            )
+            .expect("add_neighbour should succeed");
+            r.neighbor_table
+                .inner
+                .get_mut_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
+                .expect("neighbour should exist")
+                .pending
+                .ihu_timer = Some(Timer::new(t0, soon).expect("valid timer"));
+
+            let mut buf = [0u8; 4];
+            let output = r
+                .poll_output_with_buf(t0, &mut buf[..])
+                .expect("a write failure should not surface as an Err from poll_output");
+
+            assert_eq!(expect_set_timer(output), soon);
+        }
+
+        /// A router with no interfaces can never send anything and has no timer to report, so
+        /// polling one is a caller mistake rather than an idle state. Rejecting it here is what
+        /// lets `poll_output` promise a real `Duration`: every registered interface contributes
+        /// its multicast Hello timer, so once one exists there is always something to report.
+        #[test]
+        fn polling_a_router_with_no_interfaces_is_an_error() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+
+            let err = r
+                .poll_output(t0)
+                .expect_err("a router with no interfaces should be rejected");
+
+            assert!(matches!(
+                err,
+                BabelError::IfaceTable(InterfaceTableError::NoInterfacesRegistered)
+            ));
+        }
+
+        /// The same guard applies to the borrowed-buffer entry point.
+        #[test]
+        fn polling_with_a_buffer_and_no_interfaces_is_an_error() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+
+            let mut buf = [0u8; 64];
+            let err = r
+                .poll_output_with_buf(t0, &mut buf[..])
+                .expect_err("a router with no interfaces should be rejected");
+
+            assert!(matches!(
+                err,
+                BabelError::IfaceTable(InterfaceTableError::NoInterfacesRegistered)
+            ));
         }
     }
 }

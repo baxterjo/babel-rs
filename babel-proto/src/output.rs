@@ -11,12 +11,7 @@ use crate::utils::managed_slice::ManagedSlice;
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Output<'a, A: AddressExt> {
     /// Nothing is ready to send. Poll again after the given duration.
-    ///
-    /// `None` means nothing is currently scheduled, so there is no need to wake the router on a
-    /// timer at all — it only needs polling again once
-    /// [`handle_input`](crate::router::BabelRouter::handle_input) or a configuration change gives
-    /// it something to do.
-    SetTimer(Option<Duration>),
+    SetTimer(Duration),
     Transmit(Transmit<'a, A>),
 }
 

@@ -1,7 +1,5 @@
 use core::fmt::Display;
 use core::hash::Hash;
-use core::iter::FilterMap;
-use core::slice::IterMut;
 
 use thiserror::Error;
 
@@ -99,6 +97,10 @@ pub enum InterfaceTableError {
     DuplicateInterfaceId(InterfaceHandle),
     #[error("Given interface ID is too long - max: 8, len: {}", len)]
     IdTooLong { len: usize },
+    /// The router was polled before any interface was registered, so it has nothing it could
+    /// ever send.
+    #[error("No interfaces are registered")]
+    NoInterfacesRegistered,
     #[error(transparent)]
     Timer(#[from] TimerError),
 }
