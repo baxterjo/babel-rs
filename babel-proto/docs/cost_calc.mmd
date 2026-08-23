@@ -1,0 +1,17 @@
+---
+title: Cost Calculation
+--- 
+
+sequenceDiagram
+  participant A as node_a
+  participant B as node_b
+  loop Every node_a.hello_interval
+    A->>B: Hello TLV
+    B->>B: Gather Hello Stats
+    Note right of B: B calculates RxCost(A) from stats
+  end
+  loop Every node_b.ihu_interval
+    B->>A: IHU TLV (contains RxCost(A))
+    Note left of A: A stores RxCost(A) from TLV <br>in neighbour table at B.tx_cost
+  end
+  

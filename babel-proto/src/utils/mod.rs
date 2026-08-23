@@ -2,6 +2,7 @@
 
 pub(crate) mod bit_history;
 pub(crate) mod destination;
+pub mod distance;
 pub(crate) mod managed_slice;
 pub(crate) mod rx_cost;
 pub(crate) mod short_id;

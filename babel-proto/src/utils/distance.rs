@@ -1,0 +1,317 @@
+//! Newtype wrappers for the "distance" quantities used by the Babel
+//! routing protocol.
+//!
+//! All four share the same wire representation a 16-bit unsigned
+//! integer where `0xFFFF` means "infinite" but they are semantically distinct quantities that are
+//! easy to get mixed up.
+//!
+//! ```text
+//! RxCost (B's view of the link B<-A)
+//!     --[sent in an IHU]-->
+//! TxCost (A's view of the link A->B)
+//!     --[local policy]-->
+//! Cost C(A,B)
+//!     --[M(c, m) = c + m]-->
+//! Metric (combined with a neighbour's advertised Metric)
+//! ```
+
+use core::convert::TryFrom;
+use core::fmt;
+use core::ops::Add;
+
+/// Any distance that is 0xFFFF is considered "infinity"
+pub const INFINITY: u16 = 0xFFFF;
+
+macro_rules! distance_newtype {
+    (
+        $(#[$attr:meta])*
+        $name:ident
+    ) => {
+        $(#[$attr])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(u16);
+
+        impl $name {
+            /// The RFC 8966 sentinel value meaning "infinite".
+            pub const INFINITY: Self = Self(INFINITY);
+
+            /// Construct directly from a raw wire value, unvalidated.
+            #[inline]
+            pub const fn from_raw(v: u16) -> Self {
+                Self(v)
+            }
+
+            /// The raw wire value.
+            #[inline]
+            pub const fn raw(self) -> u16 {
+                self.0
+            }
+
+            #[inline]
+            pub const fn is_infinite(self) -> bool {
+                self.0 == INFINITY
+            }
+        }
+
+        impl From<u16> for $name {
+            #[inline]
+            fn from(v: u16) -> Self {
+                Self(v)
+            }
+        }
+
+        impl From<$name> for u16 {
+            #[inline]
+            fn from(v: $name) -> u16 {
+                v.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                if self.is_infinite() {
+                    write!(f, "infinity")
+                } else {
+                    write!(f, "{}", self.0)
+                }
+            }
+        }
+    };
+}
+
+distance_newtype! {
+    /// A node's estimate of its *reception* cost from a given neighbour
+    /// ([Section 3.4.3](https://datatracker.ietf.org/doc/html/rfc8966#name-cost-computation)).
+    ///
+    /// Derived from Hello history and sent to that neighbour in an
+    /// [IHU TLV](crate::packet::tlv::IhuSlice).
+    RxCost
+}
+
+distance_newtype! {
+    /// The cost of *transmitting* to a given neighbour, as reported by that
+    /// neighbour's IHU.
+    ///
+    /// Stored in the neighbour table. Numerically this is just the neighbour's
+    /// [`RxCost`], viewed from across the link.
+    TxCost
+}
+
+distance_newtype! {
+    /// A route metric
+    /// ([Section 3.5.2](https://datatracker.ietf.org/doc/html/rfc8966#name-metric-computation)).
+    ///
+    /// The accumulated path cost carried in Update TLVs, used for route selection
+    /// ([Section 3.6](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection))
+    /// and the feasibility condition
+    /// ([Section 3.5.1](https://datatracker.ietf.org/doc/html/rfc8966#name-the-feasibility-condition)).
+    Metric
+}
+
+// `Cost` is deliberately *not* built with `distance_newtype!`: unlike
+// the other three, it is required to be "strictly positive" per the spec. This means it cannot be
+// zero.
+
+/// A link cost C(A, B)
+/// ([Section 3.4.3](https://datatracker.ietf.org/doc/html/rfc8966#name-cost-computation)).
+///
+/// The local, policy-defined combination of RxCost and TxCost for a single link.
+/// MUST be strictly positive when finite.
+///
+/// include_mmd!("docs/cost_calc.mmd")
+#[cfg_attr(all(doc, feature = "diagrams"), aquamarine::aquamarine)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Cost(u16);
+
+impl Cost {
+    /// All costs of 0xFFFF are considered "infinite"
+    pub const INFINITY: Self = Self(INFINITY);
+
+    /// Construct a validated [`Cost`], enforcing the
+    /// requirement that a finite cost be strictly positive.
+    /// `Cost::INFINITY` is always accepted.
+    pub fn new(v: u16) -> Result<Self, NonPositiveCost> {
+        if v == 0 {
+            Err(NonPositiveCost)
+        } else {
+            Ok(Self(v))
+        }
+    }
+
+    /// Construct directly from a raw wire value, without validation.
+    /// Prefer [`Cost::new`] or a `From` conversion where possible.
+    #[inline]
+    pub const fn from_raw(v: u16) -> Self {
+        Self(v)
+    }
+
+    /// The raw wire value.
+    #[inline]
+    pub const fn raw(self) -> u16 {
+        self.0
+    }
+
+    #[inline]
+    pub const fn is_infinite(self) -> bool {
+        self.0 == INFINITY
+    }
+}
+
+impl From<Cost> for u16 {
+    #[inline]
+    fn from(v: Cost) -> u16 {
+        v.0
+    }
+}
+
+impl TryFrom<u16> for Cost {
+    type Error = NonPositiveCost;
+    fn try_from(v: u16) -> Result<Self, Self::Error> {
+        Cost::new(v)
+    }
+}
+
+impl fmt::Display for Cost {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_infinite() {
+            write!(f, "infinity")
+        } else {
+            write!(f, "{}", self.0)
+        }
+    }
+}
+
+/// Error returned by [`Cost::new`] when a value would violate the requirement that a *finite* cost
+/// be strictly positive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NonPositiveCost;
+
+impl fmt::Display for NonPositiveCost {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "a finite link cost must be strictly positive (RFC 8966 §3.4.3)"
+        )
+    }
+}
+
+// --- RxCost <-> TxCost ---------------------------------------------------
+//
+// These don't describe the same node's data: an IHU carries A's
+// rxcost for the link *to* A, and the receiving neighbour B stores
+// that number, unchanged, as its txcost *to* A (RFC 8966 §3.4.2:
+// "A node receiving an IHU sets the value of the txcost ... to the
+// value contained in the IHU"). The conversion is exact and lossless;
+// what changes is *which node* the number describes, not the number
+// itself -- which is exactly what "crossing the link" should look
+// like in the type system.
+
+impl From<RxCost> for TxCost {
+    #[inline]
+    fn from(rx: RxCost) -> Self {
+        TxCost(rx.0)
+    }
+}
+
+impl From<TxCost> for RxCost {
+    #[inline]
+    fn from(tx: TxCost) -> Self {
+        RxCost(tx.0)
+    }
+}
+
+// --- TxCost -> Cost --------------------------------------------------------
+//
+// RFC 8966 leaves cost computation a matter of local policy (§3.4.3),
+// subject only to: strictly positive when finite; infinite if no
+// recent Hellos; infinite if txcost is infinite. The simplest
+// RFC-compliant strategy -- appropriate for symmetric, low-loss links
+// -- is cost = txcost (the wired-link case sketched in Appendix A.2).
+// This `From` impl provides *that* baseline. A second, two-input
+// strategy that also folds in RxCost (for lossy/wireless links) is
+// given separately as `Cost::etx`, since combining two distinct types
+// isn't a 1:1 `From` conversion.
+
+impl From<TxCost> for Cost {
+    #[inline]
+    fn from(tx: TxCost) -> Self {
+        if tx.is_infinite() {
+            Cost::INFINITY
+        } else {
+            // A finite txcost of 0 shouldn't occur on the wire, but
+            // nothing in §4.6.6 forbids it; clamp to 1 so the
+            // strictly-positive invariant always holds regardless of
+            // input.
+            Cost(tx.0.max(1))
+        }
+    }
+}
+
+// --- Cost + Metric -> Metric ----------------------------------------------
+//
+// RFC 8966 §3.5.2: the RECOMMENDED additive metric is
+// M(c, m) = c + m, which must satisfy strict monotonicity
+// (M(c, m) > m whenever c is finite) and M(c, m) = infinite whenever
+// c is infinite. `Add` is implemented in both orders so a `Cost` and
+// a neighbour-advertised `Metric` combine naturally either way.
+
+impl Add<Metric> for Cost {
+    type Output = Metric;
+
+    fn add(self, neighbour_metric: Metric) -> Metric {
+        if self.is_infinite() || neighbour_metric.is_infinite() {
+            Metric::INFINITY
+        } else {
+            // Saturate at INFINITY - 1 rather than wrapping, so an
+            // overflowing sum reads as "infinite" instead of a bogus
+            // small metric.
+            Metric(self.0.saturating_add(neighbour_metric.0).min(INFINITY - 1))
+        }
+    }
+}
+
+impl Add<Cost> for Metric {
+    type Output = Metric;
+
+    #[inline]
+    fn add(self, cost: Cost) -> Metric {
+        cost + self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rxcost_crosses_the_link_unchanged() {
+        let rx = RxCost::from(96);
+        let tx: TxCost = rx.into();
+        assert_eq!(tx.raw(), 96);
+    }
+
+    #[test]
+    fn infinity_propagates_through_every_stage() {
+        let tx = TxCost::INFINITY;
+        let cost: Cost = tx.into();
+        assert!(cost.is_infinite());
+
+        let m = cost + Metric::from(5);
+        assert!(m.is_infinite());
+    }
+
+    #[test]
+    fn additive_metric_is_strictly_monotonic() {
+        let c = Cost::new(3).unwrap();
+        let m = Metric::from(10);
+        assert_eq!((c + m).raw(), 13);
+        assert!((c + m).raw() > m.raw());
+    }
+
+    #[test]
+    fn cost_rejects_zero() {
+        assert!(Cost::new(0).is_err());
+        assert!(Cost::new(1).is_ok());
+        assert_eq!(Cost::new(INFINITY).unwrap(), Cost::INFINITY);
+    }
+}
