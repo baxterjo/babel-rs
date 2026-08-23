@@ -29,7 +29,7 @@ use crate::packet::tlv::tlv_slice::TlvSlice;
 /// family, the next-hop address is taken to be the source address of the packet.
 ///
 /// Next Hop TLVs with an unknown value for the AE field MUST be silently ignored.
-pub(crate) struct NextHopSlice<'a> {
+pub struct NextHopSlice<'a> {
     slice: &'a [u8],
 }
 
@@ -70,7 +70,7 @@ impl<'a> TypedTlv<'a> for NextHopSlice<'a> {
 impl<'a> NextHopSlice<'a> {
     /// The encoding of the Address field. This SHOULD be 1 (IPv4) or 3 (link-local IPv6), and MUST
     /// NOT be 0.
-    pub(crate) fn ae(&self) -> u8 {
+    pub fn ae(&self) -> u8 {
         // SAFETY:
         // Safe as the constructor has checked to ensure the length of the slice is at minimum
         // TlvHeader::LEN (2) + Self::MIN_LEN (6).

@@ -12,8 +12,8 @@ use crate::packet::utils::get_unchecked_be_u16;
 use crate::utils::Duration;
 use crate::utils::rx_cost::RxCost;
 
-/// IHU TLV as defined in section
-/// [4.6.6](https://datatracker.ietf.org/doc/html/rfc8966#name-ihu)
+/// IHU TLV as defined in [Section
+/// 4.6.6](https://datatracker.ietf.org/doc/html/rfc8966#name-ihu)
 ///
 /// An IHU ("I Heard You") TLV is used for confirming bidirectional reachability and carrying a
 /// link's transmission cost.

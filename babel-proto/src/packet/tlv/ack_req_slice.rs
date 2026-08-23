@@ -4,8 +4,8 @@ use crate::packet::tlv::tlv_header::TlvHeader;
 use crate::packet::utils::get_unchecked_be_u16;
 use crate::utils::Duration;
 
-/// Acknowledgment request TLV as defined in section
-/// [4.6.3](https://datatracker.ietf.org/doc/html/rfc8966#name-acknowledgment-request)
+/// Acknowledgment request TLV as defined in [Section
+/// 4.6.3](https://datatracker.ietf.org/doc/html/rfc8966#name-acknowledgment-request)
 ///
 /// ```sh
 ///  0                   1                   2                   3

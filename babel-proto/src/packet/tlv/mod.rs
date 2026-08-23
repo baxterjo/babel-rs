@@ -16,7 +16,11 @@ pub mod next_hop_slice;
 #[doc(hidden)]
 pub mod pad_slice;
 #[doc(hidden)]
+pub mod route_request_slice;
+#[doc(hidden)]
 pub mod router_id_slice;
+#[doc(hidden)]
+pub mod seqno_request_slice;
 #[doc(hidden)]
 pub mod update_slice;
 
@@ -31,7 +35,15 @@ pub use hello_slice::HelloSlice;
 #[doc(inline)]
 pub use ihu_slice::IhuSlice;
 #[doc(inline)]
+pub use next_hop_slice::NextHopSlice;
+#[doc(inline)]
+pub use route_request_slice::RouteRequestSlice;
+#[doc(inline)]
 pub use router_id_slice::RouterIdSlice;
+#[doc(inline)]
+pub use seqno_request_slice::SeqnoRequestSlice;
+#[doc(inline)]
+pub use update_slice::UpdateSlice;
 
 use crate::packet::error::layer::Layer;
 use crate::packet::error::len_error::LenError;
