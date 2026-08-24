@@ -342,7 +342,7 @@ mod test {
         let iface = drained_iface(&mut r, t0, "iface_1");
 
         for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
-            r.add_neighbour(t0, iface, addr.into(), Duration::from_secs(10), None)
+            r.add_neighbour(t0, iface, addr.into(), None)
                 .expect("add_neighbour should succeed");
         }
 
@@ -375,14 +375,8 @@ mod test {
         let t0 = Instant::from_secs(0);
         let iface = drained_iface(&mut r, t0, "iface_1");
 
-        r.add_neighbour(
-            t0,
-            iface,
-            NEIGHBOUR_1_ADDR.into(),
-            Duration::from_secs(10),
-            None,
-        )
-        .expect("add_neighbour should succeed");
+        r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into(), None)
+            .expect("add_neighbour should succeed");
 
         // Neighbour 1 multicasts two IHUs: one for us, one for neighbour 2.
         let mut body = ihu_tlv(11, 100, NODE_ADDR);

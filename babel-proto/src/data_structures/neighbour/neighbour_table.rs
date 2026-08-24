@@ -1,14 +1,14 @@
 use crate::data_structures::interface::InterfaceHandle;
 use crate::data_structures::neighbour::NeighbourTableError;
 use crate::data_structures::neighbour::neighbour_entry::{
-    DEFAULT_NEIGHBOUR_EXPIRY_SECS, Neighbour, NeighbourIndex, NeighbourInitState,
+    DEFAULT_HOLD_TIME_MULTIPLIER, Neighbour, NeighbourIndex,
 };
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
 use crate::utils::timer::Timer;
 use crate::utils::{
-    Duration, HoldTimeMultiplier, Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt as _,
+    Duration, DurationMultiplier, Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt as _,
 };
 
 pub struct NeighbourTable<'storage, A>
@@ -17,7 +17,7 @@ where
 {
     pub(crate) inner: ManagedSlice<'storage, Option<Neighbour<A>>>,
     /// The hold time of a neighbour between receiving IHU TLVs.
-    pub(crate) hold_time: HoldTimeMultiplier,
+    pub(crate) hold_time: DurationMultiplier,
 }
 
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -45,7 +45,7 @@ where
     {
         Self {
             inner: table.into(),
-            hold_time: HoldTimeMultiplier::IHU_HOLD_TIME_SPEC_DEFAULT,
+            hold_time: DEFAULT_HOLD_TIME_MULTIPLIER,
         }
     }
 
@@ -53,7 +53,7 @@ where
     pub fn new() -> Self {
         Self {
             inner: ManagedSlice::Owned(Default::default()),
-            hold_time: HoldTimeMultiplier::IHU_HOLD_TIME_SPEC_DEFAULT,
+            hold_time: DEFAULT_HOLD_TIME_MULTIPLIER,
         }
     }
 
@@ -64,12 +64,7 @@ where
     ) -> Result<&mut Neighbour<A>, NeighbourTableError<A>> {
         // If the neighbour doesnt exist, create it.
         if self.inner.get_mut_by_key(index).is_none() {
-            self.add_neighbour(
-                now,
-                index,
-                Duration::from_secs(DEFAULT_NEIGHBOUR_EXPIRY_SECS),
-                None,
-            )?;
+            self.add_neighbour(now, index, None)?;
         }
 
         // Now return a mutable reference
@@ -85,21 +80,13 @@ where
         &mut self,
         now: Instant,
         index: &NeighbourIndex<A>,
-        expiry: Duration,
         ucast_hello_interval: Option<Duration>,
     ) -> Result<(), NeighbourTableError<A>> {
         let timer_opt = ucast_hello_interval
             .map(|int| Timer::new(now, int))
             .transpose()?;
 
-        let expiry = Timer::new(now, expiry)?;
-
-        let neighbour = Neighbour::new(
-            index.0,
-            index.1,
-            timer_opt,
-            NeighbourInitState::Expiry(expiry),
-        );
+        let neighbour = Neighbour::new(now, index.0, index.1, timer_opt);
         let index = neighbour.key();
 
         b_debug!("Registering neighbour: {:?}", index);

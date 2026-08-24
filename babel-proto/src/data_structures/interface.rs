@@ -14,6 +14,8 @@ use crate::utils::{Duration, Instant, ManagedSlice};
 
 /// Recommended message intervals indicated in [Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.2)
 pub const DEFAULT_MULTICAST_HELLO_INTERVAL_SECS: u64 = 4;
+pub const DEFAULT_MULTICAST_HELLO_INTERVAL: Duration =
+    Duration::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS);
 /// Recommended message intervals indicated in [Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.10)
 pub const DEFAULT_UPDATE_INTERVAL_SECS: u64 = DEFAULT_MULTICAST_HELLO_INTERVAL_SECS * 4;
 

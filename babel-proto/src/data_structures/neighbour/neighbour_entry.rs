@@ -1,15 +1,34 @@
-use crate::data_structures::interface::{DEFAULT_MULTICAST_HELLO_INTERVAL_SECS, InterfaceHandle};
+use thiserror::Error;
+
+use crate::data_structures::interface::{DEFAULT_MULTICAST_HELLO_INTERVAL, InterfaceHandle};
 use crate::data_structures::neighbour::NeighbourTableError;
+use crate::data_structures::neighbour::neighbour_entry::RxHelloInfoErr::BigSeqnoDiff;
 use crate::data_structures::seqno::SeqNo;
-use crate::data_types::{Address, Interval};
+use crate::data_types::Address;
 use crate::extension::address::AddressExt;
+use crate::extension::metric_calc::IhuRatio;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
 use crate::utils::bit_history::BitHistory;
-use crate::utils::rx_cost::RxCost as TxCost;
-use crate::utils::timer::Timer;
-use crate::utils::{Duration, HoldTimeMultiplier, Instant, InternallyKeyed};
+use crate::utils::distance::TxCost;
+use crate::utils::timer::{Timer, TimerError};
+use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed};
 
-pub const DEFAULT_NEIGHBOUR_EXPIRY_SECS: u64 = 10;
+/// [Appendix B](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.8) the
+/// **advertised** IHU interval is always 3 times the Multicast Hello interval. IHUs are actually
+/// sent with each Hello on lossy links (as determined from the Hello history), but only with every
+/// third Multicast Hello on lossless links.
+pub const DEFAULT_IHU_RATIO: IhuRatio = IhuRatio::new(3, 1);
+
+/// [Appendix B](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.12) 3.5 times
+/// the advertised IHU interval.
+pub const DEFAULT_HOLD_TIME_MULTIPLIER: DurationMultiplier = DurationMultiplier { num: 7, den: 2 };
+
+/// [Appendix A.1](https://datatracker.ietf.org/doc/html/rfc8966#section-a.1-4)
+/// If the Interval field of the received Hello is not zero, it resets the neighbour's hello timer
+/// to 1.5 times the advertised Interval (the extra margin allows for delay due to jitter).
+pub const HELLO_INTERVAL_MULTIPLIER: DurationMultiplier = DurationMultiplier { num: 3, den: 2 };
+
+const DEFAULT_IHU_RATIO_INNER: DurationMultiplier = DurationMultiplier { num: 3, den: 1 };
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -38,8 +57,25 @@ pub struct Neighbour<A: AddressExt> {
     /// the address of the neighbouring interface
     pub(crate) address: Address<A>,
 
-    /// State data of a neighbour that has either been added manually or has recevied a hello.
-    pub(crate) state: NeighbourInitState,
+    /// a history of recently received Multicast Hello packets from this neighbour; this
+    /// can, for example, be a sequence of n bits, for some small value n, indicating which of the
+    /// n hellos most recently sent by this neighbour have been received by the local node.
+    /// the expected incoming Multicast Hello sequence number for this neighbour, an
+    /// integer modulo 2^16
+    ///
+    /// the multicast hellotimer, which is set to the interval value carried by scheduled Multicast
+    /// Hello TLVs sent by this neighbour
+    ///
+    /// None if this router has never received a multicast hello from theis neighbour.
+    pub(crate) mcast_hello_info: RxHelloInfo,
+
+    /// a history of recently received Unicast Hello packets from this neighbour
+    ///
+    /// the expected incoming Unicast Hello sequence number for this neighbour, an
+    /// integer modulo 2^16
+    ///
+    /// None if this router has never received a unicast hello from this neighbour
+    pub(crate) ucast_hello_info: Option<RxHelloInfo>,
 
     /// the 'transmission cost' value from the last IHU packet received from this
     /// neighbour, or FFFF hexadecimal (infinity) if the IHU hold timer for this neighbour has
@@ -52,45 +88,11 @@ pub struct Neighbour<A: AddressExt> {
     /// (see "IHU Hold time" in Appendix B for suggested values).
     ///
     /// None if this router has never received an IHU from this neighbour.
-    pub(crate) ihu_timer: Option<Timer>,
+    pub(crate) ihu_timer: Timer,
 
     // Scheduling state, required to drive Sans-IO state machine.
     /// Pending TLV's that need to go out during `poll_transmit`
     pub(crate) pending: NeighbourPending,
-}
-
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub(crate) enum NeighbourInitState {
-    /// If the neighbour was added through an out of band method. Then this router has never
-    /// received a hello from it. So we set an expiry timer for it.
-    Expiry(Timer),
-    /// If the this router has recevied a hello for this neighbour, then the hello info is stored
-    /// here.
-    HelloReceived(HelloReceived),
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub(crate) struct HelloReceived {
-    /// a history of recently received Unicast Hello packets from this neighbour
-    ///
-    /// the expected incoming Unicast Hello sequence number for this neighbour, an
-    /// integer modulo 2^16
-    ///
-    /// None if this router has never received a unicast hello from this neighbour
-    ucast_hello: Option<RxHelloInfo>,
-    /// a history of recently received Multicast Hello packets from this neighbour; this
-    /// can, for example, be a sequence of n bits, for some small value n, indicating which of the
-    /// n hellos most recently sent by this neighbour have been received by the local node.
-    /// the expected incoming Multicast Hello sequence number for this neighbour, an
-    /// integer modulo 2^16
-    ///
-    /// the multicast hellotimer, which is set to the interval value carried by scheduled Multicast
-    /// Hello TLVs sent by this neighbour
-    ///
-    /// None if this router has never received a multicast hello from theis neighbour.
-    mcast_hello: Option<RxHelloInfo>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,53 +104,82 @@ pub(crate) struct RxHelloInfo {
 }
 
 impl RxHelloInfo {
-    /// Folds a received Hello into one of a neighbour's two Hello histories and returns the
-    /// interval that periodic IHUs to that neighbour should be based on.
-    ///
-    /// A neighbour tracks unicast and multicast Hellos independently but updates them identically,
-    /// so `slot` is whichever of the pair the Hello's Unicast flag selects.
-    fn record(slot: &mut Option<Self>, now: Instant, seqno: SeqNo, interval: Interval) -> Duration {
-        let (history, expected_seqno) = match slot {
-            // If the router has received a hello from this neighbour in the past. Calculate
-            // any missed hellos that may have occured.
-            Some(info) => {
-                if seqno < info.expected_seqno {
-                    // This hello is older than the one being waited for, so it was duplicated or
-                    // reordered on the link rather than arriving after a gap. The seqno
-                    // subtraction below wraps, so treating it as a gap would charge the neighbour
-                    // a full window of misses, and recording a success would count a hello that
-                    // has already been accounted for. Leave the history alone and keep waiting for
-                    // the seqno that is actually outstanding.
-                    (info.history, info.expected_seqno)
-                } else {
-                    // Record any gaps in history.
-                    let hello_gap = seqno - info.expected_seqno;
-                    info.history.record_many(false, hello_gap.0.into());
-                    // Record this hello
-                    info.history.record(true);
-                    (info.history, seqno + 1)
-                }
-            }
-            None => (BitHistory::new(), seqno + 1),
-        };
+    pub(crate) const MISSED_HELLO_MAX: u16 = 16;
 
-        let timer_dur = match slot {
-            // If the hello is scheduled, use the new interval.
-            Some(_) if !interval.is_zero() => interval.into(),
-            // If not, use the old interval or a default value.
-            Some(info) => info.timer.duration(),
-            None => Duration::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS),
-        };
-
-        *slot = Some(Self {
-            history,
-            expected_seqno,
-            timer: Timer::new(now, timer_dur).expect("Interval bounds were pre-checked"),
-        });
-
-        // Multiply the incoming duration by two and clamp to max timer duration
-        (timer_dur * 2).min(Duration::from_centis(u16::MAX.into()))
+    /// When a neighbour is new, we have never received a hello from it, so its bit history is all
+    /// zeros, its expected seqno is zero, and its multicast hello timer is set to the default
+    /// value.
+    pub(crate) fn new_default(now: Instant) -> Self {
+        Self {
+            history: BitHistory::default(),
+            expected_seqno: SeqNo::default(),
+            timer: Timer::new_unchecked(
+                now,
+                DEFAULT_MULTICAST_HELLO_INTERVAL * HELLO_INTERVAL_MULTIPLIER,
+            ),
+        }
     }
+
+    pub(crate) fn new_from_hello(
+        now: Instant,
+        received_seqno: SeqNo,
+        hello_interval: Duration,
+    ) -> Result<Self, TimerError> {
+        let mut out = Self {
+            history: BitHistory::default(),
+            expected_seqno: received_seqno,
+            timer: Timer::new(now, hello_interval)?,
+        };
+        // Since this is originated from a hello, the history needs at least one recorded hello.
+        out.history.record(true);
+        Ok(out)
+    }
+    /// Records a missed hello (if applicable) and returns the time remaining till the next tick.
+    fn poll_tick(&mut self, now: Instant) -> Duration {
+        if let Some(remaining) = self.timer.time_remaining(now) {
+            return remaining;
+        } else {
+            self.history.record(false);
+            self.timer.restart(now);
+            self.timer.duration()
+        }
+    }
+
+    fn record_hello(
+        &mut self,
+        now: Instant,
+        received_seqno: SeqNo,
+        new_interval: Option<Duration>,
+    ) -> Result<(), RxHelloInfoErr> {
+        let abs_diff = self.expected_seqno.abs_diff(received_seqno);
+        if abs_diff > Self::MISSED_HELLO_MAX {
+            // In this instance the entire neighbour entry needs to be flushed and re-made.
+            return Err(RxHelloInfoErr::BigSeqnoDiff(abs_diff));
+        }
+        if self.expected_seqno < received_seqno {
+            self.history.record_many(false, abs_diff.into());
+        } else if self.expected_seqno > received_seqno {
+            self.history.undo(abs_diff.into());
+        }
+        self.history.record(true);
+
+        if let Some(new_interval) = new_interval {
+            self.timer
+                .set_tick_duration(new_interval * HELLO_INTERVAL_MULTIPLIER)?;
+        }
+
+        self.timer.restart(now);
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+enum RxHelloInfoErr {
+    #[error("There was a seqno diff greater than {max}: {0}", max = RxHelloInfo::MISSED_HELLO_MAX)]
+    BigSeqnoDiff(u16),
+    #[error(transparent)]
+    Timer(#[from] TimerError),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -168,10 +199,10 @@ pub struct NeighbourPending {
     /// But the spec is also written for only IP based transports where multicast can be assumed to
     /// work well.
     pub(crate) ucast_hello: Option<TxHelloInfo>,
-    /// Timer for sending periodic IHU's to this neighbour.
-    ///
-    /// None if router has never received a hello from this neighbour.
-    pub(crate) ihu_timer: Option<Timer>,
+    /// Flag for sending ihus to this neighbour. This is most useful when a neighbour is new and
+    /// needs an immediate IHU. Periodic IHU polling will ignore this field and send IHU's to all
+    /// neighbours based on the interface's IHU interval.
+    pub(crate) ihu_due: bool,
 }
 
 impl<A: AddressExt> InternallyKeyed for Neighbour<A> {
@@ -183,24 +214,77 @@ impl<A: AddressExt> InternallyKeyed for Neighbour<A> {
 
 impl<A: AddressExt> Neighbour<A> {
     pub(crate) fn new(
+        now: Instant,
         interface: InterfaceHandle,
         address: Address<A>,
         ucast_hello: Option<Timer>,
-        init_state: NeighbourInitState,
     ) -> Self {
         Self {
             iface: interface,
             address,
-            state: init_state,
-            tx_cost: TxCost(u16::MAX),
-            ihu_timer: None,
+            // When a neighbour is new, this router has never received a hello from it. This
+            // populates the RxHelloInfo with sensible defaults.
+            mcast_hello_info: RxHelloInfo::new_default(now),
+            ucast_hello_info: None,
+            // When a neighbour is new, this router has never received an IHU packet from it, so TX
+            // cost is set to infinity
+            tx_cost: TxCost::INFINITY,
+            // When a neighbour is new, this router has never received an IHU from it, so it's IHU
+            // timer is set to the spec default.
+            ihu_timer: Timer::new_unchecked(
+                now,
+                DEFAULT_MULTICAST_HELLO_INTERVAL
+                    * DEFAULT_IHU_RATIO_INNER
+                    * DEFAULT_HOLD_TIME_MULTIPLIER,
+            ),
             pending: NeighbourPending {
                 ucast_hello: ucast_hello.map(|t| TxHelloInfo {
                     seqno: SeqNo(0),
                     timer: t,
                 }),
-                ihu_timer: None,
+                // When a neighbour is new, send an immediate IHU to speed up convergence.
+                ihu_due: true,
             },
+        }
+    }
+
+    fn hello_seqno_flush(&mut self, now: Instant, hello: HelloSlice<'_>) {
+        let flags = hello.flags();
+        let seqno = hello.seqno();
+        let interval = hello.interval();
+
+        // Reset everything to default, keeping original settings for outgoing timers.
+        self.mcast_hello_info = RxHelloInfo::new_default(now);
+        self.ucast_hello_info = self.ucast_hello_info.map(|_| RxHelloInfo::new_default(now));
+        self.tx_cost = TxCost::INFINITY;
+        self.ihu_timer = Timer::new_unchecked(
+            now,
+            DEFAULT_MULTICAST_HELLO_INTERVAL
+                * DEFAULT_IHU_RATIO_INNER
+                * DEFAULT_HOLD_TIME_MULTIPLIER,
+        );
+        self.pending.ucast_hello = self.pending.ucast_hello.map(|mut utx| {
+            utx.timer.restart(now);
+            TxHelloInfo {
+                seqno: SeqNo(0),
+                timer: utx.timer,
+            }
+        });
+        self.pending.ihu_due = true;
+
+        // Now process the incoming hello
+        let timer_dur = if interval.is_zero() {
+            DEFAULT_MULTICAST_HELLO_INTERVAL * HELLO_INTERVAL_MULTIPLIER
+        } else {
+            interval.into()
+        };
+        let new_rx_info = RxHelloInfo::new_from_hello(now, seqno, timer_dur)
+            .expect("Timer interval was verified non-zero above");
+
+        if flags.is_unicast() {
+            self.ucast_hello_info = Some(new_rx_info)
+        } else {
+            self.mcast_hello_info = new_rx_info
         }
     }
 
@@ -209,56 +293,51 @@ impl<A: AddressExt> Neighbour<A> {
         let seqno = hello.seqno();
         let interval = hello.interval();
 
-        let mut hello_info = match self.state {
-            // If a hello has been received in the past, grab it.
-            NeighbourInitState::HelloReceived(hello_info) => hello_info,
-            // Otherwise create a new one.
-            _ => HelloReceived::default(),
-        };
-
-        // The Unicast flag decides which of the neighbour's two histories this hello belongs to.
-        let slot = if flags.is_unicast() {
-            &mut hello_info.ucast_hello
+        let interval = if interval.is_zero() {
+            None
         } else {
-            &mut hello_info.mcast_hello
+            Some(interval.into())
         };
 
-        // Duration to be used in periodic IHU's if no better duration is given.
-        let ihu_dur = RxHelloInfo::record(slot, now, seqno, interval);
+        let mut rx_hello_info = if flags.is_unicast() {
+            self.ucast_hello_info
+                .unwrap_or_else(|| RxHelloInfo::new_default(now))
+        } else {
+            self.mcast_hello_info
+        };
 
-        // Update the state
-        self.state = NeighbourInitState::HelloReceived(hello_info);
-
-        let new_ihu_timer = match self.pending.ihu_timer {
-            Some(mut timer) => {
-                // If there was already an IHU timer, set it under the spec rules (increase creates
-                // an eager timer, decrease does not.)
-                timer
-                    .set_duration(ihu_dur)
-                    .expect("Interval bounds were pre-checked");
-                Some(timer)
+        match rx_hello_info.record_hello(now, seqno, interval) {
+            Ok(_) if flags.is_unicast() => self.ucast_hello_info = Some(rx_hello_info),
+            Ok(_) => self.mcast_hello_info = rx_hello_info,
+            Err(BigSeqnoDiff(seq)) => {
+                b_debug!(
+                    "Neighbour flush - iface {}, addr: {} - seqno diff: {}",
+                    self.iface,
+                    self.address,
+                    seq
+                );
+                self.hello_seqno_flush(now, hello);
             }
-            // If no IHU timer was set, set an eager timer.
-            None => Some(Timer::new_eager(now, ihu_dur).expect("Interval bounds were pre-checked")),
-        };
-        self.pending.ihu_timer = new_ihu_timer;
+            Err(RxHelloInfoErr::Timer(t)) => {
+                b_debug!("Err - {} - interval: {:?}", t, interval);
+            }
+        }
     }
 
     pub(crate) fn handle_ihu(
         &mut self,
         now: Instant,
         ihu: IhuSlice<'_>,
-        hold_time: HoldTimeMultiplier,
+        hold_time: DurationMultiplier,
     ) -> Result<(), NeighbourTableError<A>> {
         let rx_cost = ihu.rx_cost();
         let interval = ihu.interval();
 
         let timer_dur: Duration = interval.into();
 
-        self.ihu_timer = Some(Timer::new(now, timer_dur * hold_time)?);
+        self.ihu_timer = Timer::new(now, timer_dur * hold_time)?;
 
-        // TODO: Need some tx cost calculation here.
-        self.tx_cost = rx_cost;
+        self.tx_cost = rx_cost.into();
 
         Ok(())
     }
@@ -299,25 +378,11 @@ mod test {
 
     fn neighbour(now: Instant) -> Neighbour<NoExtension> {
         Neighbour::new(
+            now,
             InterfaceHandle::try_from("iface_1").expect("bad interface handle"),
             core::net::Ipv6Addr::LOCALHOST.into(),
             None,
-            NeighbourInitState::Expiry(
-                Timer::new(now, Duration::from_secs(DEFAULT_NEIGHBOUR_EXPIRY_SECS))
-                    .expect("valid timer"),
-            ),
         )
-    }
-
-    fn mcast_history(n: &Neighbour<NoExtension>) -> BitHistory {
-        match n.state {
-            NeighbourInitState::HelloReceived(info) => {
-                info.mcast_hello
-                    .expect("a multicast hello should have been recorded")
-                    .history
-            }
-            NeighbourInitState::Expiry(_) => panic!("expected the neighbour to have heard a hello"),
-        }
     }
 
     //  ___ _  _ _____ ___ _____   ___   _      ___  ___  _   _ _  _ ___  ___

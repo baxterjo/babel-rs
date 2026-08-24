@@ -143,7 +143,6 @@ where
         now: Instant,
         interface: InterfaceHandle,
         address: Address<A>,
-        expiry: Duration,
         ucast_hello_interval: Option<Duration>,
     ) -> Result<(), BabelError<A>> {
         // If the interface doesn't exist then the neighbour can't be created.
@@ -154,7 +153,6 @@ where
         Ok(self.neighbor_table.add_neighbour(
             now,
             &NeighbourIndex(interface, address),
-            expiry,
             ucast_hello_interval,
         )?)
     }

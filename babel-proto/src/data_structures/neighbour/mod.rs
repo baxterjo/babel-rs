@@ -6,11 +6,19 @@ pub(crate) mod neighbour_table;
 pub use neighbour_entry::{Neighbour, NeighbourIndex};
 pub use neighbour_table::NeighbourTable;
 
+use crate::data_structures::neighbour::neighbour_entry::RxHelloInfo;
 use crate::data_types::address::AddressError;
 use crate::data_types::address_encoding::AddressEncodingError;
 use crate::extension::address::AddressExt;
 use crate::packet::error::tlv_err::TlvError;
+use crate::utils::Duration;
 use crate::utils::timer::TimerError;
+
+pub struct NeighbourOpts {
+    outgoing_ihu_interval: Duration,
+    /// Give a duration if the Babel router should send periodic unicast hellos to this neighbour.
+    ucast_hello_interval: Option<Duration>,
+}
 
 #[derive(Debug, Error)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
