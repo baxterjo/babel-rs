@@ -1,6 +1,7 @@
 use core::iter::Iterator;
 
 use crate::packet::error::tlv_err::TlvError;
+use crate::packet::tlv::Tlv;
 use crate::packet::tlv::tlv_slice::TlvSlice;
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -20,7 +21,7 @@ impl<'a> TlvReader<'a> {
 }
 
 impl<'a> Iterator for TlvReader<'a> {
-    type Item = Result<TlvSlice<'a>, TlvError>;
+    type Item = Tlv<'a>;
     fn next(&mut self) -> Option<Self::Item> {
         // Normal exit when entire packet has been read.
         if self.pos == self.slice.len() {
@@ -28,39 +29,49 @@ impl<'a> Iterator for TlvReader<'a> {
         }
 
         // Get next slice.
-        let tlv_result = match TlvSlice::from_slice(&self.slice[self.pos..self.slice.len()]) {
-            Ok(tlv) => {
-                // When the slice parses as expected, position is advanced by the length of the
-                // slice.
-                self.pos += tlv.slice().len();
-                Ok(tlv)
-            }
-            Err(TlvError::Pad1) => {
-                // When the slice is Pad1, the TLV header cannot fully parse, so an error is
-                // returned but this is a normal condition. Advance the position by 1.
-                self.pos += 1;
-                Err(TlvError::Pad1)
-            }
-            Err(TlvError::Len(len_error)) => {
-                // When a length error occurs, we have lost our place in the packet and must
-                // discard the whole thing.
-                b_debug!(
-                    "Length error when iterating through TLV, discarding packet - Err: {}",
-                    len_error
-                );
-                return None;
-            }
-            Err(other) => Err(other),
-        };
-
-        Some(tlv_result)
+        loop {
+            match TlvSlice::from_slice(&self.slice[self.pos..self.slice.len()]) {
+                Ok(tlv) => {
+                    // When the slice parses as expected, position is advanced by the length of the
+                    // slice.
+                    self.pos += tlv.slice().len();
+                    match Tlv::try_from(tlv) {
+                        Ok(t) => {
+                            // Happy path
+                            return Some(t);
+                        }
+                        Err(TlvError::UnrecognizedTlvType(t)) => {
+                            // Unrecognized TLVs are ignored
+                            b_debug!("Tlv Iter Err: {}", TlvError::UnrecognizedTlvType(t));
+                            continue;
+                        }
+                        Err(other) => {
+                            // Some other error occurred
+                            b_debug!("Tlv Iter Err: {}", other);
+                            return None;
+                        }
+                    }
+                }
+                Err(TlvError::Pad1) => {
+                    // When the slice is Pad1, the TLV header cannot fully parse, so an error is
+                    // returned but this is a normal condition. Advance the position by 1.
+                    self.pos += 1;
+                    return Some(Tlv::Pad1);
+                }
+                Err(other) => {
+                    // Some other error occurred
+                    b_debug!("Tlv Iter Err: {}", other);
+                    return None;
+                }
+            };
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
     use crate::packet::tlv::reader::TlvReader;
-    use crate::packet::tlv::{AckReqSlice, AckSlice, HelloSlice, IhuSlice, TypedTlv};
+    use crate::packet::tlv::{AckReqSlice, AckSlice, HelloSlice, IhuSlice, Tlv, TypedTlv};
 
     #[test]
     fn test_normal_packet_body() {
@@ -98,38 +109,27 @@ mod test {
         ];
 
         let reader = TlvReader::new(body);
-        for tlv_result in reader {
-            let tlv = match tlv_result {
-                Ok(tlv) => tlv,
-                Err(err) => {
-                    b_trace!("TLV reader yeilded error: {}", err);
-                    continue;
-                }
-            };
+        for tlv in reader {
             // Match and check the sub_tlvs. These are the only things that need to be checked here
             // as they are the bounds of the TLV.
-            match tlv.r#type() {
-                AckReqSlice::TYPE_ID => {
-                    let slice = AckReqSlice::from_untyped(tlv).expect("Ack req should have parsed");
+            match tlv {
+                Tlv::AckReq(slice) => {
                     assert_eq!(slice.sub_tlvs(), &[1, 2, 3, 4, 5, 6, 7, 8]);
                 }
-                AckSlice::TYPE_ID => {
-                    let slice = AckSlice::from_untyped(tlv).expect("Ack should have parsed.");
+                Tlv::Ack(slice) => {
                     assert_eq!(slice.sub_tlvs(), &[1, 2, 3, 4, 5, 6, 7]);
                 }
-                HelloSlice::TYPE_ID => {
-                    let slice = HelloSlice::from_untyped(tlv).expect("Hello should have parsed.");
+                Tlv::Hello(slice) => {
                     assert_eq!(slice.sub_tlvs(), &[1, 2, 3, 4, 5, 6]);
                 }
-                IhuSlice::TYPE_ID => {
-                    let slice = IhuSlice::from_untyped(tlv).expect("IHU slice should have parsed");
+                Tlv::Ihu(slice) => {
                     assert_eq!(
                         slice.sub_tlvs(4).expect("IHU sub TLVs should parse"),
                         &[1, 2, 3, 4, 5]
                     )
                 }
                 other => {
-                    panic!("Unexpected TLV type ID parsed: {}, {:?}", other, reader);
+                    panic!("Unexpected TLV type ID parsed: {:?}, {:?}", other, reader);
                 }
             }
         }

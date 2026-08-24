@@ -25,6 +25,7 @@ pub mod seqno_request_slice;
 pub mod update_slice;
 
 use core::any::type_name;
+use core::fmt::Debug;
 
 #[doc(inline)]
 pub use ack_req_slice::AckReqSlice;
@@ -54,8 +55,10 @@ use crate::packet::len_source::LenSource;
 use crate::packet::tlv::tlv_slice::TlvSlice;
 
 /// All TLV types listed in RFC 8966
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Tlv<'a> {
-    Pad0,
+    Pad1,
     PadN(PadNSlice<'a>),
     AckReq(AckReqSlice<'a>),
     Ack(AckSlice<'a>),
@@ -66,6 +69,57 @@ pub enum Tlv<'a> {
     Update(UpdateSlice<'a>),
     RouteRequest(RouteRequestSlice<'a>),
     SeqnoRequest(SeqnoRequestSlice<'a>),
+}
+
+impl<'a> TryFrom<TlvSlice<'a>> for Tlv<'a> {
+    type Error = TlvError;
+    fn try_from(value: TlvSlice<'a>) -> Result<Self, Self::Error> {
+        match value.r#type() {
+            PadNSlice::TYPE_ID => PadNSlice::from_untyped(value).map(Self::PadN),
+            AckReqSlice::TYPE_ID => AckReqSlice::from_untyped(value).map(Self::AckReq),
+            AckSlice::TYPE_ID => AckSlice::from_untyped(value).map(Self::Ack),
+            HelloSlice::TYPE_ID => HelloSlice::from_untyped(value).map(Self::Hello),
+            IhuSlice::TYPE_ID => IhuSlice::from_untyped(value).map(Self::Ihu),
+            RouterIdSlice::TYPE_ID => RouterIdSlice::from_untyped(value).map(Self::RouterId),
+            NextHopSlice::TYPE_ID => NextHopSlice::from_untyped(value).map(Self::NextHop),
+            UpdateSlice::TYPE_ID => UpdateSlice::from_untyped(value).map(Self::Update),
+            RouteRequestSlice::TYPE_ID => {
+                RouteRequestSlice::from_untyped(value).map(Self::RouteRequest)
+            }
+            SeqnoRequestSlice::TYPE_ID => {
+                SeqnoRequestSlice::from_untyped(value).map(Self::SeqnoRequest)
+            }
+            other => Err(TlvError::UnrecognizedTlvType(other)),
+        }
+    }
+}
+
+impl<'a> Tlv<'a> {
+    pub fn from_slice(slice: &'a [u8]) -> Result<Self, TlvError> {
+        match TlvSlice::from_slice(slice) {
+            Ok(tlv) => Self::try_from(tlv),
+            // The header length of Pad1 is only 1. So TlvSlice returns an error but this is a
+            // normal condition.
+            Err(TlvError::Pad1) => Ok(Self::Pad1),
+            Err(other) => Err(other),
+        }
+    }
+
+    pub fn slice_len(&self) -> usize {
+        match self {
+            Self::Pad1 => 1,
+            Self::PadN(s) => s.slice().len(),
+            Self::AckReq(s) => s.slice().len(),
+            Self::Ack(s) => s.slice().len(),
+            Self::Hello(s) => s.slice().len(),
+            Self::Ihu(s) => s.slice().len(),
+            Self::RouterId(s) => s.slice().len(),
+            Self::NextHop(s) => s.slice().len(),
+            Self::Update(s) => s.slice().len(),
+            Self::RouteRequest(s) => s.slice().len(),
+            Self::SeqnoRequest(s) => s.slice().len(),
+        }
+    }
 }
 
 /// Trait that defines a TLV with a known `Type` value and structure.
