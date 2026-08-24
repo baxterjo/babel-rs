@@ -82,23 +82,29 @@ impl defmt::Format for PacketSliceTlvDebug<'_> {
 struct TlvListDebug<'a>(&'a [u8]);
 
 impl TlvListDebug<'_> {
-    /// Bytes the reader refused to parse.
+    /// Bytes the reader gave up on, given an exhausted `reader` over this region.
     ///
-    /// [`TlvReader`] stops at the first malformed TLV, so a short list would otherwise be
-    /// indistinguishable from a packet that really did end there. That difference is the whole
-    /// point of a debugging aid, so it gets reported rather than swallowed.
-    fn unparsed(&self) -> usize {
-        let consumed: usize = TlvReader::new(self.0).map(|tlv| tlv.slice_len()).sum();
-        self.0.len() - consumed
+    /// [`TlvReader`] stops at the first TLV whose framing it cannot follow, so a short list would
+    /// otherwise be indistinguishable from a packet that really did end there. That difference is
+    /// the whole point of a debugging aid, so it gets reported rather than swallowed.
+    ///
+    /// This comes from how far the reader got rather than from the lengths of the TLVs it yielded,
+    /// because it consumes malformed and unrecognized TLVs without yielding them. Summing the
+    /// yielded lengths would report a region that parsed end to end as having unparsed bytes.
+    fn unparsed(&self, reader: &TlvReader<'_>) -> usize {
+        self.0.len() - reader.consumed()
     }
 }
 
 impl Debug for TlvListDebug<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut list = f.debug_list();
-        list.entries(TlvReader::new(self.0));
+        let mut reader = TlvReader::new(self.0);
+        // `by_ref` rather than passing the reader directly: it is `Copy`, so handing it over by
+        // value would advance a copy and leave `reader` sitting at zero.
+        list.entries(reader.by_ref());
 
-        let unparsed = self.unparsed();
+        let unparsed = self.unparsed(&reader);
         if unparsed > 0 {
             list.entry(&format_args!("<{unparsed} unparsed bytes>"));
         }
@@ -111,14 +117,15 @@ impl Debug for TlvListDebug<'_> {
 impl defmt::Format for TlvListDebug<'_> {
     fn format(&self, f: defmt::Formatter) {
         defmt::write!(f, "[");
-        for (idx, tlv) in TlvReader::new(self.0).enumerate() {
+        let mut reader = TlvReader::new(self.0);
+        for (idx, tlv) in reader.by_ref().enumerate() {
             if idx > 0 {
                 defmt::write!(f, ", ");
             }
             defmt::write!(f, "{}", tlv);
         }
 
-        let unparsed = self.unparsed();
+        let unparsed = self.unparsed(&reader);
         if unparsed > 0 {
             defmt::write!(f, ", <{} unparsed bytes>", unparsed);
         }
@@ -341,6 +348,53 @@ mod test {
         assert!(
             expanded.contains("<4 unparsed bytes>"),
             "the truncated ihu should be reported, got: {expanded}"
+        );
+    }
+
+    /// TLVs the reader skips are still parsed, so they must not be counted as unparsed. Their bytes
+    /// are also in the middle of the region rather than trailing it, which is not something the
+    /// count can describe.
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    #[test]
+    fn debug_tlvs_does_not_report_skipped_tlvs_as_unparsed() {
+        let packet: &[u8] = &[
+            42, // Magic
+            2,  // Version
+            0, 27, // Body Length
+            // Hello
+            4,  // Hello Type ID
+            6,  // Length
+            0x80, 0x00, // Flags
+            0, 15, // Seqno
+            0, 200, // Interval
+            // Unrecognized type, framed correctly
+            200, // Unassigned Type ID
+            4,   // Length
+            1, 2, 3, 4, // Body
+            // Hello with a Length below its MIN_LEN, also framed correctly
+            4, // Hello Type ID
+            3, // Length
+            0x80, 0x00, // Flags
+            0,    // Truncated Seqno
+            // IHU
+            5,  // IHU Type ID
+            6,  // Length
+            1,  // AE
+            0,  // Reserved
+            0x80, 0x00, // RX Cost
+            0, 200, // Interval
+        ];
+
+        let packet_slice = PacketSlice::from_slice(packet).expect("Packet should parse");
+
+        let expanded = alloc::format!("{:?}", packet_slice.debug_tlvs());
+        assert!(
+            expanded.contains("HelloSlice") && expanded.contains("IhuSlice"),
+            "the recognized tlvs should be listed, got: {expanded}"
+        );
+        assert!(
+            !expanded.contains("unparsed"),
+            "a body the reader read end to end has no unparsed bytes, got: {expanded}"
         );
     }
 

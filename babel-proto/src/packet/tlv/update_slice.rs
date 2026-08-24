@@ -180,6 +180,25 @@ impl<'a> UpdateSlice<'a> {
         }
     }
 
+    /// The size in octets of the Prefix field, (Plen/8 - Omitted) rounded upwards.
+    ///
+    /// [Section 4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update) only gives this
+    /// field a meaning when Omitted is no larger than the prefix it omits octets from, so an
+    /// Update claiming to omit more is invalid and MUST be ignored. Saturating at zero instead
+    /// would leave the prefix octets to be handed back as a sub-TLV region, so it is rejected
+    /// here.
+    fn prefix_len(&self) -> Result<usize, TlvError> {
+        let plen_octets = self.plen().div_ceil(8);
+        let omitted = self.ommitted();
+        if omitted > plen_octets {
+            return Err(TlvError::OmittedTooLong {
+                plen: self.plen(),
+                omitted,
+            });
+        }
+        Ok((plen_octets - omitted).into())
+    }
+
     /// The prefix being advertised. This field's size is (Plen/8 - Omitted) rounded upwards.
     ///
     /// The prefix being advertised by an Update TLV is computed as follows:
@@ -192,8 +211,7 @@ impl<'a> UpdateSlice<'a> {
     ///     MOD 8) bits of the last octet) are cleared;
     ///   * the remaining octets are set to 0.
     pub fn prefix(&self) -> Result<&'a [u8], TlvError> {
-        let prefix_len: usize = (self.plen().div_ceil(8).saturating_sub(self.ommitted())).into();
-        let idx_end = TlvHeader::LEN + Self::MIN_LEN + prefix_len;
+        let idx_end = TlvHeader::LEN + Self::MIN_LEN + self.prefix_len()?;
         // This **MUST** be checked as the source of idx_end is supplied through the tlv. So a
         // malicious packet could cause UB.
         Ok(self
@@ -210,8 +228,7 @@ impl<'a> UpdateSlice<'a> {
 
     /// This TLV is self-terminating and allows sub-TLVs.
     pub fn sub_tlvs(&self) -> Result<&'a [u8], TlvError> {
-        let prefix_len: usize = (self.plen().div_ceil(8).saturating_sub(self.ommitted())).into();
-        let idx_end = TlvHeader::LEN + Self::MIN_LEN + prefix_len;
+        let idx_end = TlvHeader::LEN + Self::MIN_LEN + self.prefix_len()?;
         // This **MUST** be checked as the source of idx_end is supplied through the tlv. So a
         // malicious packet could cause UB.
         Ok(self.slice.get(idx_end..).ok_or(LenError {
@@ -266,8 +283,8 @@ impl From<u8> for UpdateFlags {
 impl UpdateFlags {
     pub(crate) fn new(prefix: bool, router_id: bool) -> Self {
         let mut val = 0u8;
-        val = val | (prefix as u8) << 7;
-        val = val | (router_id as u8) << 6;
+        val |= (prefix as u8) << 7;
+        val |= (router_id as u8) << 6;
         Self(val)
     }
 
@@ -440,9 +457,9 @@ mod test {
 
     #[test]
     fn omitted_larger_than_prefix() {
-        // Omitted (5) claims more octets than Plen (24 bits -> 3 octets) accounts for. The prefix
-        // length saturates to zero rather than underflowing, so everything after the fixed fields
-        // is treated as sub-TLVs.
+        // Omitted (5) claims more octets than Plen (24 bits -> 3 octets) accounts for, which RFC
+        // 8966 makes invalid. Both accessors reject it rather than saturating the prefix length to
+        // zero and handing the prefix octets back as sub-TLVs.
         let packet: &[u8] = &[
             8,  // Update Type ID
             13, // Length
@@ -460,14 +477,48 @@ mod test {
         let update = UpdateSlice::from_untyped(tlv_slice).expect("Update should parse.");
 
         assert_eq!(
+            update.prefix().expect_err("Prefix should be rejected"),
+            TlvError::OmittedTooLong {
+                plen: 24,
+                omitted: 5
+            },
+            "Incorrect prefix error"
+        );
+        assert_eq!(
+            update.sub_tlvs().expect_err("Sub tlvs should be rejected"),
+            TlvError::OmittedTooLong {
+                plen: 24,
+                omitted: 5
+            },
+            "Incorrect sub tlv error"
+        );
+
+        // Omitting exactly as many octets as the prefix holds is still valid and yields an empty
+        // prefix, so the rejection starts one octet later.
+        let packet: &[u8] = &[
+            8,  // Update Type ID
+            10, // Length
+            1,  // AE
+            0,  // Flags
+            24, // Plen
+            3,  // Omitted
+            0, 200, // Interval
+            0, 42, // Seqno
+            0x01, 0x00, // Metric
+        ];
+
+        let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
+        let update = UpdateSlice::from_untyped(tlv_slice).expect("Update should parse.");
+
+        assert_eq!(
             update.prefix().expect("Should be able to get prefix"),
             &[],
             "Should have an empty prefix"
         );
         assert_eq!(
             update.sub_tlvs().expect("Should be able to get sub tlvs"),
-            &[192, 168, 0],
-            "Incorrect sub tlvs"
+            &[],
+            "Should have no sub tlvs"
         );
     }
 

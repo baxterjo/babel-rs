@@ -17,4 +17,6 @@ pub enum TlvError {
     },
     #[error("Unrecognized TLV type ID: {0}")]
     UnrecognizedTlvType(u8),
+    #[error("Omitted ({omitted}) is larger than the {plen} bit prefix it omits octets from")]
+    OmittedTooLong { plen: u8, omitted: u8 },
 }

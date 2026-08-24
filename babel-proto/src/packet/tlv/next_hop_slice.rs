@@ -73,7 +73,7 @@ impl<'a> NextHopSlice<'a> {
     pub fn ae(&self) -> u8 {
         // SAFETY:
         // Safe as the constructor has checked to ensure the length of the slice is at minimum
-        // TlvHeader::LEN (2) + Self::MIN_LEN (6).
+        // TlvHeader::LEN (2) + Self::MIN_LEN (2).
         unsafe { *self.slice.get_unchecked(TlvHeader::LEN) }
     }
 

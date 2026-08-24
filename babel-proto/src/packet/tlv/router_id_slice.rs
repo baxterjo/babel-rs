@@ -66,7 +66,7 @@ impl<'a> RouterIdSlice<'a> {
     /// zeroes or all ones.
     ///
     /// This accessor method does not check for correct router ID bounds.
-    pub(crate) fn router_id(&self) -> &'a [u8; 8] {
+    pub fn router_id(&self) -> &'a [u8; 8] {
         // SAFETY:
         // Safe as the constructor has checked to ensure the length of the slice is at minimum
         // TlvHeader::LEN (2) + Self::MIN_LEN (10), so the 8 byte range following the Reserved
@@ -80,7 +80,7 @@ impl<'a> RouterIdSlice<'a> {
     }
 
     /// This TLV is self-terminating and allows sub-TLVs.
-    pub(crate) fn sub_tlvs(&self) -> &'a [u8] {
+    pub fn sub_tlvs(&self) -> &'a [u8] {
         // PANIC SAFETY:
         // Safe as the constructor has checked to ensure the length of the slice is at minimum
         // TlvHeader::LEN (2) + Self::MIN_LEN (10). If they are the same length this will return an

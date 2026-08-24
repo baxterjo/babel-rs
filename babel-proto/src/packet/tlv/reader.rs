@@ -18,37 +18,43 @@ impl<'a> TlvReader<'a> {
     pub fn new(slice: &'a [u8]) -> Self {
         Self { slice, pos: 0 }
     }
+
+    /// How far into the slice the reader has read, in octets.
+    ///
+    /// Once the iterator is exhausted this is the number of octets it was able to make sense of,
+    /// which is not the same as the number it yielded: malformed and unrecognized TLVs are
+    /// consumed and skipped, so they count here but never appear as items.
+    pub fn consumed(&self) -> usize {
+        self.pos
+    }
 }
 
 impl<'a> Iterator for TlvReader<'a> {
     type Item = Tlv<'a>;
     fn next(&mut self) -> Option<Self::Item> {
-        // Normal exit when entire packet has been read.
-        if self.pos == self.slice.len() {
-            return None;
-        }
-
         // Get next slice.
+        //
+        // Any error that occurs during parsing
         loop {
+            // Normal exit when entire packet has been read.
+            if self.pos == self.slice.len() {
+                return None;
+            }
+
             match TlvSlice::from_slice(&self.slice[self.pos..self.slice.len()]) {
                 Ok(tlv) => {
                     // When the slice parses as expected, position is advanced by the length of the
-                    // slice.
+                    // slice. Any error after this point can be skipped.
                     self.pos += tlv.slice().len();
                     match Tlv::try_from(tlv) {
                         Ok(t) => {
                             // Happy path
                             return Some(t);
                         }
-                        Err(TlvError::UnrecognizedTlvType(t)) => {
-                            // Unrecognized TLVs are ignored
-                            b_debug!("Tlv Iter Err: {}", TlvError::UnrecognizedTlvType(t));
-                            continue;
-                        }
                         Err(other) => {
                             // Some other error occurred
                             b_debug!("Tlv Iter Err: {}", other);
-                            return None;
+                            continue;
                         }
                     }
                 }
@@ -59,7 +65,8 @@ impl<'a> Iterator for TlvReader<'a> {
                     return Some(Tlv::Pad1);
                 }
                 Err(other) => {
-                    // Some other error occurred
+                    // Some other error occurred while parsing the header of the TLV slice. This
+                    // cannot be recovered from.
                     b_debug!("Tlv Iter Err: {}", other);
                     return None;
                 }
@@ -70,8 +77,8 @@ impl<'a> Iterator for TlvReader<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::packet::tlv::reader::TlvReader;
     use crate::packet::tlv::Tlv;
+    use crate::packet::tlv::reader::TlvReader;
 
     #[test]
     fn test_normal_packet_body() {
@@ -136,5 +143,70 @@ mod test {
                 }
             }
         }
+    }
+
+    #[test]
+    fn malformed_tlv_does_not_suppress_the_ones_behind_it() {
+        // The first Hello is framed correctly but declares a Length (3) below HelloSlice::MIN_LEN
+        // (6), so only the typed parse fails. The reader has not lost its place, so the valid TLVs
+        // behind it must still be yielded — otherwise any sender on the link could suppress them
+        // with a single malformed TLV.
+        let body: &[u8] = &[
+            // Hello with a Length below its MIN_LEN
+            4, // Hello Type ID
+            3, // Length
+            0x80, 0x00, // Flags
+            0,    // Truncated Seqno
+            // Hello
+            4,  // Hello Type ID
+            6,  // Length
+            0x80, 0x00, // Flags
+            0, 15, // Seqno
+            0, 200, // Interval
+            // Unrecognized type, which is skipped the same way
+            200, // Unassigned Type ID
+            2,   // Length
+            0, 0, // Body
+            // IHU
+            5,  // IHU Type ID
+            10, // Length
+            1,  // AE
+            0,  // Reserved
+            0x80, 0x00, // RX Cost
+            0, 200, // Interval
+            192, 168, 0, 5, // Address
+        ];
+
+        let types: Vec<u8> = TlvReader::new(body).map(|tlv| tlv.r#type()).collect();
+
+        assert_eq!(
+            types,
+            &[4, 5],
+            "Malformed and unrecognized TLVs should be skipped, not end iteration"
+        );
+    }
+
+    #[test]
+    fn unparseable_header_ends_iteration() {
+        // A declared Length that runs past the end of the body is a framing failure. The reader
+        // cannot know where the next TLV starts, so iteration has to stop rather than guess.
+        let body: &[u8] = &[
+            // Hello
+            4, // Hello Type ID
+            6, // Length
+            0x80, 0x00, // Flags
+            0, 15, // Seqno
+            0, 200, // Interval
+            // Hello claiming more bytes than remain
+            4,   // Hello Type ID
+            120, // Length
+            0x80, 0x00, // Flags
+            0, 15, // Seqno
+            0, 200, // Interval
+        ];
+
+        let types: Vec<u8> = TlvReader::new(body).map(|tlv| tlv.r#type()).collect();
+
+        assert_eq!(types, &[4], "Iteration should stop at the framing error");
     }
 }
