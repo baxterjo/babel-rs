@@ -71,7 +71,7 @@ impl<'a> Iterator for TlvReader<'a> {
 #[cfg(test)]
 mod test {
     use crate::packet::tlv::reader::TlvReader;
-    use crate::packet::tlv::{AckReqSlice, AckSlice, HelloSlice, IhuSlice, Tlv, TypedTlv};
+    use crate::packet::tlv::Tlv;
 
     #[test]
     fn test_normal_packet_body() {
@@ -128,6 +128,9 @@ mod test {
                         &[1, 2, 3, 4, 5]
                     )
                 }
+                // Padding between TLVs is a normal part of a packet body and carries nothing to
+                // check.
+                Tlv::Pad1 => {}
                 other => {
                     panic!("Unexpected TLV type ID parsed: {:?}, {:?}", other, reader);
                 }

@@ -105,6 +105,23 @@ impl<'a> Tlv<'a> {
         }
     }
 
+    /// The `Type` value this TLV was parsed as.
+    pub fn r#type(&self) -> u8 {
+        match self {
+            Self::Pad1 => 0,
+            Self::PadN(_) => PadNSlice::TYPE_ID,
+            Self::AckReq(_) => AckReqSlice::TYPE_ID,
+            Self::Ack(_) => AckSlice::TYPE_ID,
+            Self::Hello(_) => HelloSlice::TYPE_ID,
+            Self::Ihu(_) => IhuSlice::TYPE_ID,
+            Self::RouterId(_) => RouterIdSlice::TYPE_ID,
+            Self::NextHop(_) => NextHopSlice::TYPE_ID,
+            Self::Update(_) => UpdateSlice::TYPE_ID,
+            Self::RouteRequest(_) => RouteRequestSlice::TYPE_ID,
+            Self::SeqnoRequest(_) => SeqnoRequestSlice::TYPE_ID,
+        }
+    }
+
     pub fn slice_len(&self) -> usize {
         match self {
             Self::Pad1 => 1,

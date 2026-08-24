@@ -63,7 +63,32 @@ impl Debug for UpdateSlice<'_> {
             .field("type", &self.as_untyped().r#type())
             .field("length", &self.as_untyped().length())
             .field("ae", &self.ae())
+            .field("flags", &self.flags())
+            .field("plen", &self.plen())
+            .field("ommitted", &self.ommitted())
+            .field("interval", &self.interval())
+            .field("seqno", &self.seqno())
+            .field("metric", &self.metric())
             .finish()
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for UpdateSlice<'_> {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(
+            f,
+            "UpdateSlice{{ type: {}, length: {}, ae: {}, flags: {}, plen: {}, ommitted: {}, interval: {}, seqno: {}, metric: {}}}",
+            self.as_untyped().r#type(),
+            self.as_untyped().length(),
+            self.ae(),
+            self.flags(),
+            self.plen(),
+            self.ommitted(),
+            self.interval(),
+            self.seqno(),
+            self.metric()
+        )
     }
 }
 
@@ -251,6 +276,27 @@ impl UpdateFlags {
     }
     pub(crate) fn is_prefix(&self) -> bool {
         self.0 & 1 << 7 > 0
+    }
+}
+
+impl Debug for UpdateFlags {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("UpdateFlags")
+            .field("prefix", &self.is_prefix())
+            .field("router_id", &self.is_router_id())
+            .finish()
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for UpdateFlags {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(
+            f,
+            "UpdateFlags{{ prefix: {}, router_id: {}}}",
+            self.is_prefix(),
+            self.is_router_id()
+        )
     }
 }
 

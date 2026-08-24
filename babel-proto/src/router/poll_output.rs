@@ -478,8 +478,7 @@ mod test {
     use crate::extension::NoExtension;
     use crate::output::TransmitDestination;
     use crate::packet::packet_slice::PacketSlice;
-    use crate::packet::tlv::tlv_slice::TlvSlice;
-    use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
+    use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, TypedTlv};
     use crate::utils::rx_cost::RxCost;
     use crate::utils::storage::ManagedSliceExt;
     use crate::utils::timer::Timer;
@@ -521,17 +520,30 @@ mod test {
         PacketSlice::from_slice(contents)
             .expect("packet should parse")
             .body_reader()
-            .map(|tlv| tlv.expect("tlv should parse").r#type())
+            .map(|tlv| tlv.r#type())
             .collect()
     }
 
-    fn nth_tlv(contents: &[u8], n: usize) -> TlvSlice<'_> {
+    fn nth_tlv(contents: &[u8], n: usize) -> Tlv<'_> {
         PacketSlice::from_slice(contents)
             .expect("packet should parse")
             .body_reader()
             .nth(n)
             .expect("tlv should exist")
-            .expect("tlv should parse")
+    }
+
+    fn nth_hello(contents: &[u8], n: usize) -> HelloSlice<'_> {
+        match nth_tlv(contents, n) {
+            Tlv::Hello(hello) => hello,
+            other => panic!("should be a hello, got {other:?}"),
+        }
+    }
+
+    fn nth_ihu(contents: &[u8], n: usize) -> IhuSlice<'_> {
+        match nth_tlv(contents, n) {
+            Tlv::Ihu(ihu) => ihu,
+            other => panic!("should be an ihu, got {other:?}"),
+        }
     }
 
     /// Registers an interface with an interval too long to fire again in a test, then drains its
@@ -580,8 +592,7 @@ mod test {
             assert_eq!(transmit.destination, TransmitDestination::Multicast);
             assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
 
-            let hello = HelloSlice::from_untyped(nth_tlv(&transmit.contents, 0))
-                .expect("should be a hello");
+            let hello = nth_hello(&transmit.contents, 0);
             assert!(hello.flags().is_multicast());
             assert_eq!(hello.seqno(), SeqNo(0));
             assert_eq!(hello.interval(), IFACE_INTERVAL.into());
@@ -607,8 +618,7 @@ mod test {
             let transmit = expect_transmit(r.poll_output(t1).expect("poll should succeed"));
             assert_eq!(transmit.iface, handle);
 
-            let hello = HelloSlice::from_untyped(nth_tlv(&transmit.contents, 0))
-                .expect("should be a hello");
+            let hello = nth_hello(&transmit.contents, 0);
             assert_eq!(hello.seqno(), SeqNo(1));
         }
 
@@ -739,8 +749,7 @@ mod test {
             );
             assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
 
-            let hello = HelloSlice::from_untyped(nth_tlv(&transmit.contents, 0))
-                .expect("should be a hello");
+            let hello = nth_hello(&transmit.contents, 0);
             assert!(hello.flags().is_unicast());
             assert_eq!(hello.seqno(), SeqNo(0));
             assert_eq!(hello.interval(), UCAST_INTERVAL.into());
@@ -921,8 +930,7 @@ mod test {
             assert_eq!(transmit.destination, TransmitDestination::Multicast);
             assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
 
-            let ihu =
-                IhuSlice::from_untyped(nth_tlv(&transmit.contents, 0)).expect("should be an ihu");
+            let ihu = nth_ihu(&transmit.contents, 0);
             assert_eq!(
                 ihu.ae(),
                 2,
@@ -964,8 +972,7 @@ mod test {
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
 
-            let ihu =
-                IhuSlice::from_untyped(nth_tlv(&transmit.contents, 0)).expect("should be an ihu");
+            let ihu = nth_ihu(&transmit.contents, 0);
             assert_eq!(ihu.ae(), 3, "fe80::/64 uses the link-local encoding");
             assert_eq!(
                 ihu.address(8).expect("should have an 8 byte address"),
@@ -1035,8 +1042,7 @@ mod test {
             );
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
-            let ihu =
-                IhuSlice::from_untyped(nth_tlv(&transmit.contents, 0)).expect("should be an ihu");
+            let ihu = nth_ihu(&transmit.contents, 0);
 
             assert_eq!(ihu.ae(), 0, "a unicast IHU needs no explicit destination");
             assert!(
@@ -1164,8 +1170,7 @@ mod test {
                 tlv_types(&transmit.contents),
                 vec![IhuSlice::TYPE_ID, HelloSlice::TYPE_ID]
             );
-            let hello = HelloSlice::from_untyped(nth_tlv(&transmit.contents, 1))
-                .expect("should be a hello");
+            let hello = nth_hello(&transmit.contents, 1);
             assert!(hello.flags().is_unicast());
 
             let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
