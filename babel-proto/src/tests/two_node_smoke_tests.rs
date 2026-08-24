@@ -67,11 +67,8 @@ fn two_nodes_say_hello_and_ihu() {
     };
 
     let packet_slice = PacketSlice::from_slice(&transmit.contents).expect("failed to slice packet");
-    let mut counter = 0;
-    for tlv_result in packet_slice.body_reader() {
-        tlv_result.expect("Failed to read tlv.");
-        counter += 1;
-    }
+    // The reader stops iterating on a malformed TLV, so a short count is also a parse failure.
+    let counter = packet_slice.body_reader().count();
 
     assert_eq!(counter, 2, "Should have got 2 TLVs from node 2");
 

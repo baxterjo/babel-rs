@@ -8,7 +8,7 @@ use crate::input::{Receive, ReceiveDestination};
 use crate::packet::packet_slice::PacketSlice;
 use crate::packet::parser::Parser;
 use crate::packet::tlv::reader::TlvReader;
-use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
+use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv};
 use crate::router::BabelRouter;
 use crate::utils::{Instant, ManagedSliceExt};
 
@@ -48,21 +48,19 @@ where
             });
         }
 
-        for tlv_result in TlvReader::new(packet.body()) {
-            let tlv = ok_or_continue!(tlv_result);
+        for tlv in TlvReader::new(packet.body()) {
             b_trace!("{:?}", tlv);
-            match tlv.r#type() {
+            match tlv {
+                Tlv::Pad1 | Tlv::PadN(_) => {
+                    continue;
+                }
                 // A TLV that cannot be handled is skipped rather than aborting the packet. TLVs
                 // are independent of one another, so letting one bad TLV discard the valid ones
                 // behind it hands any sender on the link a way to suppress them.
-                HelloSlice::TYPE_ID => {
-                    let hello = ok_or_continue!(HelloSlice::from_untyped(tlv));
-                    b_debug!("{:?}", hello);
+                Tlv::Hello(hello) => {
                     ok_or_continue!(self.handle_hello(now, input.iface, input.source_addr, hello));
                 }
-                IhuSlice::TYPE_ID => {
-                    let ihu = ok_or_continue!(IhuSlice::from_untyped(tlv));
-                    b_debug!("{:?}", ihu);
+                Tlv::Ihu(ihu) => {
                     ok_or_continue!(self.handle_ihu(
                         now,
                         input.iface,
@@ -73,11 +71,14 @@ where
                 }
                 // Hello and IHU are matched above, so this covers the base-spec TLVs that are not
                 // implemented yet.
-                6..10 => {
+                Tlv::AckReq(_)
+                | Tlv::Ack(_)
+                | Tlv::RouterId(_)
+                | Tlv::NextHop(_)
+                | Tlv::Update(_)
+                | Tlv::RouteRequest(_)
+                | Tlv::SeqnoRequest(_) => {
                     unimplemented!("Unimplemented base spec TLV found, Type: {}", tlv.r#type());
-                }
-                other => {
-                    b_debug!("Unrecognized TLV found: {}", other);
                 }
             }
         }
@@ -165,6 +166,7 @@ mod test {
     use crate::data_types::RouterId;
     use crate::extension::NoExtension;
     use crate::packet::packet_header::BabelPacketHeader;
+    use crate::packet::tlv::TypedTlv;
     use crate::packet::tlv::hello_slice::HelloFlags;
     use crate::utils::Duration;
     use crate::utils::rx_cost::RxCost;

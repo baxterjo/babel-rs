@@ -109,7 +109,7 @@ mod test {
     use crate::output::DatagramSend;
     use crate::packet::packet_slice::PacketSlice;
     use crate::packet::tlv::hello_slice::HelloFlags;
-    use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
+    use crate::packet::tlv::Tlv;
     use crate::utils::Duration;
     use crate::utils::rx_cost::RxCost;
     #[test]
@@ -146,18 +146,21 @@ mod test {
             "There should be no packet trailer."
         );
 
-        for (idx, tlv_result) in packet_slice.body_reader().enumerate() {
-            let tlv = tlv_result.expect("Failed to parse TLV");
+        for (idx, tlv) in packet_slice.body_reader().enumerate() {
             match idx {
                 0 => {
-                    let hello = HelloSlice::from_untyped(tlv).expect("First tlv should be hello.");
+                    let Tlv::Hello(hello) = tlv else {
+                        panic!("First TLV should have been hello");
+                    };
                     assert_eq!(hello.flags(), HelloFlags::new(true));
                     assert_eq!(hello.seqno(), SeqNo(0));
                     assert_eq!(hello.interval(), Duration::from_centis(200).into());
                     assert_eq!(hello.sub_tlvs(), &[]);
                 }
                 1 => {
-                    let ihu = IhuSlice::from_untyped(tlv).expect("Second tlv should be ihu");
+                    let Tlv::Ihu(ihu) = tlv else {
+                        panic!("Second TLV should have been ihu");
+                    };
                     assert_eq!(ihu.ae(), 1);
                     assert_eq!(ihu.rx_cost(), RxCost(5));
                     assert_eq!(ihu.interval(), Duration::from_centis(300).into());

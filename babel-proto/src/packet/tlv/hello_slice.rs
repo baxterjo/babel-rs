@@ -8,70 +8,8 @@ use crate::packet::tlv::tlv_slice::TlvSlice;
 use crate::packet::utils::get_unchecked_be_u16;
 use crate::utils::Duration;
 
-/// Hello flags as defined in section
-/// [4.6.5](https://datatracker.ietf.org/doc/html/rfc8966#name-hello)
-///
-/// The Flags field is interpreted as follows:
-///
-/// ```sh
-///  0                   1
-///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |U|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// ```
-/// U (Unicast) flag (8000 hexadecimal):
-///     if set, then this Hello represents a Unicast Hello, otherwise it represents a Multicast
-/// Hello;
-///
-/// X:
-///     all other bits MUST be sent as 0 and silently ignored on reception.
-#[derive(PartialEq, Eq)]
-pub struct HelloFlags(u16);
-
-impl HelloFlags {
-    pub const fn new(unicast: bool) -> Self {
-        Self((unicast as u16) << 15)
-    }
-
-    pub const fn new_unicast() -> Self {
-        Self::new(true)
-    }
-
-    pub const fn new_multicast() -> Self {
-        Self::new(false)
-    }
-
-    pub fn is_unicast(&self) -> bool {
-        (self.0 & 0x8000u16) > 0u16
-    }
-
-    pub fn is_multicast(&self) -> bool {
-        !self.is_unicast()
-    }
-
-    pub fn to_wire(&self) -> [u8; 2] {
-        self.0.to_be_bytes()
-    }
-}
-
-impl Debug for HelloFlags {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("HelloFlags")
-            .field("unicast", &self.is_unicast())
-            .finish()
-    }
-}
-
-#[cfg(feature = "defmt")]
-impl defmt::Format for HelloFlags {
-    fn format(&self, f: defmt::Formatter) {
-        defmt::write!(f, "HelloFlags{{ unicast: {}}}", self.is_unicast())
-    }
-}
-
-/// Hello TLV as defined in section
-/// [4.6.5](https://datatracker.ietf.org/doc/html/rfc8966#name-hello)
+/// Hello TLV as defined in [Section
+/// 4.6.5](https://datatracker.ietf.org/doc/html/rfc8966#name-hello)
 ///
 /// Every time a Hello is sent, the corresponding seqno counter MUST be incremented. Since there is
 /// a single seqno counter for all the Multicast Hellos sent by a given node over a given interface,
@@ -193,6 +131,68 @@ impl<'a> HelloSlice<'a> {
 
     pub fn is_unscheduled(&self) -> bool {
         self.interval().is_zero()
+    }
+}
+
+/// Hello flags as defined in [Section
+/// 4.6.5](https://datatracker.ietf.org/doc/html/rfc8966#name-hello)
+///
+/// The Flags field is interpreted as follows:
+///
+/// ```sh
+///  0                   1
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |U|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+/// U (Unicast) flag (8000 hexadecimal):
+///     if set, then this Hello represents a Unicast Hello, otherwise it represents a Multicast
+/// Hello;
+///
+/// X:
+///     all other bits MUST be sent as 0 and silently ignored on reception.
+#[derive(PartialEq, Eq)]
+pub struct HelloFlags(u16);
+
+impl HelloFlags {
+    pub const fn new(unicast: bool) -> Self {
+        Self((unicast as u16) << 15)
+    }
+
+    pub const fn new_unicast() -> Self {
+        Self::new(true)
+    }
+
+    pub const fn new_multicast() -> Self {
+        Self::new(false)
+    }
+
+    pub fn is_unicast(&self) -> bool {
+        (self.0 & 0x8000u16) > 0u16
+    }
+
+    pub fn is_multicast(&self) -> bool {
+        !self.is_unicast()
+    }
+
+    pub fn to_wire(&self) -> [u8; 2] {
+        self.0.to_be_bytes()
+    }
+}
+
+impl Debug for HelloFlags {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HelloFlags")
+            .field("unicast", &self.is_unicast())
+            .finish()
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for HelloFlags {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "HelloFlags{{ unicast: {}}}", self.is_unicast())
     }
 }
 

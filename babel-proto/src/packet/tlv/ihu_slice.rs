@@ -12,8 +12,8 @@ use crate::packet::utils::get_unchecked_be_u16;
 use crate::utils::Duration;
 use crate::utils::rx_cost::RxCost;
 
-/// IHU TLV as defined in section
-/// [4.6.6](https://datatracker.ietf.org/doc/html/rfc8966#name-ihu)
+/// IHU TLV as defined in [Section
+/// 4.6.6](https://datatracker.ietf.org/doc/html/rfc8966#name-ihu)
 ///
 /// An IHU ("I Heard You") TLV is used for confirming bidirectional reachability and carrying a
 /// link's transmission cost.
@@ -107,6 +107,9 @@ impl<'a> IhuSlice<'a> {
     /// send a new IHU; this MUST NOT be 0. The receiving node will use this value in order to
     /// compute a hold time for this symmetric association.
     pub fn interval(&self) -> Interval {
+        // SAFETY:
+        // Safe as the constructor has checked to ensure the length of the slice is at minimum
+        // TlvHeader::LEN (2) + Self::MIN_LEN (6).
         let centis = unsafe { get_unchecked_be_u16(self.slice.as_ptr().add(TlvHeader::LEN + 4)) };
         Duration::from_centis(centis.into()).into()
     }
@@ -133,8 +136,6 @@ impl<'a> IhuSlice<'a> {
     pub fn sub_tlvs(&self, address_len: usize) -> Result<&'a [u8], TlvError> {
         let idx_start = TlvHeader::LEN + Self::MIN_LEN + address_len;
         let len = self.slice.len();
-
-        b_debug!("Start: {}, Slice Len: {}", idx_start, len);
 
         // This **MUST** be checked as the source of address_len can be user supplied through
         // extensions and cause a footgun.
