@@ -10,7 +10,7 @@ use crate::packet::tlv::TypedTlv;
 use crate::packet::tlv::tlv_header::TlvHeader;
 use crate::packet::utils::get_unchecked_be_u16;
 use crate::utils::Duration;
-use crate::utils::rx_cost::RxCost;
+use crate::utils::distance::RxCost;
 
 /// Update TLV as defined in
 /// [Section 4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update)
@@ -174,7 +174,7 @@ impl<'a> UpdateSlice<'a> {
             // SAFETY:
             // Safe as the constructor has checked to ensure the length of the slice is at minimum
             // TlvHeader::LEN (2) + Self::MIN_LEN (10).
-            RxCost(get_unchecked_be_u16(
+            RxCost::from_raw(get_unchecked_be_u16(
                 self.slice.as_ptr().add(TlvHeader::LEN + 8),
             ))
         }
@@ -358,7 +358,11 @@ mod test {
             "Incorrect interval"
         );
         assert_eq!(update.seqno(), SeqNo(42), "Incorrect seqno");
-        assert_eq!(update.metric(), RxCost(0x0100), "Incorrect metric");
+        assert_eq!(
+            update.metric(),
+            RxCost::from_raw(0x0100),
+            "Incorrect metric"
+        );
         assert_eq!(
             update.prefix().expect("Should be able to get prefix"),
             &[192, 168, 0],
@@ -451,7 +455,11 @@ mod test {
         let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
         let update = UpdateSlice::from_untyped(tlv_slice).expect("Update should parse.");
 
-        assert_eq!(update.metric(), RxCost(0xFFFF), "Incorrect metric");
+        assert_eq!(
+            update.metric(),
+            RxCost::from_raw(0xFFFF),
+            "Incorrect metric"
+        );
         assert!(update.metric().is_infinite(), "Metric should be infinite");
     }
 

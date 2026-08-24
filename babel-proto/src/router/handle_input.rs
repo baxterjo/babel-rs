@@ -169,6 +169,7 @@ mod test {
     use crate::packet::tlv::TypedTlv;
     use crate::packet::tlv::hello_slice::HelloFlags;
     use crate::utils::Duration;
+    use crate::utils::distance::TxCost;
     use crate::utils::rx_cost::RxCost;
 
     // Long enough not to fire again mid-test, still inside the Timer bound.
@@ -254,7 +255,7 @@ mod test {
         out
     }
 
-    fn tx_cost(r: &BabelRouter<'static>, iface: InterfaceHandle, addr: Ipv6Addr) -> RxCost {
+    fn tx_cost(r: &BabelRouter<'static>, iface: InterfaceHandle, addr: Ipv6Addr) -> TxCost {
         r.neighbor_table
             .inner
             .get_by_key(&NeighbourIndex(iface, addr.into()))
@@ -318,13 +319,7 @@ mod test {
 
         let unknown = iface_handle("nope");
         let err = r
-            .add_neighbour(
-                t0,
-                unknown,
-                NEIGHBOUR_1_ADDR.into(),
-                Duration::from_secs(10),
-                None,
-            )
+            .add_neighbour(t0, unknown, NEIGHBOUR_1_ADDR.into(), None)
             .expect_err("an unregistered interface should be rejected");
 
         assert!(matches!(err, BabelError::InterfaceDoesntExist(h) if h == unknown));
@@ -361,7 +356,7 @@ mod test {
 
         assert_eq!(
             tx_cost(&r, iface, NEIGHBOUR_1_ADDR),
-            RxCost(77),
+            RxCost::from_raw(77),
             "neighbour 1 sent the IHU, so the rxcost is our cost toward neighbour 1"
         );
         assert_eq!(

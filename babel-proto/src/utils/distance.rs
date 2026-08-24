@@ -51,6 +51,11 @@ macro_rules! distance_newtype {
             pub const fn is_infinite(self) -> bool {
                 self.0 == INFINITY
             }
+
+            #[inline]
+            pub const fn to_wire(&self)-> [u8;2]{
+                self.0.to_be_bytes()
+            }
         }
 
         impl From<u16> for $name {

@@ -10,7 +10,7 @@ use crate::packet::tlv::tlv_header::TlvHeader;
 use crate::packet::tlv::tlv_slice::TlvSlice;
 use crate::packet::utils::get_unchecked_be_u16;
 use crate::utils::Duration;
-use crate::utils::rx_cost::RxCost;
+use crate::utils::distance::RxCost;
 
 /// IHU TLV as defined in [Section
 /// 4.6.6](https://datatracker.ietf.org/doc/html/rfc8966#name-ihu)
@@ -97,7 +97,7 @@ impl<'a> IhuSlice<'a> {
         // Safe as the constructor has checked to ensure the length of the slice is at minimum
         // TlvHeader::LEN (2) + Self::MIN_LEN (6).
         unsafe {
-            RxCost(get_unchecked_be_u16(
+            RxCost::from_raw(get_unchecked_be_u16(
                 self.slice.as_ptr().add(TlvHeader::LEN + 2),
             ))
         }
@@ -179,7 +179,7 @@ mod test {
         let ae: AddressEncoding<NoExtension> =
             AddressEncoding::try_from(ihu.ae()).expect("Should be known address encoding.");
 
-        assert_eq!(ihu.rx_cost(), RxCost(0x8000));
+        assert_eq!(ihu.rx_cost(), RxCost::from_raw(0x8000));
         assert_eq!(ihu.interval(), Duration::from_centis(200).into());
         assert_eq!(
             ihu.address(ae.address_len())
