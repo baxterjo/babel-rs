@@ -14,5 +14,5 @@ A sans I/O, no_std, no_alloc Rust implementation of the Babel routing protocol.
 - Doc comments structured in a way that helps teach the babel routing protocol.
 
 # LLM Use
-The initial implementation of babel will not use any LLM generated code. The development of this crate is partially for learning, and I will get the most out of it if I write all of the code myself. This is not a condemnation of the use of LLM's in general, there is no denying their usefulness in day to day code authorship and I have used them in other projects I have published. I may use an LLM for researching best practices or rubber ducking, but it will all be in a browser chat, not a local agent.
+The initial implementation of babel-rs involves minimal LLM use. The development of this crate is partially for learning, and I will get the most out of it if I write much of the code myself, LLMs will be used for rubber ducking, writing tests, reviewing code that I have written, or when things start to get boilerplate-y (e.g.:TLV parsing in babel-proto). This stance is not a condemnation of the use of LLM's in general, there is no denying their usefulness in day to day code authorship and I have used them in other projects I have published. 
 

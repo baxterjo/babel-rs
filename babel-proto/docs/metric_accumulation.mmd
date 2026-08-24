@@ -1,0 +1,14 @@
+---
+title: Metric Accumulation
+---
+flowchart LR
+  D["node_d<br/>originates prefix P<br/>Metric = 0"]
+  C["node_c<br/>Metric = C(c,d) + 0"]
+  B["node_b<br/>Metric = C(b,c) + m_c"]
+  A["node_a<br/>Metric = C(a,b) + m_b"]
+  D -->|"Update TLV<br/>m = 0"| C
+  C -->|"Update TLV<br/>m = m_c"| B
+  B -->|"Update TLV<br/>m = m_b"| A
+  LC(["each C(x,y) comes from<br/>that link's RxCost / TxCost pair"]) -.-> C
+  LC -.-> B
+  LC -.-> A
