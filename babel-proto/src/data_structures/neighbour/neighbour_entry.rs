@@ -275,6 +275,8 @@ impl<A: AddressExt> Neighbour<A> {
         }
     }
 
+    /// Performs the "flush and re-create" function for when the diff between expected seqno and
+    /// actual is greater that 16
     fn hello_seqno_flush(&mut self, now: Instant, hello: HelloSlice<'_>) {
         let flags = hello.flags();
         let seqno = hello.seqno();
