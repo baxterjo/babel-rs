@@ -1,5 +1,6 @@
 use super::{Cost, LinkCostCalculator, RxCost, TxCost};
 use crate::metric::IhuRatio;
+use crate::metric::distance::INFINITY;
 use crate::utils::bit_history::BitHistory;
 /// A link cost calculator that is best used for wired interfaces.
 ///
@@ -33,7 +34,8 @@ impl KOutOfJ {
     ///
     /// Arguments:
     /// * `link_cost`: The link cost constant, if the link is "up" this will be the cost of the
-    ///   link, if it is down, the cost is infinity. Clamped to a minimum of 1.
+    ///   link, if it is down, the cost is infinity. Clamped to a minimum of 1, maximum of
+    ///   [`INFINITY`] -1
     /// * `k_val`: The number of received hellos on this link to consider it up. Clamped to minimum
     /// of 1, maximum of `j_val`
     /// * `j_val`: The window of most recently reveived hellos. Clamped to minimum of 1, maximum of
@@ -41,10 +43,11 @@ impl KOutOfJ {
     pub fn new(link_cost: u16, k_val: u8, j_val: u8) -> Self {
         let j_val = j_val.max(1).min(16);
         let k_val = k_val.max(1).min(j_val);
+        let cost_const = link_cost.max(1).min(INFINITY - 1);
         Self {
-            cost_const: link_cost.max(1),
-            k_val: k_val,
-            j_val: j_val,
+            cost_const,
+            k_val,
+            j_val,
         }
     }
 }
