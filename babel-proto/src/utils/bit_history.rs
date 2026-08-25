@@ -65,12 +65,6 @@ impl BitHistory {
         }
         val & mask
     }
-
-    pub fn flush(&mut self) {
-        for _ in 0..usize::BITS {
-            self.record(false);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -87,12 +81,5 @@ mod test {
     fn get_last_keeps_expected_bits() {
         let big_val = BitHistory(0x123456789ABCD);
         assert_eq!(big_val.get_last(4), 0xD)
-    }
-
-    #[test]
-    fn flush_works() {
-        let mut big_val = BitHistory(0x123456789ABCD);
-        big_val.flush();
-        assert_eq!(big_val.0, 0x0)
     }
 }

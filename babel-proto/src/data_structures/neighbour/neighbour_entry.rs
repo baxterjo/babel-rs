@@ -317,8 +317,10 @@ impl<A: AddressExt> Neighbour<A> {
             interval.into()
         };
 
-        self.mcast_hello_info.history.flush();
-        self.ucast_hello_info.history.flush();
+        // Reset both rx hello infos. This prevents a flush from one message type from causing a
+        // flush for another.
+        self.mcast_hello_info = RxHelloInfo::new_default(now);
+        self.ucast_hello_info = RxHelloInfo::new_default(now);
 
         if flags.is_unicast() {
             self.ucast_hello_info.expected_seqno = Some(seqno + 1);
@@ -355,9 +357,10 @@ impl<A: AddressExt> Neighbour<A> {
             Ok(_) => self.mcast_hello_info = rx_hello_info,
             Err(BigSeqnoDiff(seq)) => {
                 b_debug!(
-                    "Neighbour flush - iface {}, addr: {} - seqno diff: {}",
+                    "Neighbour flush - iface {}, addr: {} - multicast: {},  seqno diff: {}",
                     self.iface,
                     self.address,
+                    flags.is_multicast(),
                     seq
                 );
                 self.hello_seqno_flush(now, hello);
@@ -681,7 +684,7 @@ mod test {
         assert_eq!(mcast_history(&n).read(), 0b1111);
 
         // Well past the 16-hello window the history can represent.
-        n.handle_hello(now, hello(&hello_tlv(false, 4 + 100, 100)));
+        n.handle_hello(now, hello(&hello_tlv(false, 25, 100)));
 
         assert_eq!(
             mcast_history(&n).read(),
@@ -692,13 +695,19 @@ mod test {
             n.mcast_hello_info
                 .expected_seqno
                 .expect("Should have seqno"),
-            SeqNo(105)
+            SeqNo(26)
         );
+        assert!(
+            n.ucast_hello_info.expected_seqno.is_none(),
+            "When one history is flushed, the other should be reset to default"
+        );
+        n.handle_hello(now, hello(&hello_tlv(true, 25, 100)));
         assert_eq!(
-            n.ucast_hello_info
+            n.mcast_hello_info
                 .expected_seqno
-                .expect("Should have ucast seqno"),
-            SeqNo(4)
+                .expect("Should have seqno"),
+            SeqNo(26),
+            "Newly flushed ucast history should not flush again"
         );
     }
 }
