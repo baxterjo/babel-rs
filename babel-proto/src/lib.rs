@@ -16,6 +16,7 @@ pub mod data_types;
 pub mod error;
 pub mod extension;
 pub mod input;
+pub mod metric;
 pub mod output;
 pub mod packet;
 pub mod router;

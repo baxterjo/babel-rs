@@ -4,7 +4,6 @@ use crate::extension::address::AddressExt;
 
 pub mod address;
 pub mod address_encoding;
-pub mod metric_calc;
 pub mod parser_state;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]

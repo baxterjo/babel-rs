@@ -124,7 +124,6 @@ distance_newtype! {
 /// MUST be strictly positive when finite.
 ///
 /// include_mmd!("docs/cost_calc.mmd")
-#[cfg_attr(all(doc, feature = "diagrams"), aquamarine::aquamarine)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Cost(u16);
 
@@ -195,7 +194,7 @@ impl fmt::Display for NonPositiveCost {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "a finite link cost must be strictly positive (RFC 8966 §3.4.3)"
+            "a finite link cost must be strictly positive (greater than zero, less than infinity)"
         )
     }
 }
@@ -244,7 +243,7 @@ impl From<TxCost> for Cost {
             Cost::INFINITY
         } else {
             // A finite txcost of 0 shouldn't occur on the wire, but
-            // nothing in §4.6.6 forbids it; clamp to 1 so the
+            // nothing in the spec forbids it; clamp to 1 so the
             // strictly-positive invariant always holds regardless of
             // input.
             Cost(tx.0.max(1))

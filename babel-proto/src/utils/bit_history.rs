@@ -1,3 +1,7 @@
+use core::fmt::Debug;
+#[cfg(feature = "defmt")]
+use core::fmt::Formatter;
+
 /// A bitwise history.
 ///
 /// The most recent history is on the right side of the inner value bits, the least recent on the
@@ -6,18 +10,25 @@
 // "undo" the history. This means that the inner value must be bigger than the spec required value
 // to retain a window of history larger than the value. This implementation uses usize to get the
 // largest possible history based on compilation target.
-#[derive(Debug, Clone, Copy, Default)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Default)]
 pub struct BitHistory(usize);
 
-impl BitHistory {
-    /// Starts with a full history.
-    ///
-    /// This gives some natural hysteresis for neibour churn.
-    pub(crate) fn new() -> Self {
-        Self(0xFFFF)
+impl Debug for BitHistory {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("BitHistory")
+            .field(&format_args!("{:#018b}", self.0))
+            .finish()
     }
+}
 
+#[cfg(feature = "defmt")]
+impl defmt::Format for BitHistory {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "BitHistory({=usize:b})", self.0)
+    }
+}
+
+impl BitHistory {
     pub(crate) fn record(&mut self, value: bool) {
         self.0 = (self.0 << 1) | (value as usize);
     }
@@ -44,6 +55,16 @@ impl BitHistory {
     pub fn count(&self) -> u32 {
         self.read().count_ones()
     }
+
+    /// Gets the most recent `number` of bits from the bit history.
+    pub fn get_last(&self, number: usize) -> u16 {
+        let mut mask = 0u16;
+        let val = self.read();
+        for _ in 0..number {
+            mask = mask << 1 | 1;
+        }
+        val & mask
+    }
 }
 
 #[cfg(test)]
@@ -54,5 +75,11 @@ mod test {
     fn truncate_keeps_lsb() {
         let big_val = BitHistory(0x123456789ABCD);
         assert_eq!(big_val.read(), 0xABCD)
+    }
+
+    #[test]
+    fn get_last_keeps_expected_bits() {
+        let big_val = BitHistory(0x123456789ABCD);
+        assert_eq!(big_val.get_last(4), 0xD)
     }
 }

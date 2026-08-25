@@ -6,7 +6,7 @@ use crate::data_structures::neighbour::neighbour_entry::RxHelloInfoErr::BigSeqno
 use crate::data_structures::seqno::SeqNo;
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
-use crate::extension::metric_calc::IhuRatio;
+use crate::metric::IhuRatio;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
 use crate::utils::bit_history::BitHistory;
 use crate::utils::distance::TxCost;
@@ -65,17 +65,13 @@ pub struct Neighbour<A: AddressExt> {
     ///
     /// the multicast hellotimer, which is set to the interval value carried by scheduled Multicast
     /// Hello TLVs sent by this neighbour
-    ///
-    /// None if this router has never received a multicast hello from theis neighbour.
     pub(crate) mcast_hello_info: RxHelloInfo,
 
     /// a history of recently received Unicast Hello packets from this neighbour
     ///
     /// the expected incoming Unicast Hello sequence number for this neighbour, an
     /// integer modulo 2^16
-    ///
-    /// None if this router has never received a unicast hello from this neighbour
-    pub(crate) ucast_hello_info: Option<RxHelloInfo>,
+    pub(crate) ucast_hello_info: RxHelloInfo,
 
     /// the 'transmission cost' value from the last IHU packet received from this
     /// neighbour, or FFFF hexadecimal (infinity) if the IHU hold timer for this neighbour has
@@ -252,7 +248,7 @@ impl<A: AddressExt> Neighbour<A> {
             // When a neighbour is new, this router has never received a hello from it. This
             // populates the RxHelloInfo with sensible defaults.
             mcast_hello_info: RxHelloInfo::new_default(now),
-            ucast_hello_info: None,
+            ucast_hello_info: RxHelloInfo::new_default(now),
             // When a neighbour is new, this router has never received an IHU packet from it, so TX
             // cost is set to infinity
             tx_cost: TxCost::INFINITY,
@@ -284,7 +280,7 @@ impl<A: AddressExt> Neighbour<A> {
 
         // Reset everything to default, keeping original settings for outgoing timers.
         self.mcast_hello_info = RxHelloInfo::new_default(now);
-        self.ucast_hello_info = self.ucast_hello_info.map(|_| RxHelloInfo::new_default(now));
+        self.ucast_hello_info = RxHelloInfo::new_default(now);
         self.tx_cost = TxCost::INFINITY;
         self.ihu_timer = Timer::new_unchecked(
             now,
@@ -324,7 +320,7 @@ impl<A: AddressExt> Neighbour<A> {
         };
 
         if flags.is_unicast() {
-            self.ucast_hello_info = Some(new_rx_info)
+            self.ucast_hello_info = new_rx_info
         } else {
             self.mcast_hello_info = new_rx_info
         }
@@ -343,13 +339,12 @@ impl<A: AddressExt> Neighbour<A> {
 
         let mut rx_hello_info = if flags.is_unicast() {
             self.ucast_hello_info
-                .unwrap_or_else(|| RxHelloInfo::new_default(now))
         } else {
             self.mcast_hello_info
         };
 
         match rx_hello_info.record_hello(now, seqno, interval) {
-            Ok(_) if flags.is_unicast() => self.ucast_hello_info = Some(rx_hello_info),
+            Ok(_) if flags.is_unicast() => self.ucast_hello_info = rx_hello_info,
             Ok(_) => self.mcast_hello_info = rx_hello_info,
             Err(BigSeqnoDiff(seq)) => {
                 b_debug!(
@@ -561,10 +556,7 @@ mod test {
             "the multicast side saw three missed hellos"
         );
         assert_eq!(
-            n.ucast_hello_info
-                .expect("a unicast hello was received")
-                .history
-                .read(),
+            n.ucast_hello_info.history.read(),
             0b1,
             "a multicast gap must not be charged against the unicast history"
         );
@@ -580,13 +572,7 @@ mod test {
         n.handle_hello(now, hello(&hello_tlv(true, 0, 100)));
 
         assert_eq!(mcast_history(&n).read(), 0);
-        assert_eq!(
-            n.ucast_hello_info
-                .expect("a unicast hello was received")
-                .history
-                .read(),
-            0b1
-        );
+        assert_eq!(n.ucast_hello_info.history.read(), 0b1);
     }
 
     /// The window is 16 wide and seqnos are modulo 2^16, so an ordinary gap that straddles the
