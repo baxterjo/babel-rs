@@ -234,6 +234,12 @@ impl Duration {
     pub const fn as_micros(&self) -> u64 {
         self.micros
     }
+
+    pub fn clamp_to_wire(&mut self) {
+        *self = (*self)
+            .min(Duration::from_centis(u16::MAX.into()))
+            .max(Duration::from_centis(1));
+    }
 }
 
 impl fmt::Display for Duration {
@@ -358,6 +364,48 @@ impl From<::core::time::Duration> for Duration {
 impl From<Duration> for ::core::time::Duration {
     fn from(val: Duration) -> Self {
         ::core::time::Duration::from_micros(val.as_micros())
+    }
+}
+
+/// Provide a literal or referential duration for certain interval values.
+///
+/// There are many areas in the spec where the "recommended" value for an interval is a multiple of
+/// another interval. This gives users the choice to set a literal value or a multiple value.
+///
+/// Non Exhaustive list of interval relationships and their defaults:
+/// * `ihu_interval = 3 * mcast_hello_interval on lossless links, 1 * mcast_hello_interval` on
+/// lossy links. This metric can be tuned through [`LinkCostCalculator::`]
+/// * `update_interval = 4 * mcast_hello_interval`
+/// * `ihu_hold_time = 3.5 * advertised_ihu_interval`
+/// * `route_expiry_time = 3.5 * advertised_update_interval`
+#[derive(Debug, Clone, Copy)]
+pub enum DurationSpec {
+    Literal(Duration),
+    Multiple(DurationMultiplier),
+}
+
+impl DurationSpec {
+    pub const UPDATE_SPEC: DurationSpec =
+        DurationSpec::Multiple(DurationMultiplier { num: 4, den: 1 });
+    pub const IHU_HOLD_TIME_SPEC: DurationSpec =
+        DurationSpec::Multiple(DurationMultiplier { num: 7, den: 2 });
+
+    pub(crate) fn apply_ihu_interval(&self, mcast_hello_interval: Duration) -> Duration {
+        // Get the duration from the spec.
+        let out = match self {
+            Self::Literal(dur) => *dur,
+            Self::Multiple(mul) => mcast_hello_interval * *mul,
+        };
+
+        // Clamp it to [1:1, 3:1]
+        out.min(mcast_hello_interval * 3).max(mcast_hello_interval)
+    }
+
+    pub(crate) fn apply(&self, duration: Duration) -> Duration {
+        match self {
+            Self::Literal(dur) => *dur,
+            Self::Multiple(mul) => duration * *mul,
+        }
     }
 }
 

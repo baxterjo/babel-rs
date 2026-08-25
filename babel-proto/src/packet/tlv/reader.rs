@@ -158,8 +158,8 @@ mod test {
             0x80, 0x00, // Flags
             0,    // Truncated Seqno
             // Hello
-            4,  // Hello Type ID
-            6,  // Length
+            4, // Hello Type ID
+            6, // Length
             0x80, 0x00, // Flags
             0, 15, // Seqno
             0, 200, // Interval

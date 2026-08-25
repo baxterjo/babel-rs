@@ -12,6 +12,7 @@ pub use distance::{Cost, Metric, RxCost, TxCost};
 pub use k_of_j::KOutOfJ;
 
 use crate::utils::bit_history::BitHistory;
+use crate::utils::time::DurationSpec;
 use crate::utils::{Duration, DurationMultiplier};
 
 /// A type that calculates the RxCost from a history of neighbour hellos.
@@ -33,28 +34,32 @@ pub trait LinkCostCalculator: Debug {
     ///
     /// * `mcast_hello_history`: A [`BitHistory`] of multicast hellos received by this neighbour.
     /// * `ucast_hello_history`: A [`BitHistory`] of unicast hellos received by this neighbour.
-    fn rx_cost(&self, mcast_hello_history: BitHistory, ucast_hello_history: BitHistory) -> RxCost;
+    fn rx_cost(
+        &mut self,
+        mcast_hello_history: BitHistory,
+        ucast_hello_history: BitHistory,
+    ) -> RxCost;
 
-    /// Calculates the ratio of multicast hellos to IHUs.
+    /// Computes the [`DurationSpec`] for the ihu interval of this interface.
     ///
     /// The **advertised** IHU interval is always 3 times the Multicast Hello interval. IHUs are
-    /// **actually** sent at the ratio returned here.
+    /// **actually** sent at the spec returned here.
     ///
     /// Arguments:
     /// * `mcast_hello_history`: A [`BitHistory`] of multicast hellos received by this neighbour.
     /// * `ucast_hello_history`: A [`BitHistory`] of unicast hellos received by this neighbour.
-    fn hello_ihu_ratio(
-        &self,
+    fn ihu_interval(
+        &mut self,
         mcast_hello_history: BitHistory,
         ucast_hello_history: BitHistory,
-    ) -> IhuRatio;
+    ) -> DurationSpec;
 
     /// Calculates the link cost of for this neighbour.
     ///
     /// Arguments:
     /// * `rx_cost`: This node's own calculated rx_cost as defined by [`Self::rx_cost`]
     /// * `tx_cost`: The tx_cost reported by this neighbour in its IHU TLV.
-    fn link_cost(&self, rx_cost: RxCost, tx_cost: TxCost) -> Cost;
+    fn link_cost(&mut self, rx_cost: RxCost, tx_cost: TxCost) -> Cost;
 }
 
 /// The ratio of IHU's per multicast hello for this interface.

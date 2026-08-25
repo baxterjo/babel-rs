@@ -16,6 +16,8 @@ pub struct Timer {
 pub enum TimerError {
     #[error("The duration of a timer cannot be zero.")]
     DurationCannotBeZero,
+    #[error("Duration too large - given: {given} centiseconds, max: {max} centiseconds", given=0, max = u16::MAX)]
+    DurationTooLarge(u64),
 }
 
 impl Timer {
@@ -35,6 +37,30 @@ impl Timer {
             start: now,
             duration,
         })
+    }
+
+    /// Creates a new timer whos interval will be advertised in a TLV.
+    ///
+    /// This clamps the bounds of the timer to be able to fit in the interval field on the wire.
+    pub fn new_clamped(now: Instant, mut duration: Duration) -> Self {
+        duration.clamp_to_wire();
+
+        Self {
+            start: now,
+            duration,
+        }
+    }
+
+    /// Creates a new timer whos interval will be advertised in a TLV.
+    ///
+    /// This clamps the bounds of the timer to be able to fit in the interval field on the wire.
+    pub fn new_clamped_eager(now: Instant, mut duration: Duration) -> Self {
+        duration.clamp_to_wire();
+
+        Self {
+            start: now - duration,
+            duration,
+        }
     }
 
     /// Create a new timer that will instantly fire.

@@ -113,7 +113,6 @@ where
             .inner
             .get_by_key(&interface)
             .ok_or(BabelError::InterfaceDoesntExist(interface))?
-            .config
             .address;
 
         if !ihu_is_addressed_to_us(&ihu, destination, our_addr)? {
@@ -162,6 +161,7 @@ mod test {
     use core::net::Ipv6Addr;
 
     use super::*;
+    use crate::data_structures::interface::InterfaceConfig;
     use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_structures::seqno::SeqNo;
     use crate::data_types::RouterId;
@@ -265,8 +265,11 @@ mod test {
 
     /// Registers an interface and drains its mandatory eager initial multicast hello.
     fn drained_iface(r: &mut BabelRouter<'static>, now: Instant, name: &str) -> InterfaceHandle {
-        let handle = iface_handle(name);
-        r.register_interface(now, handle, NODE_ADDR, Some(IFACE_INTERVAL), None)
+        let mut config: InterfaceConfig<NoExtension> =
+            InterfaceConfig::new_wired(iface_handle(name), NODE_ADDR.into());
+        config.set_mcast_hello_interval(IFACE_INTERVAL);
+        let handle = r
+            .register_interface(now, config)
             .expect("register should succeed");
         r.poll_output(now).expect("poll should succeed");
         handle

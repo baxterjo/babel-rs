@@ -1,9 +1,10 @@
 use super::BabelRouter;
-use crate::data_structures::interface::{InterfaceHandle, InterfaceTableError};
+use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
 use crate::data_structures::neighbour::neighbour_entry::DEFAULT_IHU_RATIO;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
+use crate::metric::RxCost;
 use crate::output::{Output, Transmit};
 use crate::packet::tlv::hello_slice::HelloFlags;
 use crate::packet::writer::ready::Ready;
@@ -118,7 +119,7 @@ where
         // A router with no interfaces has nothing it could ever send, and nothing to base a
         // wake-up time on either.
         if self.iface_table.iter_mut().next().is_none() {
-            return Err(InterfaceTableError::NoInterfacesRegistered.into());
+            return Err(InterfaceError::NoInterfacesRegistered.into());
         }
 
         let mut active_dest = DestAddr::default();
@@ -242,7 +243,7 @@ where
                 .expect("Neighbour exists on unregistered interface?");
 
             // If the active address is multicast and this interface wants unicast IHUs, then skip.
-            if active_dest.is_multicast() && iface.config.unicast_ihu {
+            if active_dest.is_multicast() && iface.unicast_ihu {
                 continue;
             }
 
@@ -263,7 +264,7 @@ where
             // A unicast IHU is already unambiguous, so it uses the wildcard encoding (AE 0) and
             // omits the address entirely, as permitted by RFC 8966 4.6.6.
             let neighbour_addr = neighbour.address;
-            let (ae, address): (u8, &[u8]) = if iface.config.unicast_ihu {
+            let (ae, address): (u8, &[u8]) = if iface.unicast_ihu {
                 (0, &[])
             } else {
                 // TODO: Figure out error handling
@@ -272,30 +273,26 @@ where
                     neighbour_addr.as_wire(),
                 )
             };
-            // TODO: Derive this from the neighbour's hello history rather than advertising the
-            // interface's starting cost forever. `BitHistory::count` already measures the link,
-            // but nothing feeds it into a cost yet, so every IHU currently claims the same
-            // constant regardless of how the link is actually performing.
-            let rx_cost = iface.config.starting_rx_cost;
+
             // The Interval field advertises when the next IHU is due, which RFC 8966 Appendix B
             // puts at three times the multicast Hello interval. Once the periodic cadence lands
             // this should come from whatever timer actually schedules the next IHU.
             let duration = DEFAULT_IHU_RATIO.apply(iface.hello_timer.duration());
             b_debug!(
-                "[SEND] IHU - iface: {}, dest_addr: {:?} - ae: {}, rx_cost: {:?}, interval: {}, addr: {:?}",
+                "[SEND] IHU - iface: {}, dest_addr: {:?} - ae: {}, rx_cost: hard_coded, interval: {}, addr: {:?}",
                 iface.handle,
                 active_dest,
                 ae,
-                rx_cost,
                 duration.as_centis(),
                 neighbour_addr
             );
+
             writer = writer
-                .write_ihu(ae, rx_cost, duration.into(), address)?
+                .write_ihu(ae, RxCost::from_raw(59), duration.into(), address)?
                 .finish_tlv()?;
 
             // Claim the active address after the write succeeds.
-            if iface.config.unicast_ihu {
+            if iface.unicast_ihu {
                 // Otherwise this neighbour can claim the address.
                 // TODO error handling.
                 active_dest
@@ -471,6 +468,7 @@ mod test {
     use core::net::Ipv6Addr;
 
     use super::*;
+    use crate::data_structures::interface::InterfaceConfig;
     use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_structures::seqno::SeqNo;
     use crate::data_types::{Address, RouterId};
@@ -500,6 +498,13 @@ mod test {
 
     fn iface_handle(name: &str) -> InterfaceHandle {
         InterfaceHandle::try_from(name).expect("bad interface handle")
+    }
+
+    /// A wired interface config carrying an interval too long to fire again during a test.
+    fn iface_config(name: &str, address: Ipv6Addr) -> InterfaceConfig<NoExtension> {
+        let mut config = InterfaceConfig::new_wired(iface_handle(name), address.into());
+        config.set_mcast_hello_interval(IFACE_INTERVAL);
+        config
     }
 
     fn expect_transmit<A: AddressExt>(output: Output<'_, A>) -> Transmit<'_, A> {
@@ -554,9 +559,29 @@ mod test {
         name: &str,
         address: Ipv6Addr,
     ) -> InterfaceHandle {
-        let handle = iface_handle(name);
-        router
-            .register_interface(now, handle, address, Some(IFACE_INTERVAL), None)
+        drained_iface_with_config(router, now, iface_config(name, address))
+    }
+
+    /// [`drained_iface`], for an interface configured to send its IHUs unicast.
+    fn drained_ucast_ihu_iface(
+        router: &mut BabelRouter<'static>,
+        now: Instant,
+        name: &str,
+        address: Ipv6Addr,
+    ) -> InterfaceHandle {
+        let mut config = iface_config(name, address);
+        config.set_unicast_ihu(true);
+        drained_iface_with_config(router, now, config)
+    }
+
+    /// [`drained_iface`] for tests that need to tweak the config before registering.
+    fn drained_iface_with_config(
+        router: &mut BabelRouter<'static>,
+        now: Instant,
+        config: InterfaceConfig<NoExtension>,
+    ) -> InterfaceHandle {
+        let handle = router
+            .register_interface(now, config)
             .expect("could not register interface");
 
         let transmit = expect_transmit(router.poll_output(now).expect("poll should succeed"));
@@ -603,8 +628,8 @@ mod test {
         fn fires_immediately_on_first_poll() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let handle = iface_handle("iface_1");
-            r.register_interface(t0, handle, NODE_ADDR, Some(IFACE_INTERVAL), None)
+            let handle = r
+                .register_interface(t0, iface_config("iface_1", NODE_ADDR))
                 .expect("register should succeed");
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
@@ -647,11 +672,11 @@ mod test {
         fn only_one_interface_fires_per_poll_others_drained_next_poll() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let handle_a = iface_handle("iface_a");
-            let handle_b = iface_handle("iface_b");
-            r.register_interface(t0, handle_a, NODE_ADDR, Some(IFACE_INTERVAL), None)
+            let handle_a = r
+                .register_interface(t0, iface_config("iface_a", NODE_ADDR))
                 .expect("register should succeed");
-            r.register_interface(t0, handle_b, NEIGHBOUR_1_ADDR, Some(IFACE_INTERVAL), None)
+            let handle_b = r
+                .register_interface(t0, iface_config("iface_b", NEIGHBOUR_1_ADDR))
                 .expect("register should succeed");
 
             let first = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
@@ -668,11 +693,11 @@ mod test {
         fn for_iface_scoped_poll_ignores_other_due_interfaces() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let handle_a = iface_handle("iface_a");
-            let handle_b = iface_handle("iface_b");
-            r.register_interface(t0, handle_a, NODE_ADDR, Some(IFACE_INTERVAL), None)
+            let handle_a = r
+                .register_interface(t0, iface_config("iface_a", NODE_ADDR))
                 .expect("register should succeed");
-            r.register_interface(t0, handle_b, NEIGHBOUR_1_ADDR, Some(IFACE_INTERVAL), None)
+            let handle_b = r
+                .register_interface(t0, iface_config("iface_b", NEIGHBOUR_1_ADDR))
                 .expect("register should succeed");
 
             // iface_a is due too, but scoping to iface_b must still find and fire iface_b's hello.
@@ -892,7 +917,7 @@ mod test {
             );
             assert_eq!(
                 ihu.rx_cost(),
-                RxCost::from_raw(10),
+                RxCost::from_raw(59),
                 "default starting_rx_cost"
             );
             assert_eq!(ihu.interval(), EXPECTED_IHU_INTERVAL.into());
@@ -944,13 +969,7 @@ mod test {
         fn fires_unicast_when_interface_wants_unicast_ihu() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            r.iface_table
-                .inner
-                .get_mut_by_key(&iface)
-                .expect("interface should exist")
-                .config
-                .unicast_ihu = true;
+            let iface = drained_ucast_ihu_iface(&mut r, t0, "iface_1", NODE_ADDR);
             add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
@@ -967,13 +986,7 @@ mod test {
         fn unicast_ihu_uses_the_wildcard_encoding_and_omits_the_address() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            r.iface_table
-                .inner
-                .get_mut_by_key(&iface)
-                .expect("interface should exist")
-                .config
-                .unicast_ihu = true;
+            let iface = drained_ucast_ihu_iface(&mut r, t0, "iface_1", NODE_ADDR);
             add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
@@ -994,13 +1007,7 @@ mod test {
         fn conflicting_unicast_destination_defers_second_neighbour_to_next_poll() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            r.iface_table
-                .inner
-                .get_mut_by_key(&iface)
-                .expect("interface should exist")
-                .config
-                .unicast_ihu = true;
+            let iface = drained_ucast_ihu_iface(&mut r, t0, "iface_1", NODE_ADDR);
             for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
                 add_neighbour_no_ucast(&mut r, t0, iface, addr);
             }
@@ -1054,13 +1061,7 @@ mod test {
         fn ihu_precedes_ucast_and_mcast_hello_when_bundleable() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            r.iface_table
-                .inner
-                .get_mut_by_key(&iface)
-                .expect("interface should exist")
-                .config
-                .unicast_ihu = true;
+            let iface = drained_ucast_ihu_iface(&mut r, t0, "iface_1", NODE_ADDR);
             let ucast_interval = Duration::from_secs(20);
             // Left un-drained: the IHU every new neighbour owes is what competes with the ucast
             // hello for this poll's packet.
@@ -1101,18 +1102,14 @@ mod test {
         fn unicast_ihu_defers_mcast_hello_to_next_immediate_poll() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let iface_handle = iface_handle("iface_1");
+            let mut config = iface_config("iface_1", NODE_ADDR);
+            config.set_unicast_ihu(true);
             // Not pre-drained: the interface's mcast hello is eager-due at the same time as the
             // new neighbour's immediate IHU, so both are competing for this poll's destination.
-            r.register_interface(t0, iface_handle, NODE_ADDR, Some(IFACE_INTERVAL), None)
+            let iface = r
+                .register_interface(t0, config)
                 .expect("register should succeed");
-            r.iface_table
-                .inner
-                .get_mut_by_key(&iface_handle)
-                .expect("interface should exist")
-                .config
-                .unicast_ihu = true;
-            r.add_neighbour(t0, iface_handle, NEIGHBOUR_1_ADDR.into(), None)
+            r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into(), None)
                 .expect("add_neighbour should succeed");
 
             // Pass 1: IHU wins the packet's unicast destination, blocking the mcast hello.
@@ -1138,8 +1135,7 @@ mod test {
         fn oversized_borrowed_buffer_is_trimmed_to_the_bytes_written() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let handle = iface_handle("iface_1");
-            r.register_interface(t0, handle, NODE_ADDR, Some(IFACE_INTERVAL), None)
+            r.register_interface(t0, iface_config("iface_1", NODE_ADDR))
                 .expect("register should succeed");
 
             // Far bigger than the eager mcast hello needs, so any untrimmed slack shows up as
@@ -1159,14 +1155,8 @@ mod test {
         fn undersized_buffer_write_failure_yields_set_timer_without_panicking() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            r.register_interface(
-                t0,
-                iface_handle("iface_1"),
-                NODE_ADDR,
-                Some(IFACE_INTERVAL),
-                None,
-            )
-            .expect("register should succeed");
+            r.register_interface(t0, iface_config("iface_1", NODE_ADDR))
+                .expect("register should succeed");
 
             // 4 bytes is exactly the packet header, leaving 0 remaining for any TLV.
             let mut buf = [0u8; 4];
@@ -1189,8 +1179,8 @@ mod test {
             let t0 = Instant::from_secs(0);
             // Deliberately not drained: the mcast hello is eager-due, so it is the write that
             // fails against the undersized buffer below.
-            let iface = iface_handle("iface_1");
-            r.register_interface(t0, iface, NODE_ADDR, Some(IFACE_INTERVAL), None)
+            let iface = r
+                .register_interface(t0, iface_config("iface_1", NODE_ADDR))
                 .expect("register should succeed");
 
             // Not yet due, and due sooner than the retry window. Ucast hellos are polled before
@@ -1223,7 +1213,7 @@ mod test {
 
             assert!(matches!(
                 err,
-                BabelError::IfaceTable(InterfaceTableError::NoInterfacesRegistered)
+                BabelError::IfaceTable(InterfaceError::NoInterfacesRegistered)
             ));
         }
 
@@ -1240,7 +1230,7 @@ mod test {
 
             assert!(matches!(
                 err,
-                BabelError::IfaceTable(InterfaceTableError::NoInterfacesRegistered)
+                BabelError::IfaceTable(InterfaceError::NoInterfacesRegistered)
             ));
         }
     }

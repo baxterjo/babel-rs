@@ -1,6 +1,8 @@
 use core::marker::PhantomData;
 
-use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTable};
+use crate::data_structures::interface::{
+    Interface, InterfaceConfig, InterfaceHandle, InterfaceTable,
+};
 use crate::data_structures::neighbour::{Neighbour, NeighbourIndex, NeighbourTable};
 use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
 use crate::data_structures::route::{Route, RouteTable};
@@ -96,36 +98,15 @@ where
     }
 
     /// Register a new interface with the router.
-    ///
-    /// Arguments:
-    ///
-    /// * `name`: Human readable name for debugging.
-    /// * `id`: Interface ID. This should be unique for each instantiation of the router.
-    /// * `hello_interval`: Optional multicast hello interval. `None` will use
-    ///   [`DEFAULT_MULTICAST_HELLO_INTERVAL_SECS`](crate::data_structures::interface::DEFAULT_MULTICAST_HELLO_INTERVAL_SECS)
-    /// * `update_interval`: Optional update interval. `None` will use
-    ///   [`DEFAULT_UPDATE_INTERVAL_SECS`](crate::data_structures::interface::DEFAULT_UPDATE_INTERVAL_SECS)
-    pub fn register_interface<I, IA>(
+    pub fn register_interface(
         &mut self,
         now: Instant,
-        id: I,
-        address: IA,
-        hello_interval: Option<Duration>,
-        update_interval: Option<Duration>,
+        config: InterfaceConfig<A>,
     ) -> Result<InterfaceHandle, BabelError<A>>
     where
-        I: Into<InterfaceHandle>,
-        IA: Into<Address<A>>,
+        A: AddressExt,
     {
-        let handle = id.into();
-        let address = address.into();
-        Ok(self.iface_table.register_interface(
-            now,
-            handle,
-            address,
-            hello_interval,
-            update_interval,
-        )?)
+        Ok(self.iface_table.register_interface(now, config)?)
     }
 
     /// Add a new neighbour to the router.

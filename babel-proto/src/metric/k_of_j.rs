@@ -1,7 +1,8 @@
 use super::{Cost, LinkCostCalculator, RxCost, TxCost};
-use crate::metric::IhuRatio;
 use crate::metric::distance::INFINITY;
+use crate::utils::DurationMultiplier;
 use crate::utils::bit_history::BitHistory;
+use crate::utils::time::DurationSpec;
 /// A link cost calculator that is best used for wired interfaces.
 ///
 /// This link is either considered up or down with no in between. This is determined by counting
@@ -30,6 +31,16 @@ impl KOutOfJ {
     /// [Appendix B](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.6)
     pub const SPEC_CONST: u16 = 96;
 
+    /// A calculator using the values suggested by
+    /// [Appendix B](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.6).
+    ///
+    /// Available as a constant so it can be referenced with a `'static` lifetime.
+    pub const SPEC: Self = Self {
+        cost_const: Self::SPEC_CONST,
+        k_val: Self::SPEC_K,
+        j_val: Self::SPEC_J,
+    };
+
     /// Create a new KOutOfJ link cost calculator.
     ///
     /// Arguments:
@@ -54,16 +65,16 @@ impl KOutOfJ {
 
 impl Default for KOutOfJ {
     fn default() -> Self {
-        Self {
-            cost_const: Self::SPEC_CONST,
-            k_val: Self::SPEC_K,
-            j_val: Self::SPEC_J,
-        }
+        Self::SPEC
     }
 }
 
 impl LinkCostCalculator for KOutOfJ {
-    fn rx_cost(&self, mcast_hello_history: BitHistory, ucast_hello_history: BitHistory) -> RxCost {
+    fn rx_cost(
+        &mut self,
+        mcast_hello_history: BitHistory,
+        ucast_hello_history: BitHistory,
+    ) -> RxCost {
         // If either of the hello histories meet or exceed k_val. Then the cost is finite.
         if mcast_hello_history.get_last(self.j_val.into()).count_ones() >= self.k_val.into()
             || ucast_hello_history.get_last(self.j_val.into()).count_ones() >= self.k_val.into()
@@ -74,7 +85,7 @@ impl LinkCostCalculator for KOutOfJ {
         }
     }
 
-    fn link_cost(&self, rx_cost: RxCost, tx_cost: TxCost) -> Cost {
+    fn link_cost(&mut self, rx_cost: RxCost, tx_cost: TxCost) -> Cost {
         if rx_cost.is_infinite() {
             Cost::INFINITY
         } else {
@@ -82,12 +93,12 @@ impl LinkCostCalculator for KOutOfJ {
         }
     }
 
-    fn hello_ihu_ratio(
-        &self,
+    fn ihu_interval(
+        &mut self,
         _mcast_hello_history: BitHistory,
         _ucast_hello_history: BitHistory,
-    ) -> IhuRatio {
-        IhuRatio::new(3, 1)
+    ) -> DurationSpec {
+        DurationSpec::Multiple(DurationMultiplier::new(3, 1))
     }
 }
 
@@ -100,7 +111,7 @@ mod test {
         let _ = env_logger::try_init();
         let mut mcast_history = BitHistory::default();
         let mut ucast_history = BitHistory::default();
-        let cost_calc = KOutOfJ::default();
+        let mut cost_calc = KOutOfJ::default();
 
         // record 3
         mcast_history.record_many(true, 3);

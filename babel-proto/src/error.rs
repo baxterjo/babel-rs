@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::data_structures::interface::{InterfaceHandle, InterfaceTableError};
+use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
 use crate::data_structures::neighbour::NeighbourTableError;
 use crate::data_types::address::AddressError;
 use crate::data_types::address_encoding::AddressEncodingError;
@@ -30,7 +30,7 @@ where
     #[error(transparent)]
     Len(#[from] LenError),
     #[error(transparent)]
-    IfaceTable(#[from] InterfaceTableError),
+    IfaceTable(#[from] InterfaceError),
     #[error(transparent)]
     NeighbourTable(#[from] NeighbourTableError<A>),
     #[error(transparent)]

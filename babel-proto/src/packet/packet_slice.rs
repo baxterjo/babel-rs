@@ -283,13 +283,13 @@ mod test {
             2,  // Version
             0, 10, // Body Length
             // Hello
-            4,  // Hello Type ID
-            6,  // Length
+            4, // Hello Type ID
+            6, // Length
             0x80, 0x00, // Flags
             0, 15, // Seqno
             0, 200, // Interval
-            0, // Pad1
-            0, // Pad1
+            0,   // Pad1
+            0,   // Pad1
         ];
 
         let packet_slice = PacketSlice::from_slice(packet).expect("Packet should parse");
@@ -329,8 +329,8 @@ mod test {
             2,  // Version
             0, 12, // Body Length
             // Hello
-            4,  // Hello Type ID
-            6,  // Length
+            4, // Hello Type ID
+            6, // Length
             0x80, 0x00, // Flags
             0, 15, // Seqno
             0, 200, // Interval
@@ -362,8 +362,8 @@ mod test {
             2,  // Version
             0, 27, // Body Length
             // Hello
-            4,  // Hello Type ID
-            6,  // Length
+            4, // Hello Type ID
+            6, // Length
             0x80, 0x00, // Flags
             0, 15, // Seqno
             0, 200, // Interval
@@ -377,10 +377,10 @@ mod test {
             0x80, 0x00, // Flags
             0,    // Truncated Seqno
             // IHU
-            5,  // IHU Type ID
-            6,  // Length
-            1,  // AE
-            0,  // Reserved
+            5, // IHU Type ID
+            6, // Length
+            1, // AE
+            0, // Reserved
             0x80, 0x00, // RX Cost
             0, 200, // Interval
         ];
