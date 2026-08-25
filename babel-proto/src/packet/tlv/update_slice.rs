@@ -2,7 +2,7 @@ use core::fmt::Debug;
 
 use crate::data_structures::seqno::SeqNo;
 use crate::data_types::Interval;
-use crate::metric::RxCost;
+use crate::metric::Metric;
 use crate::packet::error::layer::Layer;
 use crate::packet::error::len_error::LenError;
 use crate::packet::error::tlv_err::TlvError;
@@ -169,12 +169,12 @@ impl<'a> UpdateSlice<'a> {
     /// The sender's metric for this route. The value FFFF hexadecimal (infinity) means that this is
     /// a route retraction.
     // TODO: When I wire up cost calculation, this needs to change to Metric
-    pub fn metric(&self) -> RxCost {
+    pub fn metric(&self) -> Metric {
         unsafe {
             // SAFETY:
             // Safe as the constructor has checked to ensure the length of the slice is at minimum
             // TlvHeader::LEN (2) + Self::MIN_LEN (10).
-            RxCost::from_raw(get_unchecked_be_u16(
+            Metric::from_raw(get_unchecked_be_u16(
                 self.slice.as_ptr().add(TlvHeader::LEN + 8),
             ))
         }
@@ -360,7 +360,7 @@ mod test {
         assert_eq!(update.seqno(), SeqNo(42), "Incorrect seqno");
         assert_eq!(
             update.metric(),
-            RxCost::from_raw(0x0100),
+            Metric::from_raw(0x0100),
             "Incorrect metric"
         );
         assert_eq!(
@@ -457,7 +457,7 @@ mod test {
 
         assert_eq!(
             update.metric(),
-            RxCost::from_raw(0xFFFF),
+            Metric::from_raw(0xFFFF),
             "Incorrect metric"
         );
         assert!(update.metric().is_infinite(), "Metric should be infinite");
