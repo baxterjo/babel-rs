@@ -11,7 +11,7 @@ use core::fmt::Formatter;
 // to retain a window of history larger than the value. This implementation uses usize to get the
 // largest possible history based on compilation target.
 #[derive(Clone, Copy, Default)]
-pub struct BitHistory(usize);
+pub struct BitHistory(u32);
 
 impl Debug for BitHistory {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -30,7 +30,7 @@ impl defmt::Format for BitHistory {
 
 impl BitHistory {
     pub(crate) fn record(&mut self, value: bool) {
-        self.0 = (self.0 << 1) | (value as usize);
+        self.0 = (self.0 << 1) | (value as u32);
     }
 
     pub(crate) fn record_many(&mut self, value: bool, number: usize) {
@@ -73,13 +73,13 @@ mod test {
 
     #[test]
     fn truncate_keeps_lsb() {
-        let big_val = BitHistory(0x123456789ABCD);
+        let big_val = BitHistory(0x6789ABCD);
         assert_eq!(big_val.read(), 0xABCD)
     }
 
     #[test]
     fn get_last_keeps_expected_bits() {
-        let big_val = BitHistory(0x123456789ABCD);
+        let big_val = BitHistory(0x6789ABCD);
         assert_eq!(big_val.get_last(4), 0xD)
     }
 }
