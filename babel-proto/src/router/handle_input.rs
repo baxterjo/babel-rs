@@ -477,7 +477,10 @@ mod test {
         // Recording the hello advances the expected multicast seqno, so this proves the hello
         // behind the bad IHU was still processed.
         assert_eq!(
-            neighbour.mcast_hello_info.expected_seqno,
+            neighbour
+                .mcast_hello_info
+                .expected_seqno
+                .expect("Should have seqno"),
             SeqNo(1),
             "the hello behind the bad IHU should still have been handled"
         );
