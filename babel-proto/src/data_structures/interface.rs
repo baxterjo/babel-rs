@@ -6,7 +6,7 @@ use thiserror::Error;
 use super::seqno::SeqNo;
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
-use crate::utils::rx_cost::RxCost;
+use crate::utils::distance::RxCost;
 use crate::utils::short_id::fmt_short_id;
 use crate::utils::storage::{InternallyKeyed, ManagedSliceExt};
 use crate::utils::timer::{Timer, TimerError};
@@ -186,7 +186,7 @@ impl<A: AddressExt> InterfaceConfig<A> {
         Self {
             unicast_ihu: false,
             address,
-            starting_rx_cost: RxCost(10),
+            starting_rx_cost: RxCost::from_raw(10),
         }
     }
 }

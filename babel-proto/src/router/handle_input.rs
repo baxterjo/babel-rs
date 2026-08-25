@@ -163,6 +163,7 @@ mod test {
 
     use super::*;
     use crate::data_structures::neighbour::NeighbourIndex;
+    use crate::data_structures::seqno::SeqNo;
     use crate::data_types::RouterId;
     use crate::extension::NoExtension;
     use crate::packet::packet_header::BabelPacketHeader;
@@ -170,7 +171,6 @@ mod test {
     use crate::packet::tlv::hello_slice::HelloFlags;
     use crate::utils::Duration;
     use crate::utils::distance::TxCost;
-    use crate::utils::rx_cost::RxCost;
 
     // Long enough not to fire again mid-test, still inside the Timer bound.
     const IFACE_INTERVAL: Duration = Duration::from_secs(600);
@@ -356,12 +356,12 @@ mod test {
 
         assert_eq!(
             tx_cost(&r, iface, NEIGHBOUR_1_ADDR),
-            RxCost::from_raw(77),
+            TxCost::from_raw(77),
             "neighbour 1 sent the IHU, so the rxcost is our cost toward neighbour 1"
         );
         assert_eq!(
             tx_cost(&r, iface, NEIGHBOUR_2_ADDR),
-            RxCost(u16::MAX),
+            TxCost::INFINITY,
             "neighbour 2 had nothing to do with this packet"
         );
     }
@@ -391,7 +391,7 @@ mod test {
 
         assert_eq!(
             tx_cost(&r, iface, NEIGHBOUR_1_ADDR),
-            RxCost(11),
+            TxCost::from_raw(11),
             "only the IHU naming our own address should have been applied"
         );
         assert!(
@@ -418,7 +418,7 @@ mod test {
         )
         .expect("handle_input should succeed");
 
-        assert_eq!(tx_cost(&r, iface, NEIGHBOUR_1_ADDR), RxCost(33));
+        assert_eq!(tx_cost(&r, iface, NEIGHBOUR_1_ADDR), TxCost::from_raw(33));
     }
 
     #[test]
@@ -474,15 +474,16 @@ mod test {
             .get_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
             .expect("neighbour should exist");
 
-        // Only `handle_hello` arms the pending IHU timer, so this proves the hello behind the
-        // bad IHU was still processed.
-        assert!(
-            neighbour.pending.ihu_timer.is_some(),
+        // Recording the hello advances the expected multicast seqno, so this proves the hello
+        // behind the bad IHU was still processed.
+        assert_eq!(
+            neighbour.mcast_hello_info.expected_seqno,
+            SeqNo(1),
             "the hello behind the bad IHU should still have been handled"
         );
         assert_eq!(
             neighbour.tx_cost,
-            RxCost(u16::MAX),
+            TxCost::INFINITY,
             "the rejected IHU must not have applied its rxcost"
         );
     }
@@ -496,7 +497,7 @@ mod test {
         let iface = drained_iface(&mut r, t0, "iface_1");
 
         for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
-            r.add_neighbour(t0, iface, addr.into(), Duration::from_secs(10), None)
+            r.add_neighbour(t0, iface, addr.into(), None)
                 .expect("add_neighbour should succeed");
         }
 
@@ -508,7 +509,7 @@ mod test {
         )
         .expect("handle_input should succeed");
 
-        assert_eq!(tx_cost(&r, iface, NEIGHBOUR_1_ADDR), RxCost(42));
-        assert_eq!(tx_cost(&r, iface, NEIGHBOUR_2_ADDR), RxCost(u16::MAX));
+        assert_eq!(tx_cost(&r, iface, NEIGHBOUR_1_ADDR), TxCost::from_raw(42));
+        assert_eq!(tx_cost(&r, iface, NEIGHBOUR_2_ADDR), TxCost::INFINITY);
     }
 }

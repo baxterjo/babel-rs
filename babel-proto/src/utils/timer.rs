@@ -16,8 +16,6 @@ pub struct Timer {
 pub enum TimerError {
     #[error("The duration of a timer cannot be zero.")]
     DurationCannotBeZero,
-    #[error("The duration of a timer cannot be larger than {max} centiseconds", max = u16::MAX)]
-    DurationTooLarge,
 }
 
 impl Timer {
@@ -31,9 +29,6 @@ impl Timer {
     pub fn new(now: Instant, duration: Duration) -> Result<Self, TimerError> {
         if duration.as_micros() == 0 {
             return Err(TimerError::DurationCannotBeZero);
-        }
-        if duration.as_centis() > u16::MAX.into() {
-            return Err(TimerError::DurationTooLarge);
         }
 
         Ok(Self {

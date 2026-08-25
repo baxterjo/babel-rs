@@ -383,7 +383,11 @@ impl DurationMultiplier {
 impl ops::Mul<DurationMultiplier> for Duration {
     type Output = Duration;
     fn mul(self, rhs: DurationMultiplier) -> Self::Output {
-        Duration::from_micros((self.as_micros() * rhs.num as u64) / rhs.den as u64)
+        Duration::from_micros(
+            self.as_micros()
+                .saturating_mul(rhs.num.into())
+                .saturating_div(rhs.den.into()),
+        )
     }
 }
 

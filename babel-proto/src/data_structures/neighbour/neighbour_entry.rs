@@ -98,9 +98,9 @@ pub struct Neighbour<A: AddressExt> {
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct RxHelloInfo {
-    history: BitHistory,
-    expected_seqno: SeqNo,
-    timer: Timer,
+    pub(crate) history: BitHistory,
+    pub(crate) expected_seqno: SeqNo,
+    pub(crate) timer: Timer,
 }
 
 impl RxHelloInfo {
@@ -120,29 +120,41 @@ impl RxHelloInfo {
         }
     }
 
+    /// `advertised_interval` is the raw Interval from the Hello; the jitter margin is applied here
+    /// so that callers cannot forget it.
     pub(crate) fn new_from_hello(
         now: Instant,
         received_seqno: SeqNo,
-        hello_interval: Duration,
+        advertised_interval: Duration,
     ) -> Result<Self, TimerError> {
         let mut out = Self {
             history: BitHistory::default(),
-            expected_seqno: received_seqno,
-            timer: Timer::new(now, hello_interval)?,
+            // This hello is about to be recorded below, so the next one this neighbour sends is
+            // the one being waited on.
+            expected_seqno: received_seqno + 1,
+            timer: Timer::new(now, advertised_interval * HELLO_INTERVAL_MULTIPLIER)?,
         };
         // Since this is originated from a hello, the history needs at least one recorded hello.
         out.history.record(true);
         Ok(out)
     }
-    /// Records a missed hello (if applicable) and returns the time remaining till the next tick.
+
+    /// Records a missed hello (if applicable) and returns the time remaining until it fires.
     fn poll_tick(&mut self, now: Instant) -> Duration {
+        // If this timer has not fired, return the duration it has remaining.
         if let Some(remaining) = self.timer.time_remaining(now) {
             return remaining;
-        } else {
-            self.history.record(false);
-            self.timer.restart(now);
-            self.timer.duration()
         }
+
+        // Appendix A.1: "the local node adds a 0 bit to the corresponding Hello history, and
+        // increments the expected Hello number". Without the increment the hello this timeout
+        // stands in for would be charged twice — once here, and again as a seqno gap when the
+        // neighbour's next hello arrives.
+        self.history.record(false);
+        self.expected_seqno += 1;
+
+        self.timer.restart(now);
+        self.timer.duration()
     }
 
     fn record_hello(
@@ -151,17 +163,32 @@ impl RxHelloInfo {
         received_seqno: SeqNo,
         new_interval: Option<Duration>,
     ) -> Result<(), RxHelloInfoErr> {
-        let abs_diff = self.expected_seqno.abs_diff(received_seqno);
-        if abs_diff > Self::MISSED_HELLO_MAX {
-            // In this instance the entire neighbour entry needs to be flushed and re-made.
-            return Err(RxHelloInfoErr::BigSeqnoDiff(abs_diff));
+        //  Forward distance between received and expected across a seqno wrap
+        let forward = (received_seqno - self.expected_seqno).0;
+        //  Backward distance between received and expected across a seqno wrap
+        let back = (self.expected_seqno - received_seqno).0;
+        // The minimum of the two is the actual distance between received and expected.
+        let diff = forward.min(back);
+
+        if diff > Self::MISSED_HELLO_MAX {
+            return Err(RxHelloInfoErr::BigSeqnoDiff(diff));
         }
+
         if self.expected_seqno < received_seqno {
-            self.history.record_many(false, abs_diff.into());
+            // "the sending node has decreased its Hello interval, and some Hellos were lost; the
+            // receiving node adds (nr - ne) 0 bits to the Hello history"
+            self.history.record_many(false, forward.into());
         } else if self.expected_seqno > received_seqno {
-            self.history.undo(abs_diff.into());
+            // "the sending node has increased its Hello interval without our noticing; the
+            // receiving node removes the last (ne - nr) entries from this neighbour's Hello
+            // history"
+            self.history.undo(back.into());
         }
         self.history.record(true);
+
+        // The spec dictates that the expected seqno be set to the receieved seqno + 1 regardless
+        // of the relative value of the two seqnos.
+        self.expected_seqno = received_seqno + 1;
 
         if let Some(new_interval) = new_interval {
             self.timer
@@ -272,14 +299,27 @@ impl<A: AddressExt> Neighbour<A> {
         });
         self.pending.ihu_due = true;
 
-        // Now process the incoming hello
+        // Now process the incoming hello. An unscheduled Hello (Interval 0) says nothing about
+        // when the next one is due, so the interface default stands in.
         let timer_dur = if interval.is_zero() {
-            DEFAULT_MULTICAST_HELLO_INTERVAL * HELLO_INTERVAL_MULTIPLIER
+            DEFAULT_MULTICAST_HELLO_INTERVAL
         } else {
             interval.into()
         };
-        let new_rx_info = RxHelloInfo::new_from_hello(now, seqno, timer_dur)
-            .expect("Timer interval was verified non-zero above");
+        // A peer controls this value, and the jitter margin can push a legal Interval past what a
+        // `Timer` can hold, so the out-of-range case falls back to the default rather than
+        // unwrapping into a remote panic.
+        let new_rx_info = match RxHelloInfo::new_from_hello(now, seqno, timer_dur) {
+            Ok(info) => info,
+            Err(e) => {
+                b_debug!(
+                    "Advertised hello interval unusable, falling back to default - {}",
+                    e
+                );
+                RxHelloInfo::new_from_hello(now, seqno, DEFAULT_MULTICAST_HELLO_INTERVAL)
+                    .expect("the default hello interval is always representable")
+            }
+        };
 
         if flags.is_unicast() {
             self.ucast_hello_info = Some(new_rx_info)
@@ -351,10 +391,6 @@ mod test {
     use crate::packet::tlv::hello_slice::HelloFlags;
     use crate::packet::tlv::tlv_slice::TlvSlice;
 
-    /// The largest interval a Timer will accept. The Interval field on the wire is 16 bits of
-    /// centiseconds, so this is also the largest interval a peer can legally advertise.
-    const MAX_TIMER: Duration = Duration::from_centis(u16::MAX as u64);
-
     fn hello_tlv(unicast: bool, seqno: u16, interval_centis: u16) -> [u8; 8] {
         let flags = HelloFlags::new(unicast).to_wire();
         let seqno = seqno.to_be_bytes();
@@ -385,70 +421,8 @@ mod test {
         )
     }
 
-    //  ___ _  _ _____ ___ _____   ___   _      ___  ___  _   _ _  _ ___  ___
-    // |_ _| \| |_   _| __| _ \ \ / /_\ | |    | _ )/ _ \| | | | \| |   \/ __|
-    //  | || .` | | | | _||   /\ V / _ \| |__  | _ \ (_) | |_| | .` | |) \__ \
-    // |___|_|\_| |_| |___|_|_\ \_/_/ \_\____| |___/\___/ \___/|_|\_|___/|___/
-
-    /// The IHU interval is derived by doubling the neighbour's Hello interval, but the Interval
-    /// field is 16 bits, so a peer may legally advertise up to `u16::MAX` centiseconds — double
-    /// that does not fit in a `Timer`. The doubling has to be clamped before it reaches
-    /// `Timer::set_duration`, whose error is unwrapped on the assumption that bounds were
-    /// pre-checked. A peer on the link controls this value, so an unclamped doubling is a remote
-    /// panic.
-    #[test]
-    fn hello_interval_that_doubles_past_the_timer_bound_is_clamped() {
-        let now = Instant::from_secs(0);
-        let mut n = neighbour(now);
-
-        // The first hello takes the `None` branch and arms `pending.ihu_timer`, so the second
-        // one goes through `set_duration` rather than `new_eager`.
-        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
-        assert!(
-            n.pending.ihu_timer.is_some(),
-            "the first hello should arm the IHU timer"
-        );
-
-        // 32768 centis is the smallest interval whose double overflows the timer's bound.
-        n.handle_hello(now, hello(&hello_tlv(false, 1, 32_768)));
-
-        let timer = n
-            .pending
-            .ihu_timer
-            .expect("the IHU timer should still be set");
-        assert_eq!(timer.duration(), MAX_TIMER);
-    }
-
-    #[test]
-    fn maximum_advertised_hello_interval_is_clamped() {
-        let now = Instant::from_secs(0);
-        let mut n = neighbour(now);
-
-        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
-        n.handle_hello(now, hello(&hello_tlv(false, 1, u16::MAX)));
-
-        let timer = n
-            .pending
-            .ihu_timer
-            .expect("the IHU timer should still be set");
-        assert_eq!(timer.duration(), MAX_TIMER);
-    }
-
-    /// Below the doubling boundary the interval must pass through untouched — the clamp should
-    /// not be quietly capping ordinary intervals.
-    #[test]
-    fn hello_interval_below_the_boundary_doubles_without_clamping() {
-        let now = Instant::from_secs(0);
-        let mut n = neighbour(now);
-
-        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
-        n.handle_hello(now, hello(&hello_tlv(false, 1, 30_000)));
-
-        let timer = n
-            .pending
-            .ihu_timer
-            .expect("the IHU timer should still be set");
-        assert_eq!(timer.duration(), Duration::from_centis(60_000));
+    fn mcast_history(n: &Neighbour<NoExtension>) -> BitHistory {
+        n.mcast_hello_info.history
     }
 
     //  _  _ ___ ___ _____ ___  _____   __
@@ -456,18 +430,22 @@ mod test {
     // | __ || |\__ \ | || (_) |   /\ V /
     // |_||_|___|___/ |_| \___/|_|_\ |_|
 
+    /// A neighbour that has never been heard from has an empty history — it has proved nothing
+    /// about the link yet — and each hello it does send earns exactly one bit.
     #[test]
-    fn first_hello_starts_from_a_full_history() {
+    fn a_new_neighbour_earns_its_history_one_hello_at_a_time() {
         let now = Instant::from_secs(0);
         let mut n = neighbour(now);
 
+        assert_eq!(
+            mcast_history(&n).read(),
+            0,
+            "nothing has been heard from this neighbour yet"
+        );
+
         n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
 
-        assert_eq!(
-            mcast_history(&n).count(),
-            16,
-            "a new neighbour starts with a clean history for hysteresis"
-        );
+        assert_eq!(mcast_history(&n).read(), 0b1);
     }
 
     #[test]
@@ -479,9 +457,15 @@ mod test {
             n.handle_hello(now, hello(&hello_tlv(false, seqno, 100)));
         }
 
-        assert_eq!(mcast_history(&n).count(), 16, "no hellos were missed");
+        assert_eq!(
+            mcast_history(&n).read(),
+            0b1111_1111,
+            "eight hellos in order, no misses"
+        );
     }
 
+    /// The count alone cannot tell "one miss" from "three": both leave the same number of ones in
+    /// the window. The bit pattern is what pins that a gap costs one zero per skipped hello.
     #[test]
     fn a_gap_in_seqnos_records_one_miss_per_skipped_hello() {
         let now = Instant::from_secs(0);
@@ -492,9 +476,9 @@ mod test {
         n.handle_hello(now, hello(&hello_tlv(false, 4, 100)));
 
         assert_eq!(
-            mcast_history(&n).count(),
-            13,
-            "three missed hellos should shift in three zeros"
+            mcast_history(&n).read(),
+            0b1_000_1,
+            "three missed hellos should shift in exactly three zeros"
         );
     }
 
@@ -508,7 +492,7 @@ mod test {
 
         n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
         n.handle_hello(now, hello(&hello_tlv(false, 4, 100)));
-        assert_eq!(mcast_history(&n).count(), 13, "three hellos were missed");
+        assert_eq!(mcast_history(&n).count(), 2, "three hellos were missed");
 
         // Sixteen clean hellos are enough to shift every zero back out of the window.
         for seqno in 5..21 {
@@ -522,34 +506,41 @@ mod test {
         );
     }
 
-    /// `seqno - expected_seqno` wraps, so a hello that arrives out of order produces a gap near
-    /// 65535 rather than a negative one. Charging that to the history would wipe the whole window
-    /// on a single duplicate packet.
+    /// [Appendix A.1](https://datatracker.ietf.org/doc/html/rfc8966#name-maintaining-hello-history):
+    /// a hello whose seqno is *smaller* than expected means the sending node increased its Hello
+    /// interval without our noticing. The zeros shifted in for the hellos we thought were missed
+    /// were never really missed, so the last `ne - nr` entries are removed ("undo history").
+    ///
+    /// `ne` is then set to `nr + 1` like in every other case, which is what resynchronises us
+    /// with the now-slower sender rather than leaving us permanently ahead of it.
     #[test]
-    fn a_replayed_hello_does_not_damage_the_history() {
+    fn a_hello_behind_the_expected_seqno_undoes_history_and_resyncs() {
         let now = Instant::from_secs(0);
         let mut n = neighbour(now);
 
         for seqno in 0..3 {
             n.handle_hello(now, hello(&hello_tlv(false, seqno, 100)));
         }
-        assert_eq!(mcast_history(&n).count(), 16, "no hellos were missed");
+        assert_eq!(mcast_history(&n).read(), 0b111, "no hellos were missed");
+        assert_eq!(n.mcast_hello_info.expected_seqno, SeqNo(3));
 
-        // Seqno 1 was already accounted for two hellos ago.
+        // Two behind: the last two entries are undone, then this hello is appended.
         n.handle_hello(now, hello(&hello_tlv(false, 1, 100)));
         assert_eq!(
-            mcast_history(&n).count(),
-            16,
-            "a duplicate hello is not a window of missed hellos"
+            mcast_history(&n).read(),
+            0b11,
+            "(ne - nr) == 2 entries removed, then a 1 bit appended"
+        );
+        assert_eq!(
+            n.mcast_hello_info.expected_seqno,
+            SeqNo(2),
+            "ne is set to nr + 1 in every case, resyncing with the slower sender"
         );
 
-        // The neighbour is still expecting seqno 3, so its arrival is not a gap either.
-        n.handle_hello(now, hello(&hello_tlv(false, 3, 100)));
-        assert_eq!(
-            mcast_history(&n).count(),
-            16,
-            "the expected seqno should not have been rewound by the duplicate"
-        );
+        // Resynchronised, so the sender's next hello is in order and costs nothing.
+        n.handle_hello(now, hello(&hello_tlv(false, 2, 100)));
+        assert_eq!(mcast_history(&n).read(), 0b111);
+        assert_eq!(n.mcast_hello_info.expected_seqno, SeqNo(3));
     }
 
     #[test]
@@ -562,20 +553,114 @@ mod test {
         // A gap on the multicast side only.
         n.handle_hello(now, hello(&hello_tlv(false, 4, 100)));
 
-        let NeighbourInitState::HelloReceived(info) = n.state else {
-            panic!("expected the neighbour to have heard a hello");
-        };
         assert_eq!(
-            info.mcast_hello
-                .expect("multicast recorded")
-                .history
-                .count(),
-            13
+            mcast_history(&n).read(),
+            0b1_000_1,
+            "the multicast side saw three missed hellos"
         );
         assert_eq!(
-            info.ucast_hello.expect("unicast recorded").history.count(),
-            16,
+            n.ucast_hello_info
+                .expect("a unicast hello was received")
+                .history
+                .read(),
+            0b1,
             "a multicast gap must not be charged against the unicast history"
         );
+    }
+
+    /// A unicast hello must not create or disturb the multicast history, and vice versa — they are
+    /// separate reachability measurements over the same link.
+    #[test]
+    fn a_unicast_hello_alone_leaves_the_multicast_history_untouched() {
+        let now = Instant::from_secs(0);
+        let mut n = neighbour(now);
+
+        n.handle_hello(now, hello(&hello_tlv(true, 0, 100)));
+
+        assert_eq!(mcast_history(&n).read(), 0);
+        assert_eq!(
+            n.ucast_hello_info
+                .expect("a unicast hello was received")
+                .history
+                .read(),
+            0b1
+        );
+    }
+
+    /// The window is 16 wide and seqnos are modulo 2^16, so an ordinary gap that straddles the
+    /// wrap is still an ordinary gap. Measuring it with a non-modular distance reads 65534 -> 2 as
+    /// a jump of 65532 and flushes a perfectly healthy neighbour on every wrap.
+    #[test]
+    fn a_gap_across_the_seqno_wrap_is_an_ordinary_gap() {
+        let now = Instant::from_secs(0);
+        let mut n = neighbour(now);
+
+        // Resynchronise onto a seqno just below the wrap.
+        n.handle_hello(now, hello(&hello_tlv(false, 65_533, 100)));
+        assert_eq!(mcast_history(&n).read(), 0b1);
+        assert_eq!(n.mcast_hello_info.expected_seqno, SeqNo(65_534));
+
+        // 65534 and 65535 were lost; 0 arrives on the other side of the wrap.
+        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+
+        assert_eq!(
+            mcast_history(&n).read(),
+            0b1_00_1,
+            "two missed hellos across the wrap, not a flush"
+        );
+        assert_eq!(n.mcast_hello_info.expected_seqno, SeqNo(1));
+    }
+
+    /// The mirror image: an undo whose distance straddles the wrap.
+    #[test]
+    fn a_rewind_across_the_seqno_wrap_undoes_history() {
+        let now = Instant::from_secs(0);
+        let mut n = neighbour(now);
+
+        n.handle_hello(now, hello(&hello_tlv(false, 65_534, 100)));
+        n.handle_hello(now, hello(&hello_tlv(false, 65_535, 100)));
+        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+        assert_eq!(mcast_history(&n).read(), 0b111);
+        assert_eq!(n.mcast_hello_info.expected_seqno, SeqNo(1));
+
+        // Two behind, back across the wrap.
+        n.handle_hello(now, hello(&hello_tlv(false, 65_535, 100)));
+
+        assert_eq!(mcast_history(&n).read(), 0b11, "two entries undone");
+        assert_eq!(n.mcast_hello_info.expected_seqno, SeqNo(0));
+    }
+
+    //  ___ ___ ___  ___  _  _  ___
+    // / __| __/ _ \| _ \| \| |/ _ \
+    // \__ \ _| (_) |   /| .` | (_) |
+    // |___/___\__\_\_|_\|_|\_|\___/
+    //
+    //  ___ _    _   _ ___ _  _
+    // | __| |  | | | / __| || |
+    // | _|| |__| |_| \__ \ __ |
+    // |_| |____|\___/|___/_||_|
+
+    /// A seqno further than `MISSED_HELLO_MAX` from the expected one is not a measurable gap — the
+    /// history window is only 16 wide, so charging it would say nothing useful. The neighbour is
+    /// resynchronised from the hello instead of accumulating nonsense.
+    #[test]
+    fn a_seqno_jump_past_the_window_resynchronises_the_neighbour() {
+        let now = Instant::from_secs(0);
+        let mut n = neighbour(now);
+
+        for seqno in 0..4 {
+            n.handle_hello(now, hello(&hello_tlv(false, seqno, 100)));
+        }
+        assert_eq!(mcast_history(&n).read(), 0b1111);
+
+        // Well past the 16-hello window the history can represent.
+        n.handle_hello(now, hello(&hello_tlv(false, 4 + 100, 100)));
+
+        assert_eq!(
+            mcast_history(&n).read(),
+            0b1,
+            "the history restarts from the resynchronising hello"
+        );
+        assert_eq!(n.mcast_hello_info.expected_seqno, SeqNo(105));
     }
 }
