@@ -18,7 +18,7 @@ pub trait LinkCostCalculator: Debug {
     /// Calculates the RX cost as a function of the hello histories from hello's received from a
     /// node.
     ///
-    /// A result of 0xFFFF is considered "infinite" and semantically means "this node cannot be
+    /// A result of `0xFFFF` is considered "infinite" and semantically means "this node cannot be
     /// reached"
     ///
     /// Since nodes do not necessarily send periodic Unicast Hellos but do usually send periodic
@@ -53,7 +53,7 @@ pub trait LinkCostCalculator: Debug {
     /// Arguments:
     /// * `rx_cost`: This node's own calculated rx_cost as defined by [`Self::rx_cost`]
     /// * `tx_cost`: The tx_cost reported by this neighbour in its IHU TLV.
-    fn link_cost(rx_cost: RxCost, tx_cost: TxCost) -> Cost;
+    fn link_cost(&self, rx_cost: RxCost, tx_cost: TxCost) -> Cost;
 }
 
 /// The ratio of IHU's per multicast hello for this interface.

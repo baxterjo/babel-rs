@@ -272,22 +272,26 @@ impl<A: AddressExt> Neighbour<A> {
     }
 
     /// Performs the "flush and re-create" function for when the diff between expected seqno and
-    /// actual is greater that 16
+    /// actual is greater than 16
     fn hello_seqno_flush(&mut self, now: Instant, hello: HelloSlice<'_>) {
         let flags = hello.flags();
         let seqno = hello.seqno();
         let interval = hello.interval();
 
         // Reset everything to default, keeping original settings for outgoing timers.
-        self.mcast_hello_info = RxHelloInfo::new_default(now);
-        self.ucast_hello_info = RxHelloInfo::new_default(now);
+        //
+        // Reset tx cost to infinite, this will be set on the next received IHU from this
+        // neighbour.
         self.tx_cost = TxCost::INFINITY;
+        // Reset IHU timer.
         self.ihu_timer = Timer::new_unchecked(
             now,
             DEFAULT_MULTICAST_HELLO_INTERVAL
                 * DEFAULT_IHU_RATIO_INNER
                 * DEFAULT_HOLD_TIME_MULTIPLIER,
         );
+
+        // Reset outgoing ucast hello info if it exists.
         self.pending.ucast_hello = self.pending.ucast_hello.map(|mut utx| {
             utx.timer.restart(now);
             TxHelloInfo {
@@ -295,6 +299,7 @@ impl<A: AddressExt> Neighbour<A> {
                 timer: utx.timer,
             }
         });
+        // Send an immediate IHU on the next poll_output that hits this neighbour.
         self.pending.ihu_due = true;
 
         // Now process the incoming hello. An unscheduled Hello (Interval 0) says nothing about
@@ -304,25 +309,20 @@ impl<A: AddressExt> Neighbour<A> {
         } else {
             interval.into()
         };
-        // A peer controls this value, and the jitter margin can push a legal Interval past what a
-        // `Timer` can hold, so the out-of-range case falls back to the default rather than
-        // unwrapping into a remote panic.
-        let new_rx_info = match RxHelloInfo::new_from_hello(now, seqno, timer_dur) {
-            Ok(info) => info,
-            Err(e) => {
-                b_debug!(
-                    "Advertised hello interval unusable, falling back to default - {}",
-                    e
-                );
-                RxHelloInfo::new_from_hello(now, seqno, DEFAULT_MULTICAST_HELLO_INTERVAL)
-                    .expect("the default hello interval is always representable")
-            }
-        };
+
+        self.mcast_hello_info.history.flush();
+        self.ucast_hello_info.history.flush();
 
         if flags.is_unicast() {
-            self.ucast_hello_info = new_rx_info
+            self.ucast_hello_info.expected_seqno = seqno + 1;
+            self.ucast_hello_info.timer = Timer::new(now, timer_dur)
+                .unwrap_or(Timer::new_unchecked(now, DEFAULT_MULTICAST_HELLO_INTERVAL));
+            self.ucast_hello_info.history.record(true);
         } else {
-            self.mcast_hello_info = new_rx_info
+            self.mcast_hello_info.expected_seqno = seqno + 1;
+            self.mcast_hello_info.timer = Timer::new(now, timer_dur)
+                .unwrap_or(Timer::new_unchecked(now, DEFAULT_MULTICAST_HELLO_INTERVAL));
+            self.mcast_hello_info.history.record(true);
         }
     }
 

@@ -250,7 +250,7 @@ impl Add<Metric> for Cost {
             // Saturate at INFINITY - 1 rather than wrapping, so an
             // overflowing sum reads as "infinite" instead of a bogus
             // small metric.
-            Metric(self.0.saturating_add(neighbour_metric.0).min(INFINITY - 1))
+            Metric(self.0.saturating_add(neighbour_metric.0).min(INFINITY))
         }
     }
 }

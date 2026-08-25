@@ -71,7 +71,7 @@ impl LinkCostCalculator for KOutOfJ {
         }
     }
 
-    fn link_cost(rx_cost: RxCost, tx_cost: TxCost) -> Cost {
+    fn link_cost(&self, rx_cost: RxCost, tx_cost: TxCost) -> Cost {
         if rx_cost.is_infinite() {
             Cost::INFINITY
         } else {
