@@ -194,8 +194,11 @@ impl RxHelloInfo {
         self.expected_seqno = Some(received_seqno + 1);
 
         if let Some(new_interval) = new_interval {
-            self.timer
-                .set_tick_duration(new_interval * HELLO_INTERVAL_MULTIPLIER)?;
+            // This will only fail if the new interval is zero, in which case we just keep the old
+            // timer value
+            let _ = self
+                .timer
+                .set_tick_duration(new_interval * HELLO_INTERVAL_MULTIPLIER);
         }
 
         self.timer.restart(now);
