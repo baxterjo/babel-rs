@@ -2,6 +2,7 @@ use core::fmt::Debug;
 
 use crate::data_structures::seqno::SeqNo;
 use crate::data_types::Interval;
+use crate::metric::RxCost;
 use crate::packet::error::layer::Layer;
 use crate::packet::error::len_error::LenError;
 use crate::packet::error::tlv_err::TlvError;
@@ -10,7 +11,6 @@ use crate::packet::tlv::TypedTlv;
 use crate::packet::tlv::tlv_header::TlvHeader;
 use crate::packet::utils::get_unchecked_be_u16;
 use crate::utils::Duration;
-use crate::utils::distance::RxCost;
 
 /// Update TLV as defined in
 /// [Section 4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update)

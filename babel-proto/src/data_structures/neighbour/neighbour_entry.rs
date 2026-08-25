@@ -7,9 +7,9 @@ use crate::data_structures::seqno::SeqNo;
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::metric::IhuRatio;
+use crate::metric::distance::TxCost;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
 use crate::utils::bit_history::BitHistory;
-use crate::utils::distance::TxCost;
 use crate::utils::timer::{Timer, TimerError};
 use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed};
 

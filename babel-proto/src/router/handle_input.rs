@@ -166,11 +166,11 @@ mod test {
     use crate::data_structures::seqno::SeqNo;
     use crate::data_types::RouterId;
     use crate::extension::NoExtension;
+    use crate::metric::TxCost;
     use crate::packet::packet_header::BabelPacketHeader;
     use crate::packet::tlv::TypedTlv;
     use crate::packet::tlv::hello_slice::HelloFlags;
     use crate::utils::Duration;
-    use crate::utils::distance::TxCost;
 
     // Long enough not to fire again mid-test, still inside the Timer bound.
     const IFACE_INTERVAL: Duration = Duration::from_secs(600);

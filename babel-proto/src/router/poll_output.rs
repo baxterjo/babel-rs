@@ -10,7 +10,7 @@ use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
 use crate::utils::destination::{Claim, DestAddr};
 use crate::utils::storage::ManagedSliceExt;
-use crate::utils::{Duration, DurationMultiplier, Instant, ManagedSlice};
+use crate::utils::{Duration, Instant, ManagedSlice};
 
 /// How long to wait before polling again after a TLV write failed.
 ///
@@ -475,10 +475,10 @@ mod test {
     use crate::data_structures::seqno::SeqNo;
     use crate::data_types::{Address, RouterId};
     use crate::extension::NoExtension;
+    use crate::metric::RxCost;
     use crate::output::TransmitDestination;
     use crate::packet::packet_slice::PacketSlice;
     use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, TypedTlv};
-    use crate::utils::distance::RxCost;
     use crate::utils::storage::ManagedSliceExt;
     use crate::utils::timer::Timer;
 

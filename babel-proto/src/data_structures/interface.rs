@@ -6,7 +6,7 @@ use thiserror::Error;
 use super::seqno::SeqNo;
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
-use crate::utils::distance::RxCost;
+use crate::metric::RxCost;
 use crate::utils::short_id::fmt_short_id;
 use crate::utils::storage::{InternallyKeyed, ManagedSliceExt};
 use crate::utils::timer::{Timer, TimerError};

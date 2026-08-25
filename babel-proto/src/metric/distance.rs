@@ -4,16 +4,6 @@
 //! All four share the same wire representation a 16-bit unsigned
 //! integer where `0xFFFF` means "infinite" but they are semantically distinct quantities that are
 //! easy to get mixed up.
-//!
-//! ```text
-//! RxCost (B's view of the link B<-A)
-//!     --[sent in an IHU]-->
-//! TxCost (A's view of the link A->B)
-//!     --[local policy]-->
-//! Cost C(A,B)
-//!     --[M(c, m) = c + m]-->
-//! Metric (combined with a neighbour's advertised Metric)
-//! ```
 
 use core::convert::TryFrom;
 use core::fmt;
@@ -122,8 +112,6 @@ distance_newtype! {
 ///
 /// The local, policy-defined combination of RxCost and TxCost for a single link.
 /// MUST be strictly positive when finite.
-///
-/// include_mmd!("docs/cost_calc.mmd")
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Cost(u16);
 
@@ -203,9 +191,7 @@ impl fmt::Display for NonPositiveCost {
 //
 // These don't describe the same node's data: an IHU carries A's
 // rxcost for the link *to* A, and the receiving neighbour B stores
-// that number, unchanged, as its txcost *to* A (RFC 8966 §3.4.2:
-// "A node receiving an IHU sets the value of the txcost ... to the
-// value contained in the IHU"). The conversion is exact and lossless;
+// that number, unchanged, as its txcost *to* A. The conversion is exact and lossless;
 // what changes is *which node* the number describes, not the number
 // itself -- which is exactly what "crossing the link" should look
 // like in the type system.

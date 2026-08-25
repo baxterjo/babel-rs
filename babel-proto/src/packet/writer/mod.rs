@@ -106,12 +106,12 @@ mod test {
 
     use super::*;
     use crate::data_structures::seqno::SeqNo;
+    use crate::metric::RxCost;
     use crate::output::DatagramSend;
     use crate::packet::packet_slice::PacketSlice;
     use crate::packet::tlv::Tlv;
     use crate::packet::tlv::hello_slice::HelloFlags;
     use crate::utils::Duration;
-    use crate::utils::distance::RxCost;
     #[test]
     fn packet_writer_and_slice_yield_same_results() {
         let buf = Vec::new();
