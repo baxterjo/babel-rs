@@ -57,17 +57,14 @@ pub struct IhuRatio(DurationMultiplier);
 
 impl IhuRatio {
     pub const fn new(num: u8, den: u8) -> Self {
-        Self(DurationMultiplier { num, den })
+        Self(DurationMultiplier::new(num, den))
     }
-    fn apply(&self, duration: Duration) -> Duration {
-        // Clamp the denominator to 1 to avoid div0.
-        let denom = self.0.den.max(1);
-
-        if self.0.num / denom > 3 {
+    pub fn apply(&self, duration: Duration) -> Duration {
+        if self.0.num().div_ceil(self.0.den()) > 3 {
             return duration * 3;
         }
 
-        (duration * self.0.num) / denom
+        duration * self.0
     }
 }
 
@@ -93,5 +90,16 @@ impl LinkCostCalculator for KOutOfJ {
         ucast_hello_interval: Option<Duration>,
     ) -> IhuRatio {
         IhuRatio::new(3, 1)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    fn out_of_bounds_ratio() {
+        let ratio = IhuRatio::new(5, 1);
+        let duration = Duration::from_secs(1);
+        assert_eq!(3, ratio.apply(duration).as_secs())
     }
 }

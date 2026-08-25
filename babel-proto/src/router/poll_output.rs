@@ -1,5 +1,6 @@
 use super::BabelRouter;
 use crate::data_structures::interface::{InterfaceHandle, InterfaceTableError};
+use crate::data_structures::neighbour::neighbour_entry::DEFAULT_IHU_RATIO;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -10,10 +11,6 @@ use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
 use crate::utils::destination::{Claim, DestAddr};
 use crate::utils::storage::ManagedSliceExt;
 use crate::utils::{Duration, DurationMultiplier, Instant, ManagedSlice};
-
-/// [Appendix B](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.8): the
-/// advertised IHU interval is always three times the multicast Hello interval.
-const ADVERTISED_IHU_RATIO: DurationMultiplier = DurationMultiplier { num: 3, den: 1 };
 
 /// How long to wait before polling again after a TLV write failed.
 ///
@@ -283,7 +280,7 @@ where
             // The Interval field advertises when the next IHU is due, which RFC 8966 Appendix B
             // puts at three times the multicast Hello interval. Once the periodic cadence lands
             // this should come from whatever timer actually schedules the next IHU.
-            let duration = iface.hello_timer.duration() * ADVERTISED_IHU_RATIO;
+            let duration = DEFAULT_IHU_RATIO.apply(iface.hello_timer.duration());
             b_debug!(
                 "[SEND] IHU - iface: {}, dest_addr: {:?} - ae: {}, rx_cost: {:?}, interval: {}, addr: {:?}",
                 iface.handle,

@@ -21,14 +21,14 @@ pub const DEFAULT_IHU_RATIO: IhuRatio = IhuRatio::new(3, 1);
 
 /// [Appendix B](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.12) 3.5 times
 /// the advertised IHU interval.
-pub const DEFAULT_HOLD_TIME_MULTIPLIER: DurationMultiplier = DurationMultiplier { num: 7, den: 2 };
+pub const DEFAULT_HOLD_TIME_MULTIPLIER: DurationMultiplier = DurationMultiplier::new(7, 2);
 
 /// [Appendix A.1](https://datatracker.ietf.org/doc/html/rfc8966#section-a.1-4)
 /// If the Interval field of the received Hello is not zero, it resets the neighbour's hello timer
 /// to 1.5 times the advertised Interval (the extra margin allows for delay due to jitter).
-pub const HELLO_INTERVAL_MULTIPLIER: DurationMultiplier = DurationMultiplier { num: 3, den: 2 };
+pub const HELLO_INTERVAL_MULTIPLIER: DurationMultiplier = DurationMultiplier::new(3, 2);
 
-const DEFAULT_IHU_RATIO_INNER: DurationMultiplier = DurationMultiplier { num: 3, den: 1 };
+const DEFAULT_IHU_RATIO_INNER: DurationMultiplier = DurationMultiplier::new(3, 1);
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
