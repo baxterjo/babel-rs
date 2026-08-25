@@ -369,21 +369,33 @@ impl From<Duration> for ::core::time::Duration {
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct DurationMultiplier {
-    pub num: u8,
-    pub den: u8,
+    num: u8,
+    den: u8,
 }
 
 impl DurationMultiplier {
-    /// appendix.b-4.12: IHU Hold time: 3.5 times the advertised IHU interval.
-    pub const IHU_HOLD_TIME_SPEC_DEFAULT: Self = Self { num: 7, den: 2 };
-    /// appendix.b-4.14: Route Expiry time: 3.5 times the advertised update interval.
-    pub const ROUTE_EXPIRY_TIME_SPEC_DEFAULT: Self = Self { num: 7, den: 2 };
+    /// Creates a new multiplier clamping the denominator to a minimum of 1
+    pub const fn new(num: u8, den: u8) -> Self {
+        let denom = if den == 0 { 1 } else { den };
+        Self { num, den: denom }
+    }
+
+    pub fn num(&self) -> u8 {
+        self.num
+    }
+    pub fn den(&self) -> u8 {
+        self.den
+    }
 }
 
 impl ops::Mul<DurationMultiplier> for Duration {
     type Output = Duration;
     fn mul(self, rhs: DurationMultiplier) -> Self::Output {
-        Duration::from_micros((self.as_micros() * rhs.num as u64) / rhs.den as u64)
+        Duration::from_micros(
+            self.as_micros()
+                .saturating_mul(rhs.num.into())
+                .saturating_div(rhs.den.into()),
+        )
     }
 }
 

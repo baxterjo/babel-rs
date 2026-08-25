@@ -1,5 +1,6 @@
 use super::BabelRouter;
 use crate::data_structures::interface::{InterfaceHandle, InterfaceTableError};
+use crate::data_structures::neighbour::neighbour_entry::DEFAULT_IHU_RATIO;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -192,6 +193,16 @@ where
     // |  _/ (_) | |__| |__   | || __ | |_| |
     // |_|  \___/|____|____| |___|_||_|\___/
 
+    // TODO: Periodic IHU scheduling. `pending.ihu_due` is currently the only trigger, so a
+    // neighbour gets the one immediate IHU it is born with and nothing after that. The recurring
+    // cadence — an interface-level IHU timer, or the ratio from
+    // `LinkCostCalculator::hello_ihu_ratio` — still has to drive this flag, and is also what will
+    // give this pass a wake-up time to contribute. `now` and `next_poll` are kept in the signature
+    // for it.
+    #[allow(
+        unused_variables,
+        reason = "the periodic IHU cadence that uses these is not implemented yet"
+    )]
     fn poll_for_due_ihu<'output>(
         &mut self,
         now: Instant,
@@ -203,20 +214,8 @@ where
         PacketWriterStep<'output, Ready>,
         (PacketWriterError, PacketWriterStep<'output, Ready>),
     > {
-        let mut local_min: Option<Duration> = None;
-
         for neighbour in self.neighbor_table.iter_mut() {
-            // If this neighbour has not yet set it's IHU timer, skip it.
-            //
-            // This timer is set when a hello is received, neighbours that have not received hellos
-            // will expire.
-            let Some(ihu_timer) = &mut neighbour.pending.ihu_timer else {
-                continue;
-            };
-
-            // If there is some time remaining in the timer, update local min and skip it.
-            if let Some(remaining) = ihu_timer.time_remaining(now) {
-                merge_next_poll(&mut local_min, remaining);
+            if !neighbour.pending.ihu_due {
                 continue;
             }
 
@@ -250,7 +249,7 @@ where
             // At this point
             //
             // The neighbour:
-            // - Has an IHU timer that exists and has expired
+            // - Has an IHU due
             // The active interface is either:
             // - Free
             // - Matches this neighbour's interface.
@@ -278,7 +277,10 @@ where
             // but nothing feeds it into a cost yet, so every IHU currently claims the same
             // constant regardless of how the link is actually performing.
             let rx_cost = iface.config.starting_rx_cost;
-            let duration = ihu_timer.duration();
+            // The Interval field advertises when the next IHU is due, which RFC 8966 Appendix B
+            // puts at three times the multicast Hello interval. Once the periodic cadence lands
+            // this should come from whatever timer actually schedules the next IHU.
+            let duration = DEFAULT_IHU_RATIO.apply(iface.hello_timer.duration());
             b_debug!(
                 "[SEND] IHU - iface: {}, dest_addr: {:?} - ae: {}, rx_cost: {:?}, interval: {}, addr: {:?}",
                 iface.handle,
@@ -304,13 +306,10 @@ where
             }
             // Claim the active interface after the write succeeds.
             active_iface.claim(iface.handle).unwrap();
-            // Once the packet has been written, reset the IHU timer
-            ihu_timer.restart(now);
-        }
-
-        // Choose the minimum between next poll and local min.
-        if let Some(local_min) = local_min {
-            merge_next_poll(next_poll, local_min);
+            // Once the packet has been written, this neighbour's IHU is no longer due. Clearing
+            // only after a successful write is what lets a destination conflict defer a neighbour
+            // to the next poll instead of dropping its IHU.
+            neighbour.pending.ihu_due = false;
         }
 
         Ok(writer)
@@ -476,16 +475,17 @@ mod test {
     use crate::data_structures::seqno::SeqNo;
     use crate::data_types::{Address, RouterId};
     use crate::extension::NoExtension;
+    use crate::metric::RxCost;
     use crate::output::TransmitDestination;
     use crate::packet::packet_slice::PacketSlice;
     use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, TypedTlv};
-    use crate::utils::rx_cost::RxCost;
     use crate::utils::storage::ManagedSliceExt;
     use crate::utils::timer::Timer;
 
-    // Long enough that it never fires again during a test (still under the Timer max of
-    // 655.35s), short enough to stay well clear of the small durations used for IHU/ucast hello.
-    const IFACE_INTERVAL: Duration = Duration::from_micros(600_000_000);
+    // Long enough that it never fires again during a test and well clear of the small durations
+    // used for IHU/ucast hello, but small enough that the advertised IHU interval derived from it
+    // (3x, see `ADVERTISED_IHU_RATIO`) still fits the 16-bit Interval field without saturating.
+    const IFACE_INTERVAL: Duration = Duration::from_secs(200);
 
     const NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
     /// The address family Babel normally runs on, and the only one the writer compresses.
@@ -566,6 +566,27 @@ mod test {
         );
 
         handle
+    }
+
+    /// Adds a neighbour and drains the immediate IHU every new neighbour is born owing, so that
+    /// IHU does not pollute assertions about unrelated TLVs.
+    fn drained_neighbour(
+        router: &mut BabelRouter<'static>,
+        now: Instant,
+        iface: InterfaceHandle,
+        address: Ipv6Addr,
+        ucast_hello_interval: Option<Duration>,
+    ) {
+        router
+            .add_neighbour(now, iface, address.into(), ucast_hello_interval)
+            .expect("add_neighbour should succeed");
+        router
+            .neighbor_table
+            .inner
+            .get_mut_by_key(&NeighbourIndex(iface, address.into()))
+            .expect("neighbour should exist")
+            .pending
+            .ihu_due = false;
     }
 
     //  __  __  ___    _   ___ _____   _  _ ___ _    _    ___
@@ -683,15 +704,8 @@ mod test {
         fn not_configured_never_sent() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            r.add_neighbour(
-                t0,
-                iface_handle("iface_1"),
-                NEIGHBOUR_1_ADDR.into(),
-                Duration::from_secs(10),
-                None,
-            )
-            .expect("add_neighbour should succeed");
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            drained_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR, None);
 
             let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(remaining, IFACE_INTERVAL);
@@ -701,15 +715,8 @@ mod test {
         fn not_due_immediately_after_registration() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            r.add_neighbour(
-                t0,
-                iface_handle("iface_1"),
-                NEIGHBOUR_1_ADDR.into(),
-                Duration::from_secs(10),
-                Some(UCAST_INTERVAL),
-            )
-            .expect("add_neighbour should succeed");
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            drained_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR, Some(UCAST_INTERVAL));
 
             // Unlike interface hellos, a fresh ucast hello timer is NOT eager.
             let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
@@ -721,14 +728,7 @@ mod test {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
             let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            r.add_neighbour(
-                t0,
-                iface,
-                NEIGHBOUR_1_ADDR.into(),
-                Duration::from_secs(10),
-                Some(UCAST_INTERVAL),
-            )
-            .expect("add_neighbour should succeed");
+            drained_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR, Some(UCAST_INTERVAL));
             r.neighbor_table
                 .inner
                 .get_mut_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
@@ -765,14 +765,7 @@ mod test {
             let t0 = Instant::from_secs(0);
             let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
             for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
-                r.add_neighbour(
-                    t0,
-                    iface,
-                    addr.into(),
-                    Duration::from_secs(10),
-                    Some(UCAST_INTERVAL),
-                )
-                .expect("add_neighbour should succeed");
+                drained_neighbour(&mut r, t0, iface, addr, Some(UCAST_INTERVAL));
                 r.neighbor_table
                     .inner
                     .get_mut_by_key(&NeighbourIndex(iface, addr.into()))
@@ -806,14 +799,7 @@ mod test {
             let t0 = Instant::from_secs(0);
             let iface_a = drained_iface(&mut r, t0, "iface_a", NODE_ADDR);
             let iface_b = drained_iface(&mut r, t0, "iface_b", NEIGHBOUR_2_ADDR);
-            r.add_neighbour(
-                t0,
-                iface_a,
-                NEIGHBOUR_1_ADDR.into(),
-                Duration::from_secs(10),
-                Some(UCAST_INTERVAL),
-            )
-            .expect("add_neighbour should succeed");
+            drained_neighbour(&mut r, t0, iface_a, NEIGHBOUR_1_ADDR, Some(UCAST_INTERVAL));
             r.neighbor_table
                 .inner
                 .get_mut_by_key(&NeighbourIndex(iface_a, NEIGHBOUR_1_ADDR.into()))
@@ -850,81 +836,49 @@ mod test {
 
         use super::*;
 
+        /// The advertised IHU interval is three times the interface's multicast Hello interval
+        /// (RFC 8966 Appendix B).
+        const EXPECTED_IHU_INTERVAL: Duration = Duration::from_secs(600);
+
         fn add_neighbour_no_ucast(
             r: &mut BabelRouter<'static>,
             now: Instant,
             iface: InterfaceHandle,
             addr: Ipv6Addr,
         ) {
-            r.add_neighbour(now, iface, addr.into(), Duration::from_secs(10), None)
+            r.add_neighbour(now, iface, addr.into(), None)
                 .expect("add_neighbour should succeed");
         }
 
-        fn set_ihu_timer(
-            r: &mut BabelRouter<'static>,
-            now: Instant,
-            iface: InterfaceHandle,
-            addr: Ipv6Addr,
-            duration: Duration,
-            eager: bool,
-        ) {
-            let neighbour = r
-                .neighbor_table
-                .inner
-                .get_mut_by_key(&NeighbourIndex(iface, addr.into()))
-                .expect("neighbour should exist");
-            neighbour.pending.ihu_timer = Some(if eager {
-                Timer::new_eager(now, duration).expect("timer should be valid")
-            } else {
-                Timer::new(now, duration).expect("timer should be valid")
-            });
-        }
+        // TODO: There is no coverage of *periodic* IHUs, because there is no periodic IHU
+        // scheduling yet — `pending.ihu_due` is the only trigger, so a neighbour gets its one
+        // immediate IHU and nothing after that. Two cases dropped with the old per-neighbour
+        // `pending.ihu_timer` need to come back with the cadence:
+        //   - an IHU that is not yet due still contributes its remaining time to `SetTimer`
+        //   - an IHU refires after its interval elapses
+        //
+        // The RFC 8966 3.4.2 requirement they defend is that a neighbour that stops hearing IHUs
+        // lets its txcost expire to infinity, which only holds if we keep sending them.
 
+        /// Every new neighbour is born owing an immediate IHU: waiting a full interval before
+        /// telling a neighbour we can hear it delays convergence for no reason.
         #[test]
-        fn never_sent_without_received_hello() {
-            let mut r = router("node_1");
-            let t0 = Instant::from_secs(0);
-            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            // A neighbour added out-of-band has no pending IHU timer until a hello is received.
-            add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
-
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, IFACE_INTERVAL);
-        }
-
-        #[test]
-        fn not_due_contributes_remaining_to_set_timer() {
+        fn a_new_neighbour_is_sent_an_immediate_ihu() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
             let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
             add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
-            set_ihu_timer(
-                &mut r,
-                t0,
-                iface,
-                NEIGHBOUR_1_ADDR,
-                Duration::from_secs(5),
-                false,
-            );
 
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, Duration::from_secs(5));
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
         }
 
         #[test]
-        fn fires_multicast_with_correct_fields_and_restarts_timer() {
+        fn fires_multicast_with_correct_fields_and_clears_the_flag() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
             let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
             add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
-            set_ihu_timer(
-                &mut r,
-                t0,
-                iface,
-                NEIGHBOUR_1_ADDR,
-                Duration::from_secs(30),
-                true,
-            );
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(transmit.destination, TransmitDestination::Multicast);
@@ -936,8 +890,12 @@ mod test {
                 2,
                 "the neighbour's address is a non-link-local IPv6 address"
             );
-            assert_eq!(ihu.rx_cost(), RxCost(10), "default starting_rx_cost");
-            assert_eq!(ihu.interval(), Duration::from_secs(30).into());
+            assert_eq!(
+                ihu.rx_cost(),
+                RxCost::from_raw(10),
+                "default starting_rx_cost"
+            );
+            assert_eq!(ihu.interval(), EXPECTED_IHU_INTERVAL.into());
             // The Address field names the IHU's destination — the neighbour it is for — so that
             // receivers can pick their own out of an aggregated multicast packet.
             assert_eq!(
@@ -945,9 +903,10 @@ mod test {
                 Address::<NoExtension>::from(NEIGHBOUR_1_ADDR).as_wire()
             );
 
-            // Timer restarted, so an immediate repoll doesn't refire it.
+            // The flag was cleared by the successful write, so an immediate repoll doesn't refire
+            // it and only the interface's hello timer is left to report.
             let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, Duration::from_secs(30));
+            assert_eq!(remaining, IFACE_INTERVAL);
         }
 
         /// AE=3 declares an 8-byte address, so the IHU has to carry exactly the 8-byte suffix.
@@ -960,14 +919,6 @@ mod test {
             let t0 = Instant::from_secs(0);
             let iface = drained_iface(&mut r, t0, "iface_1", LINK_LOCAL_NODE_ADDR);
             add_neighbour_no_ucast(&mut r, t0, iface, LINK_LOCAL_NEIGHBOUR_ADDR);
-            set_ihu_timer(
-                &mut r,
-                t0,
-                iface,
-                LINK_LOCAL_NEIGHBOUR_ADDR,
-                Duration::from_secs(30),
-                true,
-            );
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
@@ -1001,14 +952,6 @@ mod test {
                 .config
                 .unicast_ihu = true;
             add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
-            set_ihu_timer(
-                &mut r,
-                t0,
-                iface,
-                NEIGHBOUR_1_ADDR,
-                Duration::from_secs(30),
-                true,
-            );
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(
@@ -1032,14 +975,6 @@ mod test {
                 .config
                 .unicast_ihu = true;
             add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
-            set_ihu_timer(
-                &mut r,
-                t0,
-                iface,
-                NEIGHBOUR_1_ADDR,
-                Duration::from_secs(30),
-                true,
-            );
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
             let ihu = nth_ihu(&transmit.contents, 0);
@@ -1068,7 +1003,6 @@ mod test {
                 .unicast_ihu = true;
             for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
                 add_neighbour_no_ucast(&mut r, t0, iface, addr);
-                set_ihu_timer(&mut r, t0, iface, addr, Duration::from_secs(30), true);
             }
 
             let first = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
@@ -1084,7 +1018,7 @@ mod test {
             );
 
             let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, Duration::from_secs(30));
+            assert_eq!(remaining, IFACE_INTERVAL);
         }
 
         #[test]
@@ -1094,14 +1028,6 @@ mod test {
             let iface_a = drained_iface(&mut r, t0, "iface_a", NODE_ADDR);
             let iface_b = drained_iface(&mut r, t0, "iface_b", NEIGHBOUR_2_ADDR);
             add_neighbour_no_ucast(&mut r, t0, iface_a, NEIGHBOUR_1_ADDR);
-            set_ihu_timer(
-                &mut r,
-                t0,
-                iface_a,
-                NEIGHBOUR_1_ADDR,
-                Duration::from_secs(30),
-                true,
-            );
 
             let remaining = expect_set_timer(
                 r.poll_output_for_iface(t0, iface_b)
@@ -1136,21 +1062,15 @@ mod test {
                 .config
                 .unicast_ihu = true;
             let ucast_interval = Duration::from_secs(20);
-            r.add_neighbour(
-                t0,
-                iface,
-                NEIGHBOUR_1_ADDR.into(),
-                Duration::from_secs(10),
-                Some(ucast_interval),
-            )
-            .expect("add_neighbour should succeed");
+            // Left un-drained: the IHU every new neighbour owes is what competes with the ucast
+            // hello for this poll's packet.
+            r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into(), Some(ucast_interval))
+                .expect("add_neighbour should succeed");
             let neighbour = r
                 .neighbor_table
                 .inner
                 .get_mut_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
                 .expect("neighbour should exist");
-            neighbour.pending.ihu_timer =
-                Some(Timer::new_eager(t0, Duration::from_secs(30)).expect("valid timer"));
             neighbour
                 .pending
                 .ucast_hello
@@ -1183,7 +1103,7 @@ mod test {
             let t0 = Instant::from_secs(0);
             let iface_handle = iface_handle("iface_1");
             // Not pre-drained: the interface's mcast hello is eager-due at the same time as the
-            // manually-forced IHU below, so both are competing for this poll's destination.
+            // new neighbour's immediate IHU, so both are competing for this poll's destination.
             r.register_interface(t0, iface_handle, NODE_ADDR, Some(IFACE_INTERVAL), None)
                 .expect("register should succeed");
             r.iface_table
@@ -1192,20 +1112,8 @@ mod test {
                 .expect("interface should exist")
                 .config
                 .unicast_ihu = true;
-            r.add_neighbour(
-                t0,
-                iface_handle,
-                NEIGHBOUR_1_ADDR.into(),
-                Duration::from_secs(10),
-                None,
-            )
-            .expect("add_neighbour should succeed");
-            r.neighbor_table
-                .inner
-                .get_mut_by_key(&NeighbourIndex(iface_handle, NEIGHBOUR_1_ADDR.into()))
-                .expect("neighbour should exist")
-                .pending
-                .ihu_timer = Some(Timer::new_eager(t0, Duration::from_secs(30)).expect("valid"));
+            r.add_neighbour(t0, iface_handle, NEIGHBOUR_1_ADDR.into(), None)
+                .expect("add_neighbour should succeed");
 
             // Pass 1: IHU wins the packet's unicast destination, blocking the mcast hello.
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
@@ -1223,7 +1131,7 @@ mod test {
 
             // Pass 3: everything drained.
             let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, Duration::from_secs(30));
+            assert_eq!(remaining, IFACE_INTERVAL);
         }
 
         #[test]
@@ -1285,23 +1193,12 @@ mod test {
             r.register_interface(t0, iface, NODE_ADDR, Some(IFACE_INTERVAL), None)
                 .expect("register should succeed");
 
-            // Not yet due, and due sooner than the retry window. It is polled before the mcast
-            // hello, so it contributes to next_poll before the failure aborts the body.
+            // Not yet due, and due sooner than the retry window. Ucast hellos are polled before
+            // the mcast hello, so this contributes to next_poll before the failure aborts the
+            // body. The neighbour's initial IHU is drained first — it is polled ahead of
+            // everything else, and would otherwise be the write that fails.
             let soon = Duration::from_millis(5);
-            r.add_neighbour(
-                t0,
-                iface,
-                NEIGHBOUR_1_ADDR.into(),
-                Duration::from_secs(10),
-                None,
-            )
-            .expect("add_neighbour should succeed");
-            r.neighbor_table
-                .inner
-                .get_mut_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
-                .expect("neighbour should exist")
-                .pending
-                .ihu_timer = Some(Timer::new(t0, soon).expect("valid timer"));
+            drained_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR, Some(soon));
 
             let mut buf = [0u8; 4];
             let output = r

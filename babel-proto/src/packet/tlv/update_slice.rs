@@ -2,6 +2,7 @@ use core::fmt::Debug;
 
 use crate::data_structures::seqno::SeqNo;
 use crate::data_types::Interval;
+use crate::metric::Metric;
 use crate::packet::error::layer::Layer;
 use crate::packet::error::len_error::LenError;
 use crate::packet::error::tlv_err::TlvError;
@@ -10,7 +11,6 @@ use crate::packet::tlv::TypedTlv;
 use crate::packet::tlv::tlv_header::TlvHeader;
 use crate::packet::utils::get_unchecked_be_u16;
 use crate::utils::Duration;
-use crate::utils::rx_cost::RxCost;
 
 /// Update TLV as defined in
 /// [Section 4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update)
@@ -169,12 +169,12 @@ impl<'a> UpdateSlice<'a> {
     /// The sender's metric for this route. The value FFFF hexadecimal (infinity) means that this is
     /// a route retraction.
     // TODO: When I wire up cost calculation, this needs to change to Metric
-    pub fn metric(&self) -> RxCost {
+    pub fn metric(&self) -> Metric {
         unsafe {
             // SAFETY:
             // Safe as the constructor has checked to ensure the length of the slice is at minimum
             // TlvHeader::LEN (2) + Self::MIN_LEN (10).
-            RxCost(get_unchecked_be_u16(
+            Metric::from_raw(get_unchecked_be_u16(
                 self.slice.as_ptr().add(TlvHeader::LEN + 8),
             ))
         }
@@ -358,7 +358,11 @@ mod test {
             "Incorrect interval"
         );
         assert_eq!(update.seqno(), SeqNo(42), "Incorrect seqno");
-        assert_eq!(update.metric(), RxCost(0x0100), "Incorrect metric");
+        assert_eq!(
+            update.metric(),
+            Metric::from_raw(0x0100),
+            "Incorrect metric"
+        );
         assert_eq!(
             update.prefix().expect("Should be able to get prefix"),
             &[192, 168, 0],
@@ -451,7 +455,11 @@ mod test {
         let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
         let update = UpdateSlice::from_untyped(tlv_slice).expect("Update should parse.");
 
-        assert_eq!(update.metric(), RxCost(0xFFFF), "Incorrect metric");
+        assert_eq!(
+            update.metric(),
+            Metric::from_raw(0xFFFF),
+            "Incorrect metric"
+        );
         assert!(update.metric().is_infinite(), "Metric should be infinite");
     }
 

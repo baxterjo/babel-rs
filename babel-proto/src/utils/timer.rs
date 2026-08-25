@@ -16,18 +16,19 @@ pub struct Timer {
 pub enum TimerError {
     #[error("The duration of a timer cannot be zero.")]
     DurationCannotBeZero,
-    #[error("The duration of a timer cannot be larger than {max} centiseconds", max = u16::MAX)]
-    DurationTooLarge,
 }
 
 impl Timer {
+    pub(crate) fn new_unchecked(now: Instant, duration: Duration) -> Self {
+        Self {
+            start: now,
+            duration,
+        }
+    }
     /// Create a new timer that will fire after the duration.
     pub fn new(now: Instant, duration: Duration) -> Result<Self, TimerError> {
         if duration.as_micros() == 0 {
             return Err(TimerError::DurationCannotBeZero);
-        }
-        if duration.as_centis() > u16::MAX.into() {
-            return Err(TimerError::DurationTooLarge);
         }
 
         Ok(Self {
@@ -45,11 +46,16 @@ impl Timer {
         Self::new(pre_start, duration)
     }
 
+    pub fn set_tick_duration(&mut self, duration: Duration) -> Result<(), TimerError> {
+        *self = Self::new(self.start, duration)?;
+        Ok(())
+    }
+
     /// Sets the duration of the timer.
     ///
     /// All babel instances of timers suggest that if a duration increases, the corresponding
     /// message should be sent immediately.
-    pub fn set_duration(&mut self, duration: Duration) -> Result<(), TimerError> {
+    pub fn set_message_duration(&mut self, duration: Duration) -> Result<(), TimerError> {
         if duration > self.duration {
             *self = Self::new_eager(self.start, duration)?;
         } else {

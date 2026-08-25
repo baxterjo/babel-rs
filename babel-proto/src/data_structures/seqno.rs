@@ -9,6 +9,10 @@ impl SeqNo {
     pub fn to_wire(&self) -> [u8; 2] {
         self.0.to_be_bytes()
     }
+
+    pub fn abs_diff(&self, other: Self) -> u16 {
+        self.0.abs_diff(other.0)
+    }
 }
 
 impl ops::Add for SeqNo {

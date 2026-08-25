@@ -106,12 +106,12 @@ mod test {
 
     use super::*;
     use crate::data_structures::seqno::SeqNo;
+    use crate::metric::RxCost;
     use crate::output::DatagramSend;
     use crate::packet::packet_slice::PacketSlice;
-    use crate::packet::tlv::hello_slice::HelloFlags;
     use crate::packet::tlv::Tlv;
+    use crate::packet::tlv::hello_slice::HelloFlags;
     use crate::utils::Duration;
-    use crate::utils::rx_cost::RxCost;
     #[test]
     fn packet_writer_and_slice_yield_same_results() {
         let buf = Vec::new();
@@ -127,7 +127,7 @@ mod test {
             .expect("Could not finish TLV")
             .write_ihu(
                 1,
-                RxCost(5),
+                RxCost::from_raw(5),
                 Duration::from_centis(300).into(),
                 &[192, 168, 0, 5],
             )
@@ -162,7 +162,7 @@ mod test {
                         panic!("Second TLV should have been ihu");
                     };
                     assert_eq!(ihu.ae(), 1);
-                    assert_eq!(ihu.rx_cost(), RxCost(5));
+                    assert_eq!(ihu.rx_cost(), RxCost::from_raw(5));
                     assert_eq!(ihu.interval(), Duration::from_centis(300).into());
                     assert_eq!(
                         ihu.address(4).expect("Failed to retrieve address from ihu"),

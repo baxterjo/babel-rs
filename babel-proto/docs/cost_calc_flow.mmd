@@ -1,0 +1,34 @@
+---
+title: Cost Calculation
+---
+flowchart LR
+  FromB(["from node_b"])
+
+  subgraph A["node_a"]
+    AHist["Hello history<br/>for node_b"]
+    ARx["RxCost(b) = RxCost(b.hello_history)"]
+    ATx["TxCost(b)"]
+    ACost["Cost C(a,b) strictly positive<br/>= C(RxCost(b), TxCost(b))"]
+    AMet["Metric<br/>M(c, m) = c + m"]
+    AHello["Hello TLV<br/>every a.hello_interval"]
+    AHist --> ARx
+    ARx --> ACost
+    ATx --> ACost
+    ACost -->|"c"| AMet
+  end
+
+  ToB(["to node_b"])
+
+  FromB -.->|"Hello TLV"| AHist
+  FromB -.->|"IHU TLV contains RxCost(a)"| ATx
+  FromB -.->|"Update TLV (m)"| AMet
+
+  AHello -.->|"Hello TLV"| ToB
+  ARx -.->|"IHU TLV contains RxCost(b)"| ToB
+  AMet -.->|"Update TLV (m)"| ToB
+
+  NOTE["node_b computes the same values in parallel, mirrored:<br/>its RxCost(a) is what arrives here as TxCost(b)"]
+  A ~~~ NOTE
+
+  classDef note stroke-dasharray: 5 5
+  class NOTE note
