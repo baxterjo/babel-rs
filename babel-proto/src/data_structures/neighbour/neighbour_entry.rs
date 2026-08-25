@@ -327,13 +327,13 @@ impl<A: AddressExt> Neighbour<A> {
 
         if flags.is_unicast() {
             self.ucast_hello_info.expected_seqno = Some(seqno + 1);
-            self.ucast_hello_info.timer = Timer::new(now, timer_dur)
-                .unwrap_or(Timer::new_unchecked(now, DEFAULT_MULTICAST_HELLO_INTERVAL));
+            self.ucast_hello_info.timer =
+                Timer::new(now, timer_dur).expect("Timer duration checked above.");
             self.ucast_hello_info.history.record(true);
         } else {
             self.mcast_hello_info.expected_seqno = Some(seqno + 1);
-            self.mcast_hello_info.timer = Timer::new(now, timer_dur)
-                .unwrap_or(Timer::new_unchecked(now, DEFAULT_MULTICAST_HELLO_INTERVAL));
+            self.mcast_hello_info.timer =
+                Timer::new(now, timer_dur).expect("Timer duration checked above");
             self.mcast_hello_info.history.record(true);
         }
     }
