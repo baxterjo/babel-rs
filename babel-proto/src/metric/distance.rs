@@ -187,7 +187,7 @@ impl fmt::Display for NonPositiveCost {
     }
 }
 
-// --- RxCost <-> TxCost ---------------------------------------------------
+// --- RxCost <-> TxCost
 //
 // These don't describe the same node's data: an IHU carries A's
 // rxcost for the link *to* A, and the receiving neighbour B stores
@@ -210,17 +210,11 @@ impl From<TxCost> for RxCost {
     }
 }
 
-// --- TxCost -> Cost --------------------------------------------------------
+// --- TxCost -> Cost
 //
-// RFC 8966 leaves cost computation a matter of local policy (§3.4.3),
-// subject only to: strictly positive when finite; infinite if no
-// recent Hellos; infinite if txcost is infinite. The simplest
-// RFC-compliant strategy -- appropriate for symmetric, low-loss links
-// -- is cost = txcost (the wired-link case sketched in Appendix A.2).
-// This `From` impl provides *that* baseline. A second, two-input
-// strategy that also folds in RxCost (for lossy/wireless links) is
-// given separately as `Cost::etx`, since combining two distinct types
-// isn't a 1:1 `From` conversion.
+// RFC 8966 leaves cost computation as a matter of local policy (see `LinkCostCalculator`) so this
+// impl does not *compute* the link cost, it merely maps infinity to infinity and clamps cost to a
+// minimum of 1.
 
 impl From<TxCost> for Cost {
     #[inline]
@@ -237,13 +231,13 @@ impl From<TxCost> for Cost {
     }
 }
 
-// --- Cost + Metric -> Metric ----------------------------------------------
+// --- Cost + Metric -> Metric
 //
-// RFC 8966 §3.5.2: the RECOMMENDED additive metric is
+// RFC 8966 3.5.2: the RECOMMENDED additive metric is
 // M(c, m) = c + m, which must satisfy strict monotonicity
 // (M(c, m) > m whenever c is finite) and M(c, m) = infinite whenever
 // c is infinite. `Add` is implemented in both orders so a `Cost` and
-// a neighbour-advertised `Metric` combine naturally either way.
+// a neighbour advertised `Metric` combine naturally either way.
 
 impl Add<Metric> for Cost {
     type Output = Metric;
