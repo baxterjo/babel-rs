@@ -5,6 +5,7 @@ use crate::data_types::Interval;
 use crate::metric::RxCost;
 use crate::packet::packet_header_slice::PacketHeaderSlice;
 use crate::packet::tlv::hello_slice::HelloFlags;
+use crate::packet::tlv::tlv_header::TlvHeader;
 use crate::packet::tlv::{HelloSlice, IhuSlice, TypedTlv};
 use crate::packet::writer::finished_packet_body::FinishedPacketBody;
 
@@ -15,11 +16,13 @@ pub(crate) struct Ready;
 impl<'a> PacketWriterStep<'a, Ready> {
     pub(crate) fn finish_packet(
         mut self,
-    ) -> Result<Option<PacketWriterStep<'a, FinishedPacketBody>>, PacketWriterError> {
+    ) -> Result<PacketWriterStep<'a, FinishedPacketBody>, PacketWriterError> {
         // Check body length to see if there is anything to send.
         let body_len = self.state.position() - PacketHeaderSlice::LEN;
         if body_len == 0 {
-            return Ok(None);
+            // If there is nothing to send, then there was some failure in the router logic that
+            // tried to finish an empty packet.
+            return Err(PacketWriterError::CannotFinishEmptyPacket);
         } else if body_len > u16::MAX.into() {
             // There is currently no recovery for this failure mode. Every TLV in this packet will
             // be discarded and the router state will "think" the outgoing packet was dropped in
@@ -30,10 +33,10 @@ impl<'a> PacketWriterStep<'a, Ready> {
         self.state
             .backfill_at(2, &(body_len as u16).to_be_bytes())?;
 
-        Ok(Some(PacketWriterStep {
+        Ok(PacketWriterStep {
             state: self.state,
             step_state: FinishedPacketBody {},
-        }))
+        })
     }
 
     pub(crate) fn write_hello(
@@ -47,7 +50,7 @@ impl<'a> PacketWriterStep<'a, Ready> {
 
         // Early escape hatch
         if let Some(val) = step.state.remaining()
-            && val < HelloSlice::MIN_LEN
+            && val < TlvHeader::LEN + HelloSlice::MIN_LEN
         {
             return Err((
                 PacketWriterError::BufferTooSmall {
@@ -71,16 +74,16 @@ impl<'a> PacketWriterStep<'a, Ready> {
         let mut length = 0usize;
 
         // Write flags
-        let (l, step) = step.write_or_backtrack(&flags.to_wire(), start_pos)?;
-        length += l;
+        let (len, step) = step.write_or_backtrack(&flags.to_wire(), start_pos)?;
+        length += len;
 
         // Write seqno
-        let (l, step) = step.write_or_backtrack(&seqno.to_wire(), start_pos)?;
-        length += l;
+        let (len, step) = step.write_or_backtrack(&seqno.to_wire(), start_pos)?;
+        length += len;
 
         // Write interval
-        let (l, step) = step.write_or_backtrack(&interval.to_wire(), start_pos)?;
-        length += l;
+        let (len, step) = step.write_or_backtrack(&interval.to_wire(), start_pos)?;
+        length += len;
 
         Ok(PacketWriterStep {
             state: step.state,

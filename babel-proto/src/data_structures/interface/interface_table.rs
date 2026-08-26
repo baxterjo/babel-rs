@@ -66,7 +66,26 @@ impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
         }
     }
 
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Interface<A>> {
-        self.inner.iter_mut().filter_map(|v| v.as_mut())
+    /// Whether the table holds no interfaces at all.
+    ///
+    /// The backing storage is a slice of `Option`s that may be pre-allocated with empty slots, so
+    /// its length says nothing about how many interfaces are registered.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inner.iter().all(|slot| slot.is_none())
+    }
+
+    /// Whether the given handle refers to a registered interface.
+    pub(crate) fn contains(&self, handle: &InterfaceHandle) -> bool {
+        self.inner.get_by_key(handle).is_some()
+    }
+
+    pub(crate) fn iter_mut(
+        &mut self,
+        poll_only: Option<InterfaceHandle>,
+    ) -> impl Iterator<Item = &mut Interface<A>> {
+        self.inner
+            .iter_mut()
+            .filter_map(|v| v.as_mut())
+            .filter(move |iface| poll_only.is_none_or(|p| p == iface.handle))
     }
 }

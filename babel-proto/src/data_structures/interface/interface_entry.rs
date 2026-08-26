@@ -2,8 +2,11 @@ use crate::data_structures::interface::{InterfaceConfig, InterfaceError, Interfa
 use crate::data_structures::seqno::SeqNo;
 use crate::data_types::{Address, Interval};
 use crate::extension::address::AddressExt;
-use crate::metric::{IhuRatio, LinkCostCalculator};
-use crate::utils::{DurationMultiplier, Instant, InternallyKeyed, Timer};
+use crate::metric::LinkCostCalculator;
+use crate::packet::tlv::hello_slice::HelloFlags;
+use crate::packet::writer::ready::Ready;
+use crate::packet::writer::{PacketWriterError, PacketWriterStep};
+use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, Timer};
 
 /// Interfaces that speak the Babel Protocol
 #[derive(Debug, Clone, Copy)]
@@ -27,9 +30,6 @@ pub struct Interface<A: AddressExt> {
     pub(crate) update_timer: Timer,
 
     // User config
-    /// Flag that indicates this interface should send unicast IHUs.
-    pub(crate) unicast_ihu: bool,
-
     /// This interface gives this interval to new neighbour table entries when new neighbours are
     /// discovered. The router will then send unicast hellos to this neighbour at this interval.
     /// This defaults to None as most babel speakers should prefer multicast hellos.
@@ -67,9 +67,54 @@ impl<A: AddressExt> Interface<A> {
                     .update_interval_spec
                     .apply_to_interval(config.mcast_hello_interval),
             )?,
-            unicast_ihu: config.unicast_ihu,
             ihu_hold_time_multiple: config.ihu_hold_time,
             cost_calc: config.cost_calc,
         })
+    }
+
+    /// Polls this interface for an mcast hello.
+    ///
+    /// If the write to the writer is successful it will also update the state for the interface.
+    pub(crate) fn poll_for_mcast_hello<'output>(
+        &mut self,
+        now: Instant,
+        next_poll: &mut Duration,
+        mut writer: PacketWriterStep<'output, Ready>,
+    ) -> Result<
+        PacketWriterStep<'output, Ready>,
+        (PacketWriterError, PacketWriterStep<'output, Ready>),
+    > {
+        // If the timer on the interface hello has not fired, update the next_poll and return the
+        // writer unchanged.
+        if let Some(remaining) = self.hello_timer.time_remaining(now) {
+            *next_poll = remaining.min(*next_poll);
+            return Ok(writer);
+        }
+
+        // If there is no time remaining in the timer, send an mcast hello.
+        let flags = HelloFlags::new_multicast();
+        let seqno = self.hello_seqno;
+        let duration = self.hello_timer.interval();
+
+        b_trace!(
+            "[SEND] MCAST HELLO - iface {} - {:?}, {:?}, interval: {}",
+            self.handle,
+            flags,
+            seqno,
+            duration.as_centis()
+        );
+
+        writer = writer
+            .write_hello(flags, seqno, duration.into())?
+            .finish_tlv()?;
+
+        // If the write succeeds, update state.
+        // Restart hello timer
+        self.hello_timer.restart(now);
+        *next_poll = self.hello_timer.duration().min(*next_poll);
+        // Increment the seqno
+        self.hello_seqno += 1;
+
+        Ok(writer)
     }
 }

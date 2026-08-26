@@ -157,7 +157,7 @@ mod test {
     use crate::data_structures::interface::InterfaceConfig;
     use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_structures::seqno::SeqNo;
-    use crate::data_types::RouterId;
+    use crate::data_types::{Interval, RouterId};
     use crate::extension::NoExtension;
     use crate::metric::TxCost;
     use crate::packet::packet_header::PacketHeader;
@@ -167,7 +167,7 @@ mod test {
     use crate::utils::Duration;
 
     // Long enough not to fire again mid-test, still inside the Timer bound.
-    const IFACE_INTERVAL: Duration = Duration::from_secs(600);
+    const IFACE_INTERVAL: Interval = Interval::from_duration(Duration::from_secs(600));
 
     const NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
     const NEIGHBOUR_1_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
@@ -315,7 +315,7 @@ mod test {
 
         let unknown = iface_handle("nope");
         let err = r
-            .add_neighbour(t0, unknown, NEIGHBOUR_1_ADDR.into(), None)
+            .add_neighbour(t0, unknown, NEIGHBOUR_1_ADDR.into())
             .expect_err("an unregistered interface should be rejected");
 
         assert!(matches!(err, BabelError::InterfaceDoesntExist(h) if h == unknown));
@@ -338,7 +338,7 @@ mod test {
         let iface = drained_iface(&mut r, t0, "iface_1");
 
         for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
-            r.add_neighbour(t0, iface, addr.into(), None)
+            r.add_neighbour(t0, iface, addr.into())
                 .expect("add_neighbour should succeed");
         }
 
@@ -371,7 +371,7 @@ mod test {
         let t0 = Instant::from_secs(0);
         let iface = drained_iface(&mut r, t0, "iface_1");
 
-        r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into(), None)
+        r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into())
             .expect("add_neighbour should succeed");
 
         // Neighbour 1 multicasts two IHUs: one for us, one for neighbour 2.
@@ -496,7 +496,7 @@ mod test {
         let iface = drained_iface(&mut r, t0, "iface_1");
 
         for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
-            r.add_neighbour(t0, iface, addr.into(), None)
+            r.add_neighbour(t0, iface, addr.into())
                 .expect("add_neighbour should succeed");
         }
 

@@ -14,7 +14,6 @@ pub struct InterfaceConfig<A: AddressExt> {
     pub(crate) mcast_hello_interval: Interval,
     pub(crate) ucast_hello_interval: Option<Interval>,
     pub(crate) update_interval_spec: DurationSpec,
-    pub(crate) unicast_ihu: bool,
     pub(crate) ihu_hold_time: DurationMultiplier,
     pub(crate) cost_calc: &'static dyn LinkCostCalculator,
 }
@@ -38,7 +37,6 @@ impl<A: AddressExt> InterfaceConfig<A> {
             ucast_hello_interval: None,
             update_interval_spec: DurationSpec::UPDATE_SPEC,
             ihu_hold_time: DEFAULT_HOLD_TIME_MULTIPLIER,
-            unicast_ihu: false,
             cost_calc: &COST_CALC,
         }
     }
@@ -57,14 +55,6 @@ impl<A: AddressExt> InterfaceConfig<A> {
     /// The given interval will be clamped to `1 <= duration <= u16::MAX centiseconds`
     pub fn set_ucast_hello_interval(&mut self, interval: Interval) {
         self.ucast_hello_interval = Some(interval);
-    }
-
-    /// Sets whether IHUs coming from this interface should be unicast.
-    ///
-    /// When set to false, IHU's from this interface will be generated with a
-    /// [`TransmitDestination::Multicast`](crate::output::TransmitDestination) destination.
-    pub fn set_unicast_ihu(&mut self, value: bool) {
-        self.unicast_ihu = value
     }
 
     /// Sets the cost calculator of this interface to a user provided struct.

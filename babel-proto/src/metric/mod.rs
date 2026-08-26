@@ -34,11 +34,7 @@ pub trait LinkCostCalculator: Debug {
     ///
     /// * `mcast_hello_history`: A [`BitHistory`] of multicast hellos received by this neighbour.
     /// * `ucast_hello_history`: A [`BitHistory`] of unicast hellos received by this neighbour.
-    fn rx_cost(
-        &mut self,
-        mcast_hello_history: BitHistory,
-        ucast_hello_history: BitHistory,
-    ) -> RxCost;
+    fn rx_cost(&self, mcast_hello_history: BitHistory, ucast_hello_history: BitHistory) -> RxCost;
 
     /// Computes the [`DurationSpec`] for the ihu interval of this interface.
     ///
@@ -49,7 +45,7 @@ pub trait LinkCostCalculator: Debug {
     /// * `mcast_hello_history`: A [`BitHistory`] of multicast hellos received by this neighbour.
     /// * `ucast_hello_history`: A [`BitHistory`] of unicast hellos received by this neighbour.
     fn ihu_interval(
-        &mut self,
+        &self,
         mcast_hello_history: BitHistory,
         ucast_hello_history: BitHistory,
     ) -> DurationSpec;
@@ -59,7 +55,7 @@ pub trait LinkCostCalculator: Debug {
     /// Arguments:
     /// * `rx_cost`: This node's own calculated rx_cost as defined by [`Self::rx_cost`]
     /// * `tx_cost`: The tx_cost reported by this neighbour in its IHU TLV.
-    fn link_cost(&mut self, rx_cost: RxCost, tx_cost: TxCost) -> Cost;
+    fn link_cost(&self, rx_cost: RxCost, tx_cost: TxCost) -> Cost;
 }
 
 /// The ratio of IHU's per multicast hello for this interface.

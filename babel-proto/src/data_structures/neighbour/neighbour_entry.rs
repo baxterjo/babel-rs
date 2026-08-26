@@ -8,9 +8,14 @@ use crate::data_structures::neighbour::{
 use crate::data_structures::seqno::SeqNo;
 use crate::data_types::{Address, Interval};
 use crate::extension::address::AddressExt;
+use crate::metric::LinkCostCalculator;
 use crate::metric::distance::TxCost;
+use crate::packet::tlv::hello_slice::HelloFlags;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
+use crate::packet::writer::ready::Ready;
+use crate::packet::writer::{PacketWriterError, PacketWriterStep};
 use crate::utils::bit_history::BitHistory;
+use crate::utils::destination::DestAddr;
 use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, Timer, TimerError};
 
 //  _  _ ___ ___ ___ _  _ ___  ___  _   _ ___   ___ _  _ ___  _____  __
@@ -146,6 +151,21 @@ impl<A: AddressExt> Neighbour<A> {
         })
     }
 
+    //  _    _          _   _ _____  _      ______
+    // | |  | |   /\   | \ | |  __ \| |    |  ____|
+    // | |__| |  /  \  |  \| | |  | | |    | |__
+    // |  __  | / /\ \ | . ` | |  | | |    |  __|
+    // | |  | |/ ____ \| |\  | |__| | |____| |____
+    // |_|  |_/_/    \_\_| \_|_____/|______|______|
+    //
+    //
+    //  _____ _   _ _____  _    _ _______
+    // |_   _| \ | |  __ \| |  | |__   __|
+    //   | | |  \| | |__) | |  | |  | |
+    //   | | | . ` |  ___/| |  | |  | |
+    //  _| |_| |\  | |    | |__| |  | |
+    // |_____|_| \_|_|     \____/   |_|
+
     //  _  _   _   _  _ ___  _    ___   _  _ ___ _    _    ___
     // | || | /_\ | \| |   \| |  | __| | || | __| |  | |  / _ \
     // | __ |/ _ \| .` | |) | |__| _|  | __ | _|| |__| |_| (_) |
@@ -255,6 +275,157 @@ impl<A: AddressExt> Neighbour<A> {
         self.tx_cost = rx_cost.into();
 
         Ok(())
+    }
+
+    //  _____   ____  _      _         ____  _    _ _______ _____  _    _ _______
+    // |  __ \ / __ \| |    | |       / __ \| |  | |__   __|  __ \| |  | |__   __|
+    // | |__) | |  | | |    | |      | |  | | |  | |  | |  | |__) | |  | |  | |
+    // |  ___/| |  | | |    | |      | |  | | |  | |  | |  |  ___/| |  | |  | |
+    // | |    | |__| | |____| |____  | |__| | |__| |  | |  | |    | |__| |  | |
+    // |_|     \____/|______|______|  \____/ \____/   |_|  |_|     \____/   |_|
+
+    //  ___  ___  _    _      _   _  ___   _   ___ _____   _  _ ___ _    _    ___
+    // | _ \/ _ \| |  | |    | | | |/ __| /_\ / __|_   _| | || | __| |  | |  / _ \
+    // |  _/ (_) | |__| |__  | |_| | (__ / _ \\__ \ | |   | __ | _|| |__| |_| (_) |
+    // |_|  \___/|____|____|  \___/ \___/_/ \_\___/ |_|   |_||_|___|____|____\___/
+
+    pub(crate) fn poll_for_ucast_hello<'output>(
+        &mut self,
+        now: Instant,
+        next_poll: &mut Duration,
+        mut writer: PacketWriterStep<'output, Ready>,
+    ) -> Result<
+        PacketWriterStep<'output, Ready>,
+        (PacketWriterError, PacketWriterStep<'output, Ready>),
+    > {
+        // Check if this neighbour wants to send ucast hellos. If not, return the writer unchanged.
+        let Some(ucast_hello) = &mut self.pending.ucast_hello else {
+            return Ok(writer);
+        };
+
+        // If the timer is not done, update next poll and return writer unchanged.
+        if let Some(remaining) = ucast_hello.timer.time_remaining(now) {
+            *next_poll = remaining.min(*next_poll);
+            return Ok(writer);
+        }
+
+        let flags = HelloFlags::new_unicast();
+        let seqno = ucast_hello.seqno;
+        let duration = ucast_hello.timer.duration();
+
+        b_trace!(
+            "[SEND] UCAST HELLO - iface {}, addr: {} - {:?}, {:?}, interval: {}",
+            self.iface,
+            self.address,
+            flags,
+            seqno,
+            duration.as_centis()
+        );
+        writer = writer
+            .write_hello(flags, seqno, duration.into())?
+            .finish_tlv()?;
+
+        ucast_hello.timer.restart(now);
+        ucast_hello.seqno += 1;
+
+        Ok(writer)
+    }
+
+    //  ___  ___  _    _      ___ _  _ _   _
+    // | _ \/ _ \| |  | |    |_ _| || | | | |
+    // |  _/ (_) | |__| |__   | || __ | |_| |
+    // |_|  \___/|____|____| |___|_||_|\___/
+
+    pub(crate) fn poll_for_ihu<'output>(
+        &mut self,
+        now: Instant,
+        active_dest: &mut DestAddr<A>,
+        next_poll: &mut Duration,
+        cost_calc: &'static dyn LinkCostCalculator,
+        mut writer: PacketWriterStep<'output, Ready>,
+    ) -> Result<
+        PacketWriterStep<'output, Ready>,
+        (PacketWriterError, PacketWriterStep<'output, Ready>),
+    > {
+        // If there is time remaining in the IHU timer for this neighbour, update next_poll and
+        // return the writer unchanged.
+        if let Some(remaining) = self.pending.outbound_ihu_timer.time_remaining(now) {
+            *next_poll = remaining.min(*next_poll);
+            return Ok(writer);
+        }
+
+        // If the active address has been claimed and it is not destined for this neighbour, return
+        // the writer unchanged.
+        if active_dest
+            .unicast_addr()
+            .is_some_and(|addr| *addr != self.address)
+        {
+            return Ok(writer);
+        }
+
+        // At this point
+        //
+        // The neighbour:
+        // - Has an IHU due
+        // The active address is either:
+        // - Free
+        // - Unicast and matches this address
+        // - Multicast
+
+        // The Address field names the IHU's destination, so that IHUs for several neighbours
+        // can be aggregated into one multicast packet and each receiver can pick out its own.
+
+        // If the active_dest is already targeted at this neighbour on a unicast address, then we
+        // can use the wildcard AE with a 0 length address field to save network resources.
+        let (ae, addr_wire): (u8, &[u8]) = if active_dest.unicast_addr() == Some(&self.address) {
+            (0, &[])
+        } else {
+            // Otherwise this is a multicast address and the address needs to be included.
+            let ae = match self.address.encoding().try_into() {
+                Ok(val) => val,
+                Err(err) => {
+                    // The built in address encoding is well tested, if this error occurs it is due
+                    // to the user's AddressExt failing. Return the writer unchanged.
+                    b_debug!("AddressEncodingExt Error: {}", err);
+                    return Ok(writer);
+                }
+            };
+            (ae, self.address.as_wire())
+        };
+        let interval = self.pending.outbound_ihu_timer.interval();
+        let rx_cost =
+            cost_calc.rx_cost(self.mcast_hello_info.history, self.ucast_hello_info.history);
+
+        // The Interval field advertises when the next IHU is due, which RFC 8966 Appendix B
+        // puts at three times the multicast Hello interval. Once the periodic cadence lands
+        // this should come from whatever timer actually schedules the next IHU.
+        b_debug!(
+            "[SEND] IHU -  dest_addr: {:?} - ae: {}, rx_cost: {}, interval_csec: {}, addr: {:?}",
+            active_dest,
+            ae,
+            rx_cost,
+            interval.as_centis(),
+            self.address
+        );
+
+        writer = writer
+            .write_ihu(ae, rx_cost, interval, addr_wire)?
+            .finish_tlv()?;
+
+        // Claim the active address after the write succeeds.
+        //
+        // Prefer to send to multicast address as an optimization.
+        // TODO(#11): Wire up the preference for unicast IHU's here.
+        if active_dest.is_free() {
+            let _ = active_dest.claim(DestAddr::Multicast);
+        }
+
+        // Once the packet has been written, this neighbour's IHU is no longer due. Clearing
+        // only after a successful write is what lets a destination conflict defer a neighbour
+        // to the next poll instead of dropping its IHU.
+        self.pending.outbound_ihu_timer.restart(now);
+
+        Ok(writer)
     }
 }
 

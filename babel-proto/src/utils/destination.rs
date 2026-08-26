@@ -50,6 +50,10 @@ impl<A: AddressExt> DestAddr<A> {
             _ => None,
         }
     }
+
+    pub(crate) fn can_send_ihu(&self, addr: &Address<A>) -> bool {
+        self.is_free() || self.is_multicast() || self.unicast_addr().is_some_and(|a| a == addr)
+    }
 }
 
 impl<A: AddressExt> TryInto<TransmitDestination<A>> for DestAddr<A> {

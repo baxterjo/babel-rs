@@ -85,7 +85,7 @@ impl<A: AddressExt> NeighbourConfig<A> {
                 * DEFAULT_HOLD_TIME_MULTIPLIER)
                 .into(),
             outbound_ihu_interval: (DEFAULT_LOSSLESS_IHU_RATIO
-                .apply(*DEFAULT_MULTICAST_HELLO_INTERVAL))
+                .apply(interface.hello_timer.duration()))
             .into(),
             ucast_hello_interval: interface.ucast_hello_interval,
         }

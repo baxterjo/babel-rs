@@ -27,6 +27,8 @@ where
     IncorrectVersionNumber { expected: u8, received: u8 },
     #[error("Attempted to reference a non-existant interface: {0}")]
     InterfaceDoesntExist(InterfaceHandle),
+    #[error("Polled for output but no interface reported a wake-up time")]
+    NoWakeUpTime,
     #[error(transparent)]
     Len(#[from] LenError),
     #[error(transparent)]
