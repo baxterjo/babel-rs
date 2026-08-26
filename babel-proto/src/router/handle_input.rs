@@ -15,7 +15,7 @@ use crate::utils::{Instant, ManagedSliceExt};
 impl<'storage, A, P> BabelRouter<'storage, P, A>
 where
     A: AddressExt,
-    P: ParserStateExt,
+    P: ParserStateExt<AddressEncoding = A::Encoding, Address = A>,
 {
     pub fn handle_input<'input>(
         &mut self,
