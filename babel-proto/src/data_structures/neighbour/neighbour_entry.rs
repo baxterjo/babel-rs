@@ -10,8 +10,7 @@ use crate::metric::IhuRatio;
 use crate::metric::distance::TxCost;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
 use crate::utils::bit_history::BitHistory;
-use crate::utils::timer::{Timer, TimerError};
-use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed};
+use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, Timer, TimerError};
 
 /// [Appendix B](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.8) the
 /// **advertised** IHU interval is always 3 times the Multicast Hello interval. IHUs are actually

@@ -3,15 +3,13 @@ use crate::data_structures::seqno::SeqNo;
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::metric::LinkCostCalculator;
-use crate::utils::timer::Timer;
-use crate::utils::{Duration, Instant, InternallyKeyed};
+use crate::utils::{Duration, Instant, InternallyKeyed, Timer};
 
 /// Interfaces that speak the Babel Protocol
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Interface<A: AddressExt> {
     // Spec values
-    //
     /// User defined interface ID. Used to correlate the router tracked interface with user defined
     /// interfaces.
     pub(crate) handle: InterfaceHandle,
@@ -29,7 +27,6 @@ pub struct Interface<A: AddressExt> {
     pub(crate) update_timer: Timer,
 
     // User config
-    //
     /// Flag that indicates this interface should send unicast IHUs.
     pub(crate) unicast_ihu: bool,
 

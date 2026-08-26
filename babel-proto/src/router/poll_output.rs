@@ -478,8 +478,8 @@ mod test {
     use crate::packet::packet_slice::PacketSlice;
     use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, TypedTlv};
     use crate::router::config::BabelRouterConfig;
+    use crate::utils::Timer;
     use crate::utils::storage::ManagedSliceExt;
-    use crate::utils::timer::Timer;
 
     // Long enough that it never fires again during a test and well clear of the small durations
     // used for IHU/ucast hello, but small enough that the advertised IHU interval derived from it

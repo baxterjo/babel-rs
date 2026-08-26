@@ -11,10 +11,9 @@ pub(crate) use interface_table::InterfaceTable;
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::metric::{KOutOfJ, LinkCostCalculator};
-use crate::utils::Duration;
 use crate::utils::short_id::fmt_short_id;
 use crate::utils::time::DurationSpec;
-use crate::utils::timer::TimerError;
+use crate::utils::{Duration, TimerError};
 
 /// Recommended message intervals indicated in [Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.2)
 pub const DEFAULT_MULTICAST_HELLO_INTERVAL_SECS: u64 = 4;

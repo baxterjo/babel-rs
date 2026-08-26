@@ -6,9 +6,9 @@ use crate::data_structures::neighbour::neighbour_entry::{
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
-use crate::utils::timer::Timer;
 use crate::utils::{
     Duration, DurationMultiplier, Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt as _,
+    Timer,
 };
 
 pub struct NeighbourTable<'storage, A>

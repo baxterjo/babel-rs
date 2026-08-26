@@ -6,8 +6,7 @@ pub(crate) mod managed_slice;
 pub(crate) mod short_id;
 pub(crate) mod storage;
 pub(crate) mod time;
-pub(crate) mod timer;
 
 pub(crate) use managed_slice::ManagedSlice;
 pub(crate) use storage::{InternallyKeyed, ManagedSliceExt};
-pub use time::{Duration, DurationMultiplier, Instant};
+pub use time::{Duration, DurationMultiplier, Instant, Timer, TimerError};
