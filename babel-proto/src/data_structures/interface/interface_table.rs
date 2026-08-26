@@ -48,7 +48,7 @@ impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
             return Err(InterfaceError::DuplicateInterfaceId(config.id));
         }
 
-        let interface = Interface::new(now, config);
+        let interface = Interface::new(now, config)?;
         let handle = interface.handle;
 
         // Insert into the interface table

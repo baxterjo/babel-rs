@@ -1,4 +1,4 @@
-use crate::data_structures::interface::InterfaceHandle;
+use crate::data_structures::interface::{self, Interface, InterfaceHandle};
 use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
 use crate::error::BabelError;
@@ -24,9 +24,11 @@ where
     ) -> Result<(), BabelError<A>> {
         b_trace!("{:?}", input);
 
-        if self.iface_table.inner.get_by_key(&input.iface).is_none() {
+        // Have to copy the interface here to avoid indexing the interface table for every TLV in
+        // the loop below.
+        let Some(interface) = self.iface_table.inner.get_by_key(&input.iface).copied() else {
             return Err(BabelError::InterfaceDoesntExist(input.iface));
-        }
+        };
 
         let _parser: Parser<P> = Parser::default();
         let packet = PacketSlice::from_slice(input.contents)?;
@@ -58,12 +60,12 @@ where
                 // are independent of one another, so letting one bad TLV discard the valid ones
                 // behind it hands any sender on the link a way to suppress them.
                 Tlv::Hello(hello) => {
-                    ok_or_continue!(self.handle_hello(now, input.iface, input.source_addr, hello));
+                    ok_or_continue!(self.handle_hello(now, &interface, input.source_addr, hello));
                 }
                 Tlv::Ihu(ihu) => {
                     ok_or_continue!(self.handle_ihu(
                         now,
-                        input.iface,
+                        &interface,
                         input.source_addr,
                         input.destination,
                         ihu
@@ -89,7 +91,7 @@ where
     fn handle_hello(
         &mut self,
         now: Instant,
-        interface: InterfaceHandle,
+        interface: &Interface<A>,
         address: Address<A>,
         hello: HelloSlice<'_>,
     ) -> Result<(), BabelError<A>> {
@@ -101,21 +103,12 @@ where
     fn handle_ihu(
         &mut self,
         now: Instant,
-        interface: InterfaceHandle,
+        interface: &Interface<A>,
         source_addr: Address<A>,
         destination: ReceiveDestination,
         ihu: IhuSlice<'_>,
     ) -> Result<(), BabelError<A>> {
-        // Our address on the interface the packet arrived on. The interface is validated at the
-        // top of `handle_input`, so it is still present here.
-        let our_addr = self
-            .iface_table
-            .inner
-            .get_by_key(&interface)
-            .ok_or(BabelError::InterfaceDoesntExist(interface))?
-            .address;
-
-        if !ihu_is_addressed_to_us(&ihu, destination, our_addr)? {
+        if !ihu_is_addressed_to_us(&ihu, destination, interface.address)? {
             b_debug!("Ignoring IHU addressed to another neighbour");
             return Ok(());
         }
@@ -123,7 +116,7 @@ where
         // The rxcost belongs to whoever sent the packet. Nothing inside a Babel packet names its
         // sender, so the transport's source address is the only thing that identifies them.
         self.neighbor_table
-            .handle_ihu(now, interface, source_addr, ihu)?;
+            .handle_ihu(now, source_addr, interface, ihu)?;
         Ok(())
     }
 }

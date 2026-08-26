@@ -3,7 +3,7 @@ use core::marker::PhantomData;
 use crate::data_structures::interface::{
     Interface, InterfaceConfig, InterfaceHandle, InterfaceTable,
 };
-use crate::data_structures::neighbour::{Neighbour, NeighbourIndex, NeighbourTable};
+use crate::data_structures::neighbour::{Neighbour, NeighbourConfig, NeighbourTable};
 use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
 use crate::data_structures::route::{Route, RouteTable};
 use crate::data_types::{Address, RouterId};
@@ -12,7 +12,7 @@ use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
 use crate::router::config::BabelRouterConfig;
-use crate::utils::{Duration, Instant, ManagedSlice, ManagedSliceExt};
+use crate::utils::{Instant, ManagedSlice, ManagedSliceExt};
 
 pub mod config;
 pub mod handle_input;
@@ -121,17 +121,14 @@ where
         now: Instant,
         interface: InterfaceHandle,
         address: Address<A>,
-        ucast_hello_interval: Option<Duration>,
     ) -> Result<(), BabelError<A>> {
         // If the interface doesn't exist then the neighbour can't be created.
         let Some(iface) = self.iface_table.inner.get_by_key(&interface) else {
             return Err(BabelError::InterfaceDoesntExist(interface));
         };
 
-        Ok(self.neighbor_table.add_neighbour(
-            now,
-            &NeighbourIndex(interface, address),
-            ucast_hello_interval.or(iface.ucast_hello_interval),
-        )?)
+        let config = NeighbourConfig::interface_default(address, iface);
+
+        Ok(self.neighbor_table.add_neighbour(now, config)?)
     }
 }

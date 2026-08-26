@@ -28,6 +28,8 @@ pub use timer::Timer;
 #[doc(inline)]
 pub use timer::TimerError;
 
+use crate::data_types::Interval;
+
 /// Provide a literal or referential duration for certain interval values.
 ///
 /// There are many areas in the spec where the "recommended" value for an interval is a multiple of
@@ -66,6 +68,16 @@ impl DurationSpec {
         match self {
             Self::Literal(dur) => *dur,
             Self::Multiple(mul) => duration * *mul,
+        }
+    }
+
+    pub(crate) fn apply_to_interval(&self, interval: Interval) -> Interval {
+        match self {
+            Self::Literal(dur) => (*dur).into(),
+            Self::Multiple(mul) => {
+                let new_dur = *interval * *mul;
+                new_dur.into()
+            }
         }
     }
 }

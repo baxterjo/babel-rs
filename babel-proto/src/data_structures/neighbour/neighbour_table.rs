@@ -1,23 +1,16 @@
-use crate::data_structures::interface::InterfaceHandle;
-use crate::data_structures::neighbour::NeighbourTableError;
-use crate::data_structures::neighbour::neighbour_entry::{
-    DEFAULT_HOLD_TIME_MULTIPLIER, Neighbour, NeighbourIndex,
-};
+use crate::data_structures::interface::{Interface, InterfaceHandle};
+use crate::data_structures::neighbour::neighbour_entry::{Neighbour, NeighbourIndex};
+use crate::data_structures::neighbour::{NeighbourConfig, NeighbourError};
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
-use crate::utils::{
-    Duration, DurationMultiplier, Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt as _,
-    Timer,
-};
+use crate::utils::{Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt as _, Timer};
 
 pub struct NeighbourTable<'storage, A>
 where
     A: AddressExt,
 {
     pub(crate) inner: ManagedSlice<'storage, Option<Neighbour<A>>>,
-    /// The hold time of a neighbour between receiving IHU TLVs.
-    pub(crate) hold_time: DurationMultiplier,
 }
 
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -45,7 +38,6 @@ where
     {
         Self {
             inner: table.into(),
-            hold_time: DEFAULT_HOLD_TIME_MULTIPLIER,
         }
     }
 
@@ -53,24 +45,26 @@ where
     pub fn new() -> Self {
         Self {
             inner: ManagedSlice::Owned(Default::default()),
-            hold_time: DEFAULT_HOLD_TIME_MULTIPLIER,
         }
     }
 
     fn get_or_insert_default(
         &mut self,
         now: Instant,
-        index: &NeighbourIndex<A>,
-    ) -> Result<&mut Neighbour<A>, NeighbourTableError<A>> {
+        address: Address<A>,
+        interface: &Interface<A>,
+    ) -> Result<&mut Neighbour<A>, NeighbourError<A>> {
+        let config = NeighbourConfig::interface_default(address, interface);
+        let index = config.index();
         // If the neighbour doesnt exist, create it.
-        if self.inner.get_mut_by_key(index).is_none() {
-            self.add_neighbour(now, index, None)?;
+        if self.inner.get_mut_by_key(&index).is_none() {
+            self.add_neighbour(now, config)?;
         }
 
         // Now return a mutable reference
         let neighbour = self
             .inner
-            .get_mut_by_key(index)
+            .get_mut_by_key(&index)
             .expect("Could not get neighbour just inserted into table?");
 
         Ok(neighbour)
@@ -79,14 +73,14 @@ where
     pub fn add_neighbour(
         &mut self,
         now: Instant,
-        index: &NeighbourIndex<A>,
-        ucast_hello_interval: Option<Duration>,
-    ) -> Result<(), NeighbourTableError<A>> {
-        let timer_opt = ucast_hello_interval
-            .map(|int| Timer::new(now, int))
+        config: NeighbourConfig<A>,
+    ) -> Result<(), NeighbourError<A>> {
+        let timer_opt = config
+            .ucast_hello_interval
+            .map(|int| Timer::from_interval(now, int))
             .transpose()?;
 
-        let neighbour = Neighbour::new(now, index.0, index.1, timer_opt);
+        let neighbour = Neighbour::new(now, config)?;
         let index = neighbour.key();
 
         b_debug!("Registering neighbour: {:?}", index);
@@ -94,12 +88,12 @@ where
         match self.inner.insert(neighbour) {
             Ok(v) if v.is_some() => {
                 b_debug!("Duplicate neighbour registered");
-                Err(NeighbourTableError::DuplicateNeighbour(index))
+                Err(NeighbourError::DuplicateNeighbour(index))
             }
             Ok(_) => Ok(()),
             Err(_err) => {
                 b_debug!("Neighbour table is full");
-                Err(NeighbourTableError::Full)
+                Err(NeighbourError::Full)
             }
         }
     }
@@ -126,11 +120,11 @@ where
     pub fn handle_hello(
         &mut self,
         now: Instant,
-        interface: InterfaceHandle,
+        interface: &Interface<A>,
         address: Address<A>,
         hello: HelloSlice<'_>,
-    ) -> Result<(), NeighbourTableError<A>> {
-        let neighbour = self.get_or_insert_default(now, &NeighbourIndex(interface, address))?;
+    ) -> Result<(), NeighbourError<A>> {
+        let neighbour = self.get_or_insert_default(now, address, interface)?;
         b_debug!(
             "[RECV] Hello - iface: {:?}, addr: {:?} - {:?}",
             interface,
@@ -150,20 +144,18 @@ where
     pub fn handle_ihu(
         &mut self,
         now: Instant,
-        interface: InterfaceHandle,
         address: Address<A>,
+        interface: &Interface<A>,
         ihu: IhuSlice<'_>,
-    ) -> Result<(), NeighbourTableError<A>> {
-        let hold_time = self.hold_time;
-
-        let neighbour = self.get_or_insert_default(now, &NeighbourIndex(interface, address))?;
+    ) -> Result<(), NeighbourError<A>> {
+        let neighbour = self.get_or_insert_default(now, address, interface)?;
         b_debug!(
             "[RECV] IHU - iface: {:?}, addr: {:?} - {:?}",
-            interface,
+            interface.handle,
             address,
             ihu
         );
-        neighbour.handle_ihu(now, ihu, hold_time)?;
+        neighbour.handle_ihu(now, ihu, interface.ihu_hold_time_multiple)?;
         Ok(())
     }
 }

@@ -76,15 +76,11 @@ impl IhuRatio {
         Self(DurationMultiplier::new(num, den))
     }
     pub fn apply(&self, duration: Duration) -> Duration {
-        if self.0.num().div(self.0.den()) == 0 {
-            return duration;
-        }
+        // Apply the multiplier
+        let new = duration * self.0;
 
-        if self.0.num().div_ceil(self.0.den()) > 3 {
-            return duration * 3;
-        }
-
-        duration * self.0
+        // Clamp it betwee [1:1, 3:1] ratio.
+        new.max(duration).min(duration * 3)
     }
 }
 

@@ -34,6 +34,19 @@ impl Interval {
     pub fn is_zero(&self) -> bool {
         self.as_centis() == 0
     }
+
+    pub const fn from_duration(duration: Duration) -> Self {
+        let centis = duration.as_centis();
+
+        // If the provided duration is greater than the highest possible wire format, then
+        // clamp it.
+        if centis > u16::MAX as u64 {
+            Self(Duration::from_centis(u16::MAX as u64))
+        } else {
+            // Otherwise let it through
+            Self(Duration::from_centis(centis))
+        }
+    }
 }
 
 impl Deref for Interval {
@@ -45,16 +58,7 @@ impl Deref for Interval {
 
 impl From<Duration> for Interval {
     fn from(value: Duration) -> Self {
-        let centis = value.as_centis();
-
-        // If the provided duration is greater than the highest possible wire format, then
-        // clamp it.
-        if centis > u16::MAX.into() {
-            Self(Duration::from_centis(u16::MAX.into()))
-        } else {
-            // Otherwise let it through
-            Self(Duration::from_centis(centis))
-        }
+        Self::from_duration(value)
     }
 }
 
