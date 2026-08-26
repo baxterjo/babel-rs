@@ -12,7 +12,7 @@ use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv};
 use crate::router::BabelRouter;
 use crate::utils::{Instant, ManagedSliceExt};
 
-impl<'storage, A, P, const MN: u8, const V: u8> BabelRouter<'storage, P, A, MN, V>
+impl<'storage, A, P> BabelRouter<'storage, P, A>
 where
     A: AddressExt,
     P: ParserStateExt,
@@ -33,17 +33,17 @@ where
         b_trace!("{:?}", packet);
 
         let magic = packet.magic();
-        if magic != MN {
+        if magic != self.magic_number {
             return Err(BabelError::IncorrectMagicNumber {
-                expected: MN,
+                expected: self.magic_number,
                 received: magic,
             });
         }
 
         let version = packet.version();
-        if version != V {
+        if version != self.version_number {
             return Err(BabelError::IncorrectVersionNumber {
-                expected: V,
+                expected: self.version_number,
                 received: version,
             });
         }
@@ -167,9 +167,10 @@ mod test {
     use crate::data_types::RouterId;
     use crate::extension::NoExtension;
     use crate::metric::TxCost;
-    use crate::packet::packet_header::BabelPacketHeader;
+    use crate::packet::packet_header::PacketHeader;
     use crate::packet::tlv::TypedTlv;
     use crate::packet::tlv::hello_slice::HelloFlags;
+    use crate::router::config::BabelRouterConfig;
     use crate::utils::Duration;
 
     // Long enough not to fire again mid-test, still inside the Timer bound.
@@ -180,7 +181,9 @@ mod test {
     const NEIGHBOUR_2_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
 
     fn router(name: &'static str) -> BabelRouter<'static> {
-        BabelRouter::new(RouterId::try_from(name).expect("bad router id"))
+        BabelRouter::new(BabelRouterConfig::new(
+            RouterId::try_from(name).expect("bad router id"),
+        ))
     }
 
     fn iface_handle(name: &str) -> InterfaceHandle {
@@ -189,10 +192,7 @@ mod test {
 
     /// Wraps a TLV body in a Babel packet header.
     fn packet(body: &[u8]) -> Vec<u8> {
-        let mut out = vec![
-            BabelPacketHeader::MAGIC_NUMBER,
-            BabelPacketHeader::VERSION_NUMBER,
-        ];
+        let mut out = vec![PacketHeader::MAGIC_NUMBER, PacketHeader::VERSION_NUMBER];
         out.extend_from_slice(&(body.len() as u16).to_be_bytes());
         out.extend_from_slice(body);
         out

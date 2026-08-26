@@ -11,24 +11,24 @@ use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
-use crate::packet::packet_header::BabelPacketHeader;
+use crate::router::config::BabelRouterConfig;
 use crate::utils::{Duration, Instant, ManagedSlice, ManagedSliceExt};
 
+pub mod config;
 pub mod handle_input;
 pub mod poll_output;
 
-pub struct BabelRouter<
-    'storage,
-    P = NoStateExtension,
-    A = NoExtension,
-    const MN: u8 = { BabelPacketHeader::MAGIC_NUMBER },
-    const V: u8 = { BabelPacketHeader::VERSION_NUMBER },
-> where
+pub struct BabelRouter<'storage, P = NoStateExtension, A = NoExtension>
+where
     P: ParserStateExt,
     A: AddressExt,
 {
     /// Router ID of this Babel router. This must be globally unique within your routing domain.
     pub(crate) id: RouterId,
+
+    pub(crate) magic_number: u8,
+
+    pub(crate) version_number: u8,
 
     pub(crate) iface_table: InterfaceTable<'storage, A>,
 
@@ -43,7 +43,7 @@ pub struct BabelRouter<
     _addr_ext_marker: PhantomData<A>,
 }
 
-impl<'storage, A, P, const MN: u8, const V: u8> BabelRouter<'storage, P, A, MN, V>
+impl<'storage, A, P> BabelRouter<'storage, P, A>
 where
     A: AddressExt,
     P: ParserStateExt,
@@ -56,7 +56,7 @@ where
     /// `neighbour_storage`: User provided storage that will be used internally.
     /// `pending_seqno_storage`: User provided storage that will be used internally.
     pub fn new_with_storage<IF, N, PS, R>(
-        id: RouterId,
+        config: BabelRouterConfig,
         iface_storage: IF,
         neighbour_storage: N,
         pending_seqno_storage: PS,
@@ -69,7 +69,9 @@ where
         R: Into<ManagedSlice<'storage, Option<Route<A>>>>,
     {
         Self {
-            id,
+            id: config.id,
+            magic_number: config.magic_number,
+            version_number: config.version,
             iface_table: InterfaceTable::new_with_storage(iface_storage),
             neighbor_table: NeighbourTable::new_with_storage(neighbour_storage),
             pending_seqno: PendingSeqnoRequestTable::new_with_storage(pending_seqno_storage),
@@ -85,19 +87,14 @@ where
     /// `id`: The router ID of this router. This should be globally unique within your routing
     /// domain.
     #[cfg(any(feature = "std", feature = "alloc"))]
-    pub fn new(id: RouterId) -> Self {
-        Self {
-            id,
-            iface_table: InterfaceTable::new(),
-            neighbor_table: NeighbourTable::new(),
-            pending_seqno: PendingSeqnoRequestTable::new(),
-            route_table: RouteTable::new(),
-            _state_ext_marker: PhantomData,
-            _addr_ext_marker: PhantomData,
-        }
+    pub fn new(config: BabelRouterConfig) -> Self {
+        Self::new_with_storage(config, Vec::new(), Vec::new(), Vec::new(), Vec::new())
     }
 
     /// Register a new interface with the router.
+    ///
+    /// The returned handle will be used to refer to the real interface that packets will be sent
+    /// and receieved on.
     pub fn register_interface(
         &mut self,
         now: Instant,
@@ -116,9 +113,9 @@ where
     /// some out of band method for neighbour discovery in your application, this is where you will
     /// tell the router about the existance of the neighbour.
     ///
-    /// Once the neighbour has been added, it must still conform to the spec to stay in the
-    /// neighbour table. If expiry elapses without getting a hello packet from this neighbour, then
-    /// it will be removed from the neigbour table.
+    /// Once the neighbour has been added through this method, it must still conform to the spec to
+    /// stay in the neighbour table. If it does not receive any hellos, it will eventually be
+    /// removed from the neighbour table.
     pub fn add_neighbour(
         &mut self,
         now: Instant,
@@ -127,14 +124,14 @@ where
         ucast_hello_interval: Option<Duration>,
     ) -> Result<(), BabelError<A>> {
         // If the interface doesn't exist then the neighbour can't be created.
-        if self.iface_table.inner.get_by_key(&interface).is_none() {
+        let Some(iface) = self.iface_table.inner.get_by_key(&interface) else {
             return Err(BabelError::InterfaceDoesntExist(interface));
-        }
+        };
 
         Ok(self.neighbor_table.add_neighbour(
             now,
             &NeighbourIndex(interface, address),
-            ucast_hello_interval,
+            ucast_hello_interval.or(iface.ucast_hello_interval),
         )?)
     }
 }

@@ -1,6 +1,6 @@
 /// Babel packet header as defined in section
 /// [4.2](https://datatracker.ietf.org/doc/html/rfc8966#name-packet-format)
-pub struct BabelPacketHeader {
+pub struct PacketHeader {
     /// The arbitrary but carefully chosen value 42 (decimal); packets with a first octet different
     /// from 42 **MUST** be silently ignored.
     pub magic: u8,
@@ -12,7 +12,7 @@ pub struct BabelPacketHeader {
     pub body_length: u16,
 }
 
-impl BabelPacketHeader {
+impl PacketHeader {
     /// Length of the serialized Babel packet header in bytes.
     pub const LEN: usize = 4;
 

@@ -29,7 +29,7 @@ fn merge_next_poll(slot: &mut Option<Duration>, candidate: Duration) {
     });
 }
 
-impl<'storage, A, P, const MN: u8, const V: u8> BabelRouter<'storage, P, A, MN, V>
+impl<'storage, A, P> BabelRouter<'storage, P, A>
 where
     A: AddressExt,
     P: ParserStateExt,
@@ -124,7 +124,7 @@ where
 
         let mut active_dest = DestAddr::default();
         let mut active_iface = active_interface;
-        let writer = PacketWriter::new_packet(MN, V, buf.into())?;
+        let writer = PacketWriter::new_packet(self.magic_number, self.version_number, buf.into())?;
         let mut next_poll = None;
 
         let (body, write_failed) = match self.build_packet_body(
@@ -477,6 +477,7 @@ mod test {
     use crate::output::TransmitDestination;
     use crate::packet::packet_slice::PacketSlice;
     use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, TypedTlv};
+    use crate::router::config::BabelRouterConfig;
     use crate::utils::storage::ManagedSliceExt;
     use crate::utils::timer::Timer;
 
@@ -493,7 +494,9 @@ mod test {
     const NEIGHBOUR_2_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
 
     fn router(name: &'static str) -> BabelRouter<'static> {
-        BabelRouter::new(RouterId::try_from(name).expect("bad router id"))
+        BabelRouter::new(BabelRouterConfig::new(
+            RouterId::try_from(name).expect("bad router id"),
+        ))
     }
 
     fn iface_handle(name: &str) -> InterfaceHandle {

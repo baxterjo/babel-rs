@@ -3,7 +3,7 @@ use core::fmt::Debug;
 use crate::packet::error::layer::Layer;
 use crate::packet::error::len_error::LenError;
 use crate::packet::len_source::LenSource;
-use crate::packet::packet_header::BabelPacketHeader;
+use crate::packet::packet_header::PacketHeader;
 use crate::packet::utils::get_unchecked_be_u16;
 
 pub struct PacketHeaderSlice<'a> {
@@ -38,8 +38,8 @@ impl defmt::Format for PacketHeaderSlice<'_> {
 impl<'a> PacketHeaderSlice<'a> {
     pub const LEN: usize = 4;
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, LenError> {
-        let slice = slice.get(0..BabelPacketHeader::LEN).ok_or(LenError {
-            required_len: BabelPacketHeader::LEN,
+        let slice = slice.get(0..PacketHeader::LEN).ok_or(LenError {
+            required_len: PacketHeader::LEN,
             len: slice.len(),
             len_source: LenSource::Slice,
             layer: Layer::BabelPacketHeader,
