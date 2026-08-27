@@ -71,10 +71,12 @@ impl<'a> PacketState<'a> {
     ///
     /// Returns the number of bytes written.
     pub(crate) fn write(&mut self, data: &[u8]) -> Result<usize, PacketWriterError> {
-        if self.remaining().is_some_and(|rem| data.len() > rem) {
+        if let Some(remaining) = self.remaining()
+            && data.len() > remaining
+        {
             return Err(PacketWriterError::BufferTooSmall {
                 need: data.len(),
-                remaining: self.remaining().expect("Just checked if remaining is Some"),
+                remaining: remaining,
             });
         }
         match &mut self.buf {

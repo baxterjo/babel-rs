@@ -1,5 +1,4 @@
 use core::fmt::Debug;
-use core::ops::Div;
 
 #[doc(hidden)]
 pub mod distance;
@@ -12,6 +11,7 @@ pub use distance::{Cost, Metric, RxCost, TxCost};
 pub use k_of_j::KOutOfJ;
 
 use crate::utils::bit_history::BitHistory;
+use crate::utils::time::DurationSpec;
 use crate::utils::{Duration, DurationMultiplier};
 
 /// A type that calculates the RxCost from a history of neighbour hellos.
@@ -35,19 +35,19 @@ pub trait LinkCostCalculator: Debug {
     /// * `ucast_hello_history`: A [`BitHistory`] of unicast hellos received by this neighbour.
     fn rx_cost(&self, mcast_hello_history: BitHistory, ucast_hello_history: BitHistory) -> RxCost;
 
-    /// Calculates the ratio of multicast hellos to IHUs.
+    /// Computes the [`DurationSpec`] for the ihu interval of this interface.
     ///
     /// The **advertised** IHU interval is always 3 times the Multicast Hello interval. IHUs are
-    /// **actually** sent at the ratio returned here.
+    /// **actually** sent at the spec returned here.
     ///
     /// Arguments:
     /// * `mcast_hello_history`: A [`BitHistory`] of multicast hellos received by this neighbour.
     /// * `ucast_hello_history`: A [`BitHistory`] of unicast hellos received by this neighbour.
-    fn hello_ihu_ratio(
+    fn ihu_interval(
         &self,
         mcast_hello_history: BitHistory,
         ucast_hello_history: BitHistory,
-    ) -> IhuRatio;
+    ) -> DurationSpec;
 
     /// Calculates the link cost of for this neighbour.
     ///
@@ -71,15 +71,11 @@ impl IhuRatio {
         Self(DurationMultiplier::new(num, den))
     }
     pub fn apply(&self, duration: Duration) -> Duration {
-        if self.0.num().div(self.0.den()) == 0 {
-            return duration;
-        }
+        // Apply the multiplier
+        let new = duration * self.0;
 
-        if self.0.num().div_ceil(self.0.den()) > 3 {
-            return duration * 3;
-        }
-
-        duration * self.0
+        // Clamp it betwee [1:1, 3:1] ratio.
+        new.max(duration).min(duration * 3)
     }
 }
 

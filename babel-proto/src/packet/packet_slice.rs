@@ -3,7 +3,7 @@ use core::fmt::Debug;
 use crate::packet::error::layer::Layer;
 use crate::packet::error::len_error::LenError;
 use crate::packet::len_source::LenSource;
-use crate::packet::packet_header::BabelPacketHeader;
+use crate::packet::packet_header::PacketHeader;
 use crate::packet::packet_header_slice::PacketHeaderSlice;
 use crate::packet::tlv::reader::TlvReader;
 use crate::packet::utils::get_unchecked_be_u16;
@@ -142,10 +142,10 @@ impl<'a> PacketSlice<'a> {
 
         // The slice must, at minimum, be the declared body length plus header length.
         // It can also contain the packet trailer, so the entire slice is still put into the packet.
-        if slice.len() < min_len + BabelPacketHeader::LEN {
+        if slice.len() < min_len + PacketHeader::LEN {
             return Err(LenError {
                 // The slice has to hold the header as well as the declared body.
-                required_len: min_len + BabelPacketHeader::LEN,
+                required_len: min_len + PacketHeader::LEN,
                 len: slice.len(),
                 len_source: LenSource::Slice,
                 layer: Layer::BabelPacketBody,
@@ -198,7 +198,7 @@ impl<'a> PacketSlice<'a> {
             // Safe as the constructor checks that the slice has at least the length of the
             // body_len + BabelPacketHeader::LEN
             self.slice
-                .get_unchecked(BabelPacketHeader::LEN..body_length + BabelPacketHeader::LEN)
+                .get_unchecked(PacketHeader::LEN..body_length + PacketHeader::LEN)
         }
     }
 
@@ -217,7 +217,7 @@ impl<'a> PacketSlice<'a> {
             // body_len + BabelPacketHeader::LEN. And if they are equal, then this will be an empty
             // slice.
             self.slice
-                .get_unchecked(body_length + BabelPacketHeader::LEN..self.slice.len())
+                .get_unchecked(body_length + PacketHeader::LEN..self.slice.len())
         }
     }
 
@@ -283,13 +283,13 @@ mod test {
             2,  // Version
             0, 10, // Body Length
             // Hello
-            4,  // Hello Type ID
-            6,  // Length
+            4, // Hello Type ID
+            6, // Length
             0x80, 0x00, // Flags
             0, 15, // Seqno
             0, 200, // Interval
-            0, // Pad1
-            0, // Pad1
+            0,   // Pad1
+            0,   // Pad1
         ];
 
         let packet_slice = PacketSlice::from_slice(packet).expect("Packet should parse");
@@ -329,8 +329,8 @@ mod test {
             2,  // Version
             0, 12, // Body Length
             // Hello
-            4,  // Hello Type ID
-            6,  // Length
+            4, // Hello Type ID
+            6, // Length
             0x80, 0x00, // Flags
             0, 15, // Seqno
             0, 200, // Interval
@@ -362,8 +362,8 @@ mod test {
             2,  // Version
             0, 27, // Body Length
             // Hello
-            4,  // Hello Type ID
-            6,  // Length
+            4, // Hello Type ID
+            6, // Length
             0x80, 0x00, // Flags
             0, 15, // Seqno
             0, 200, // Interval
@@ -377,10 +377,10 @@ mod test {
             0x80, 0x00, // Flags
             0,    // Truncated Seqno
             // IHU
-            5,  // IHU Type ID
-            6,  // Length
-            1,  // AE
-            0,  // Reserved
+            5, // IHU Type ID
+            6, // Length
+            1, // AE
+            0, // Reserved
             0x80, 0x00, // RX Cost
             0, 200, // Interval
         ];

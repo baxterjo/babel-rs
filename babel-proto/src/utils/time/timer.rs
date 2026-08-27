@@ -16,17 +16,27 @@ pub struct Timer {
 pub enum TimerError {
     #[error("The duration of a timer cannot be zero.")]
     DurationCannotBeZero,
+    #[error("Duration too large - given: {given} centiseconds, max: {max} centiseconds", given=.0, max = u16::MAX)]
+    DurationTooLarge(u64),
 }
 
 impl Timer {
-    pub(crate) fn new_unchecked(now: Instant, duration: Duration) -> Self {
+    pub(crate) const fn new_unchecked(now: Instant, duration: Duration) -> Self {
         Self {
             start: now,
             duration,
         }
     }
+
+    pub(crate) fn new_eager_unchecked(now: Instant, duration: Duration) -> Self {
+        Self {
+            start: now - duration,
+            duration,
+        }
+    }
+
     /// Create a new timer that will fire after the duration.
-    pub fn new(now: Instant, duration: Duration) -> Result<Self, TimerError> {
+    pub fn from_duration(now: Instant, duration: Duration) -> Result<Self, TimerError> {
         if duration.as_micros() == 0 {
             return Err(TimerError::DurationCannotBeZero);
         }
@@ -40,40 +50,54 @@ impl Timer {
     /// Create a new timer that will instantly fire.
     ///
     /// Timers must be restarted manually after firing.
-    pub fn new_eager(now: Instant, duration: Duration) -> Result<Self, TimerError> {
+    pub fn eager_from_duration(now: Instant, duration: Duration) -> Result<Self, TimerError> {
         // Set the "start" time in the past. That way the timer fires immediately.
         let pre_start = now - duration;
-        Self::new(pre_start, duration)
+        Self::from_duration(pre_start, duration)
+    }
+
+    /// Creates a new timer whos interval will be advertised in a TLV.
+    ///
+    /// This clamps the bounds of the timer to be able to fit in the interval field on the wire.
+    pub fn from_interval(now: Instant, interval: Interval) -> Result<Self, TimerError> {
+        Self::from_duration(now, *interval)
+    }
+
+    /// Creates a new timer whos interval will be advertised in a TLV.
+    ///
+    /// This clamps the bounds of the timer to be able to fit in the interval field on the wire.
+    pub fn eager_from_interval(now: Instant, interval: Interval) -> Result<Self, TimerError> {
+        Self::eager_from_duration(now, *interval)
     }
 
     pub fn set_tick_duration(&mut self, duration: Duration) -> Result<(), TimerError> {
-        *self = Self::new(self.start, duration)?;
+        *self = Self::from_duration(self.start, duration)?;
         Ok(())
     }
 
-    /// Sets the duration of the timer.
+    /// Sets the interval of the timer.
     ///
-    /// All babel instances of timers suggest that if a duration increases, the corresponding
-    /// message should be sent immediately.
-    pub fn set_message_duration(&mut self, duration: Duration) -> Result<(), TimerError> {
-        if duration > self.duration {
-            *self = Self::new_eager(self.start, duration)?;
+    /// All timers that are related to sending TLVs and which advertises their duration **in** those
+    /// TLVs must immediately fire when their corresponding duration is increased. This will set
+    /// an eager timer if the given interval is greater than the existing one.
+    pub fn set_tlv_interval(&mut self, interval: Interval) -> Result<(), TimerError> {
+        if *interval > self.duration {
+            *self = Self::eager_from_interval(self.start, interval)?;
         } else {
-            *self = Self::new(self.start, duration)?;
+            *self = Self::from_interval(self.start, interval)?;
         }
 
-        Ok(())
-    }
-
-    /// Start the timer
-    pub fn start(&mut self, now: Instant, duration: Duration) -> Result<(), TimerError> {
-        *self = Self::new(now, duration)?;
         Ok(())
     }
 
     /// Restart the timer with the same duration.
     pub fn restart(&mut self, now: Instant) {
         self.start = now;
+    }
+
+    /// Restart the timer and it will fire on the first poll.
+    pub fn restart_eager(&mut self, now: Instant) {
+        self.start = now - self.duration
     }
 
     pub fn is_finished(&self, now: Instant) -> bool {
@@ -114,7 +138,8 @@ mod test {
         let duration = Duration::from_micros(200);
         let now = Instant::now();
         let future = now + Duration::from_micros(1);
-        let mut eager = Timer::new_eager(now, duration).expect("Timer should be created.");
+        let mut eager =
+            Timer::eager_from_duration(now, duration).expect("Timer should be created.");
         assert!(eager.is_finished(now));
 
         // Introduce a small delay to see if there is an overflow issue
@@ -123,5 +148,12 @@ mod test {
         eager.restart(now);
         assert!(!eager.is_finished(now));
         assert!(eager.is_finished(now + duration));
+    }
+
+    #[test]
+    fn regression_no_timer_can_have_zero_duration() {
+        Timer::from_duration(Instant::now(), Duration::from_secs(0)).expect_err(
+            "Timer must enforce no zero duration. There is a risk of div by zero otherwise",
+        );
     }
 }

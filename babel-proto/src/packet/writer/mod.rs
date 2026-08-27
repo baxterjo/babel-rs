@@ -98,6 +98,8 @@ pub enum PacketWriterError {
     PacketBodyLengthLargerThanMax(usize),
     #[error("Failed to index at bounds {0}..{1}")]
     IndexError(usize, usize),
+    #[error("Tried to finish an empty packet")]
+    CannotFinishEmptyPacket,
 }
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
@@ -136,7 +138,6 @@ mod test {
             .expect("Could not finish IHU tlv")
             .finish_packet()
             .expect("Could not finish packet")
-            .expect("There should be a packet body")
             .into();
 
         let packet_slice = PacketSlice::from_slice(&datagram).expect("Packet should slice.");

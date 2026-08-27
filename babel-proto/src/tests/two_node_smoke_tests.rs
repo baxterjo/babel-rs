@@ -1,12 +1,13 @@
 use core::net::Ipv6Addr;
 
-use crate::data_structures::interface::InterfaceHandle;
+use crate::data_structures::interface::{InterfaceConfig, InterfaceHandle};
 use crate::data_structures::neighbour::NeighbourIndex;
 use crate::data_types::RouterId;
 use crate::input::{Receive, ReceiveDestination};
 use crate::output::Output;
 use crate::packet::packet_slice::PacketSlice;
 use crate::router::BabelRouter;
+use crate::router::config::BabelRouterConfig;
 use crate::utils::Instant;
 use crate::utils::storage::ManagedSliceExt;
 
@@ -19,21 +20,29 @@ fn two_nodes_say_hello_and_ihu() {
     // The two nodes must be distinguishable, otherwise the neighbour-table assertions below hold
     // trivially and would keep passing even if the addressing were wrong.
     // Create node 1
-    let mut node_1: BabelRouter<'_> =
-        BabelRouter::new(RouterId::try_from("node_1").expect("bad router ID"));
+    let mut node_1: BabelRouter<'_> = BabelRouter::new(BabelRouterConfig::new(
+        RouterId::try_from("node_1").expect("bad router ID"),
+    ));
     let node_1_iface = InterfaceHandle::try_from("iface_1").expect("Bad interface");
     let node_1_addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
     node_1
-        .register_interface(t0, node_1_iface, node_1_addr, None, None)
+        .register_interface(
+            t0,
+            InterfaceConfig::new_wired(node_1_iface, node_1_addr.into()),
+        )
         .expect("Could not register interface.");
 
     // Create node 2
-    let mut node_2: BabelRouter<'_> =
-        BabelRouter::new(RouterId::try_from("node_2").expect("bad router ID"));
+    let mut node_2: BabelRouter<'_> = BabelRouter::new(BabelRouterConfig::new(
+        RouterId::try_from("node_2").expect("bad router ID"),
+    ));
     let node_2_iface = InterfaceHandle::try_from("iface_2").expect("Bad interface");
     let node_2_addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
     node_2
-        .register_interface(t0, node_2_iface, node_2_addr, None, None)
+        .register_interface(
+            t0,
+            InterfaceConfig::new_wired(node_2_iface, node_2_addr.into()),
+        )
         .expect("Could not register interface.");
 
     // Poll node 1 for output

@@ -1,34 +1,15 @@
 use super::BabelRouter;
-use crate::data_structures::interface::{InterfaceHandle, InterfaceTableError};
-use crate::data_structures::neighbour::neighbour_entry::DEFAULT_IHU_RATIO;
+use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::output::{Output, Transmit};
-use crate::packet::tlv::hello_slice::HelloFlags;
 use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
-use crate::utils::destination::{Claim, DestAddr};
-use crate::utils::storage::ManagedSliceExt;
+use crate::utils::destination::DestAddr;
 use crate::utils::{Duration, Instant, ManagedSlice};
 
-/// How long to wait before polling again after a TLV write failed.
-///
-/// A failed write leaves its TLV due — the timer behind it is only restarted once the write
-/// succeeds — so the router has to be polled again for that TLV to ever go out. Reporting "nothing
-/// is due" would silence it permanently, while a zero duration would spin if the caller keeps
-/// handing back a buffer that is too small for the TLV.
-const WRITE_FAILURE_RETRY: Duration = Duration::from_millis(100);
-
-/// Folds a candidate wake-up time into a running minimum, where `None` means "nothing due yet".
-fn merge_next_poll(slot: &mut Option<Duration>, candidate: Duration) {
-    *slot = Some(match *slot {
-        Some(current) => current.min(candidate),
-        None => candidate,
-    });
-}
-
-impl<'storage, A, P, const MN: u8, const V: u8> BabelRouter<'storage, P, A, MN, V>
+impl<'storage, A, P> BabelRouter<'storage, P, A>
 where
     A: AddressExt,
     P: ParserStateExt,
@@ -49,7 +30,7 @@ where
     /// Polls output for the given interface from the router.
     ///
     /// This is a useful optimization if other interfaces are busy. If the returned [`Output`] is
-    /// of the `SetTimer` variant. That duration **is not** specific to the provided interface.
+    /// of the `SetTimer` variant, it is specific to the polled interface.
     ///
     /// The returned [`Output`] owns its payload, so it does not borrow from the router and can
     /// outlive this call.
@@ -84,7 +65,7 @@ where
     /// efficiency with packed packets.
     ///
     /// This is a useful optimization if other interfaces are busy. If the returned [`Output`] is
-    /// of the `SetTimer` variant. That duration **is not** specific to the provided interface.
+    /// of the `SetTimer` variant, it is specific to the polled interface.
     pub fn poll_output_for_iface_with_buf<'output, B>(
         &mut self,
         now: Instant,
@@ -103,57 +84,36 @@ where
     fn poll_output_inner<'output, B>(
         &mut self,
         now: Instant,
-        active_interface: Option<InterfaceHandle>,
+        poll_only: Option<InterfaceHandle>,
         buf: B,
     ) -> Result<Output<'output, A>, BabelError<A>>
     where
         B: Into<ManagedSlice<'output, u8>>,
     {
         b_debug!(
-            "{} polling for output - active_iface: {:?}",
+            "{} polling for output - poll_filter: {:?}",
             self.id,
-            active_interface
+            poll_only
         );
 
-        // A router with no interfaces has nothing it could ever send, and nothing to base a
-        // wake-up time on either.
-        if self.iface_table.iter_mut().next().is_none() {
-            return Err(InterfaceTableError::NoInterfacesRegistered.into());
-        }
+        let writer = PacketWriter::new_packet(self.magic_number, self.version_number, buf.into())?;
 
-        let mut active_dest = DestAddr::default();
-        let mut active_iface = active_interface;
-        let writer = PacketWriter::new_packet(MN, V, buf.into())?;
-        let mut next_poll = None;
-
-        let (body, write_failed) = match self.build_packet_body(
-            now,
-            &mut active_iface,
-            &mut active_dest,
-            &mut next_poll,
-            writer,
-        ) {
-            Ok(writer) => (writer, false),
-            Err((err, writer)) => {
-                b_debug!("Err building packet body: {}", err);
-                (writer, true)
+        // Poll the body of the packet.
+        let (iface, dest, body) = match self.poll_packet_body(now, poll_only, writer)? {
+            // This is the only place where meaningful TLV's can be located, so if the PollEvent
+            // returns `Wait` then the router has nothing to do and we can return early.
+            PollEvent::Wait(dur) => {
+                return Ok(Output::SetTimer(dur));
             }
+            // Otherwise we continue building the packet.
+            PollEvent::Transmit { iface, dest, body } => (iface, dest, body),
         };
 
-        let Some(finished_packet) = body.finish_packet()? else {
-            // A write failure aborts the rest of the body, so the TLV that failed never got to
-            // contribute its timer to `next_poll` and is still due. Ask to be polled again soon,
-            // unless something else is already due sooner.
-            if write_failed {
-                merge_next_poll(&mut next_poll, WRITE_FAILURE_RETRY);
-            }
-
-            return Ok(Output::SetTimer(next_poll.unwrap_or(WRITE_FAILURE_RETRY)));
-        };
+        let finished_packet = body.finish_packet()?;
 
         let output = Output::Transmit(Transmit {
-            iface: active_iface.expect("Somehow built a packet with no interface?"),
-            destination: active_dest
+            iface: iface,
+            destination: dest
                 .try_into()
                 .expect("Somehow built a packet with no destination?"),
             contents: finished_packet.into(),
@@ -164,305 +124,133 @@ where
         Ok(output)
     }
 
-    fn build_packet_body<'output>(
+    /// Polls the router for outgoing TLV's in the packet body.
+    fn poll_packet_body<'output>(
         &mut self,
         now: Instant,
-        active_iface: &mut Option<InterfaceHandle>,
-        active_dest: &mut DestAddr<A>,
-        next_poll: &mut Option<Duration>,
+        poll_only: Option<InterfaceHandle>,
         mut writer: PacketWriterStep<'output, Ready>,
-    ) -> Result<
-        PacketWriterStep<'output, Ready>,
-        (PacketWriterError, PacketWriterStep<'output, Ready>),
-    > {
-        b_trace!("Polling for IHUs");
-        writer = self.poll_for_due_ihu(now, active_iface, active_dest, next_poll, writer)?;
+    ) -> Result<PollEvent<'output, A>, BabelError<A>> {
+        // A router with no interfaces can never send anything and has no timer to report, so
+        // polling one is a caller mistake rather than an idle state.
+        if self.iface_table.is_empty() {
+            return Err(InterfaceError::NoInterfacesRegistered.into());
+        }
 
-        b_trace!("Polling for UCAST Hellos");
-        writer = self.poll_for_ucast_hello(now, active_iface, active_dest, next_poll, writer)?;
+        // A poll scoped to a handle that was never registered matches no interface, so the loop
+        // below would find nothing due.
+        if let Some(handle) = poll_only
+            && !self.iface_table.contains(&handle)
+        {
+            return Err(BabelError::InterfaceDoesntExist(handle));
+        }
 
-        // At the very end of polling for potential TLV's check for MCAST hello.
-        b_trace!("Polling for MCAST Hellos");
-        writer = self.poll_for_mcast_hello(now, active_iface, active_dest, next_poll, writer)?;
-
-        Ok(writer)
-    }
-
-    //  ___  ___  _    _      ___ _  _ _   _
-    // | _ \/ _ \| |  | |    |_ _| || | | | |
-    // |  _/ (_) | |__| |__   | || __ | |_| |
-    // |_|  \___/|____|____| |___|_||_|\___/
-
-    // TODO: Periodic IHU scheduling. `pending.ihu_due` is currently the only trigger, so a
-    // neighbour gets the one immediate IHU it is born with and nothing after that. The recurring
-    // cadence — an interface-level IHU timer, or the ratio from
-    // `LinkCostCalculator::hello_ihu_ratio` — still has to drive this flag, and is also what will
-    // give this pass a wake-up time to contribute. `now` and `next_poll` are kept in the signature
-    // for it.
-    #[allow(
-        unused_variables,
-        reason = "the periodic IHU cadence that uses these is not implemented yet"
-    )]
-    fn poll_for_due_ihu<'output>(
-        &mut self,
-        now: Instant,
-        active_iface: &mut Option<InterfaceHandle>,
-        active_dest: &mut DestAddr<A>,
-        next_poll: &mut Option<Duration>,
-        mut writer: PacketWriterStep<'output, Ready>,
-    ) -> Result<
-        PacketWriterStep<'output, Ready>,
-        (PacketWriterError, PacketWriterStep<'output, Ready>),
-    > {
-        for neighbour in self.neighbor_table.iter_mut() {
-            if !neighbour.pending.ihu_due {
-                continue;
+        let mut active_dest = DestAddr::default();
+        // The identity for the running minimum below. It can only survive as Duration::MAX if no
+        // interface was iterated at all, which the guards above have already ruled out: at
+        // least one interface is registered, a scoped poll names one that exists, and every
+        // interface contributes its multicast Hello timer on every path that reaches the
+        // end of the loop. The check after the loop rejects it if that ever stops holding.
+        let mut next_poll = Duration::MAX;
+        for interface in self.iface_table.iter_mut(poll_only) {
+            /// Macro for writer error handling.
+            macro_rules! ok_or_try_send {
+                ($result:expr) => {
+                    match $result {
+                        // If result is ok, keep going
+                        Ok(writer) => writer,
+                        // If result is a BufferTooSmall error and we know where to send the packet,
+                        // log it and return an Ok(PollEvent).
+                        Err((PacketWriterError::BufferTooSmall { need, remaining }, writer))
+                            if writer.has_tlvs() && !active_dest.is_free() =>
+                        {
+                            b_trace!(
+                                "Err - {}",
+                                PacketWriterError::BufferTooSmall { need, remaining }
+                            );
+                            return Ok(PollEvent::Transmit {
+                                iface: interface.handle,
+                                dest: active_dest,
+                                body: writer,
+                            });
+                        }
+                        // Otherwise the writer is useless and we need to surface the error.
+                        Err((err, _writer)) => {
+                            return Err(err.into());
+                        }
+                    }
+                };
             }
+            // First check for hellos. These are most important for keeping the mesh alive.
+            b_trace!("Polling for MCAST Hellos");
+            writer = ok_or_try_send!(interface.poll_for_mcast_hello(now, &mut next_poll, writer));
 
-            // If the active interface has been set and is not the interface for this neighbour,
-            // skip it.
-            if active_iface.is_some_and(|iface| neighbour.iface != iface) {
-                continue;
-            }
-
-            // If the active address has been claimed and it is not destined for this neighbour
-            // then skip.
-            if active_dest
-                .unicast_addr()
-                .is_some_and(|addr| *addr != neighbour.address)
-            {
-                continue;
-            }
-
-            // Get the interface for this neighbour.
-            let iface = self
-                .iface_table
-                .inner
-                .get_by_key(&neighbour.iface)
-                .expect("Neighbour exists on unregistered interface?");
-
-            // If the active address is multicast and this interface wants unicast IHUs, then skip.
-            if active_dest.is_multicast() && iface.config.unicast_ihu {
-                continue;
-            }
-
-            // At this point
-            //
-            // The neighbour:
-            // - Has an IHU due
-            // The active interface is either:
-            // - Free
-            // - Matches this neighbour's interface.
-            // The active address is either:
-            // - Free
-            // - Unicast and matches this address
-            // - Multicast and this neighbour's interface does not want unicast ihus
-
-            // The Address field names the IHU's destination, so that IHUs for several neighbours
-            // can be aggregated into one multicast packet and each receiver can pick out its own.
-            // A unicast IHU is already unambiguous, so it uses the wildcard encoding (AE 0) and
-            // omits the address entirely, as permitted by RFC 8966 4.6.6.
-            let neighbour_addr = neighbour.address;
-            let (ae, address): (u8, &[u8]) = if iface.config.unicast_ihu {
-                (0, &[])
-            } else {
-                // TODO: Figure out error handling
-                (
-                    neighbour_addr.encoding().try_into().unwrap(),
-                    neighbour_addr.as_wire(),
-                )
-            };
-            // TODO: Derive this from the neighbour's hello history rather than advertising the
-            // interface's starting cost forever. `BitHistory::count` already measures the link,
-            // but nothing feeds it into a cost yet, so every IHU currently claims the same
-            // constant regardless of how the link is actually performing.
-            let rx_cost = iface.config.starting_rx_cost;
-            // The Interval field advertises when the next IHU is due, which RFC 8966 Appendix B
-            // puts at three times the multicast Hello interval. Once the periodic cadence lands
-            // this should come from whatever timer actually schedules the next IHU.
-            let duration = DEFAULT_IHU_RATIO.apply(iface.hello_timer.duration());
-            b_debug!(
-                "[SEND] IHU - iface: {}, dest_addr: {:?} - ae: {}, rx_cost: {:?}, interval: {}, addr: {:?}",
-                iface.handle,
-                active_dest,
-                ae,
-                rx_cost,
-                duration.as_centis(),
-                neighbour_addr
-            );
-            writer = writer
-                .write_ihu(ae, rx_cost, duration.into(), address)?
-                .finish_tlv()?;
-
-            // Claim the active address after the write succeeds.
-            if iface.config.unicast_ihu {
-                // Otherwise this neighbour can claim the address.
-                // TODO error handling.
+            // If the writer has any TLVs in it at this point then the active destination is
+            // multicast.
+            if writer.has_tlvs() {
                 active_dest
-                    .claim(DestAddr::Unicast(neighbour.address))
-                    .unwrap();
-            } else {
-                active_dest.claim(DestAddr::Multicast).unwrap()
-            }
-            // Claim the active interface after the write succeeds.
-            active_iface.claim(iface.handle).unwrap();
-            // Once the packet has been written, this neighbour's IHU is no longer due. Clearing
-            // only after a successful write is what lets a destination conflict defer a neighbour
-            // to the next poll instead of dropping its IHU.
-            neighbour.pending.ihu_due = false;
-        }
-
-        Ok(writer)
-    }
-
-    //  ___  ___  _    _      _   _  ___   _   ___ _____   _  _ ___ _    _    ___
-    // | _ \/ _ \| |  | |    | | | |/ __| /_\ / __|_   _| | || | __| |  | |  / _ \
-    // |  _/ (_) | |__| |__  | |_| | (__ / _ \\__ \ | |   | __ | _|| |__| |_| (_) |
-    // |_|  \___/|____|____|  \___/ \___/_/ \_\___/ |_|   |_||_|___|____|____\___/
-
-    fn poll_for_ucast_hello<'output>(
-        &mut self,
-        now: Instant,
-        active_iface: &mut Option<InterfaceHandle>,
-        active_addr: &mut DestAddr<A>,
-        next_poll: &mut Option<Duration>,
-        mut writer: PacketWriterStep<'output, Ready>,
-    ) -> Result<
-        PacketWriterStep<'output, Ready>,
-        (PacketWriterError, PacketWriterStep<'output, Ready>),
-    > {
-        let mut local_min: Option<Duration> = None;
-        for neighbour in self.neighbor_table.iter_mut() {
-            let iface = neighbour.iface;
-            let address = neighbour.address;
-
-            // Neighbour wants to send ucast hellos.
-            let Some(ucast) = neighbour.pending.ucast_hello.as_mut() else {
-                continue;
-            };
-
-            // If the timer is not done, update local min and skip.
-            if let Some(remaining) = ucast.timer.time_remaining(now) {
-                merge_next_poll(&mut local_min, remaining);
-                continue;
-            }
-            // Skip if active interface is not this neighbour's.
-            if active_iface.is_some_and(|active| active != iface) {
-                continue;
+                    .claim(DestAddr::Multicast)
+                    .expect("Active destination should be free");
             }
 
-            if active_addr.is_free()
-                || active_addr
-                    .unicast_addr()
-                    .is_some_and(|addr| *addr == address)
+            for neighbour in self
+                .neighbor_table
+                .neighbours_mut_for_iface(interface.handle)
             {
-                let flags = HelloFlags::new_unicast();
-                let seqno = ucast.seqno;
-                let duration = ucast.timer.duration();
-                let dest = DestAddr::Unicast(address);
+                // If the active destination is free, poll for ucast hellos.
+                if active_dest.is_free() {
+                    b_trace!("Polling for UCAST Hellos");
+                    writer = ok_or_try_send!(neighbour.poll_for_ucast_hello(
+                        now,
+                        &mut next_poll,
+                        writer
+                    ));
+                    if writer.has_tlvs() {
+                        active_dest
+                            .claim(DestAddr::Unicast(neighbour.address))
+                            .expect("Active destination should be free.");
+                    }
+                }
 
-                b_trace!(
-                    "[SEND] UCAST HELLO - iface {}, dest: {} - {:?}, {:?}, interval: {}",
-                    iface,
-                    dest,
-                    flags,
-                    seqno,
-                    duration.as_centis()
-                );
-                writer = writer
-                    .write_hello(flags, seqno, duration.into())?
-                    .finish_tlv()?;
-
-                active_iface.claim(iface).unwrap();
-                active_addr.claim(DestAddr::Unicast(address)).unwrap();
-
-                ucast.timer.restart(now);
-                ucast.seqno += 1;
+                if active_dest.can_send_ihu(&neighbour.address) {
+                    b_trace!("Polling for IHUs");
+                    writer = ok_or_try_send!(neighbour.poll_for_ihu(
+                        now,
+                        &mut active_dest,
+                        &mut next_poll,
+                        interface.cost_calc,
+                        writer,
+                    ));
+                }
+            }
+            // Only one interface can be written to at a time. If there are TLVs at this point then
+            // its time to send.
+            if writer.has_tlvs() {
+                return Ok(PollEvent::Transmit {
+                    iface: interface.handle,
+                    dest: active_dest,
+                    body: writer,
+                });
             }
         }
 
-        if let Some(local_min) = local_min {
-            merge_next_poll(next_poll, local_min);
+        // Ideally this is dead code. But this is a backstop if the logic of output polling changes
+        // above.
+        if next_poll == Duration::MAX {
+            return Err(BabelError::NoWakeUpTime);
         }
 
-        Ok(writer)
+        Ok(PollEvent::Wait(next_poll))
     }
-    //  ___  ___  _    _      __  __  ___   _   ___ _____   _  _ ___ _    _    ___
-    // | _ \/ _ \| |  | |    |  \/  |/ __| /_\ / __|_   _| | || | __| |  | |  / _ \
-    // |  _/ (_) | |__| |__  | |\/| | (__ / _ \\__ \ | |   | __ | _|| |__| |_| (_) |
-    // |_|  \___/|____|____| |_|  |_|\___/_/ \_\___/ |_|   |_||_|___|____|____\___/
+}
 
-    /// Polls for multicast hellos by interface.
-    fn poll_for_mcast_hello<'output>(
-        &mut self,
-        now: Instant,
-        active_iface: &mut Option<InterfaceHandle>,
-        active_dest: &mut DestAddr<A>,
-        next_poll: &mut Option<Duration>,
-        mut writer: PacketWriterStep<'output, Ready>,
-    ) -> Result<
-        PacketWriterStep<'output, Ready>,
-        (PacketWriterError, PacketWriterStep<'output, Ready>),
-    > {
-        let mut local_min: Option<Duration> = None;
-        for iface in self.iface_table.iter_mut() {
-            // If the timer on the interface hello has not fired, get the minimum between it and
-            // min_dur.
-            if let Some(remaining) = iface.hello_timer.time_remaining(now) {
-                merge_next_poll(&mut local_min, remaining);
-                continue;
-            }
-
-            if active_iface.is_some_and(|active| active != iface.handle) {
-                // If active interface has been claimed and is not this one, skip
-                continue;
-            }
-
-            // At this point in execution:
-            //
-            // The interface:
-            // - Hello timer has expired
-            // The active interface is either:
-            // - Free
-            // - Has been claimed and matches this one.
-
-            // If the active destination is free or multicast write a multicast hello.
-            if active_dest.is_free() || active_dest.is_multicast() {
-                let flags = HelloFlags::new_multicast();
-                let seqno = iface.hello_seqno;
-                let duration = iface.hello_timer.duration();
-                let dest: DestAddr<A> = DestAddr::Multicast;
-
-                b_trace!(
-                    "[SEND] MCAST HELLO - iface {}, dest: {} - {:?}, {:?}, interval: {}",
-                    iface.handle,
-                    dest,
-                    flags,
-                    seqno,
-                    duration.as_centis()
-                );
-
-                writer = writer
-                    .write_hello(flags, seqno, duration.into())?
-                    .finish_tlv()?;
-
-                // Update the active interface, this will be the same value if it was given.
-                active_iface.claim(iface.handle).unwrap();
-                active_dest.claim(dest).unwrap();
-
-                // Restart hello timer
-                iface.hello_timer.restart(now);
-                // Increment the seqno
-                iface.hello_seqno += 1;
-            }
-        }
-
-        if let Some(local_min) = local_min {
-            merge_next_poll(next_poll, local_min);
-        }
-
-        Ok(writer)
-    }
+enum PollEvent<'output, A: AddressExt> {
+    Transmit {
+        iface: InterfaceHandle,
+        dest: DestAddr<A>,
+        body: PacketWriterStep<'output, Ready>,
+    },
+    Wait(Duration),
 }
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
@@ -471,21 +259,36 @@ mod test {
     use core::net::Ipv6Addr;
 
     use super::*;
-    use crate::data_structures::neighbour::NeighbourIndex;
+    use crate::data_structures::interface::InterfaceConfig;
+    use crate::data_structures::neighbour::{Neighbour, NeighbourIndex};
     use crate::data_structures::seqno::SeqNo;
     use crate::data_types::{Address, RouterId};
     use crate::extension::NoExtension;
-    use crate::metric::RxCost;
+    use crate::metric::{KOutOfJ, RxCost};
     use crate::output::TransmitDestination;
     use crate::packet::packet_slice::PacketSlice;
     use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, TypedTlv};
+    use crate::router::config::BabelRouterConfig;
     use crate::utils::storage::ManagedSliceExt;
-    use crate::utils::timer::Timer;
 
-    // Long enough that it never fires again during a test and well clear of the small durations
-    // used for IHU/ucast hello, but small enough that the advertised IHU interval derived from it
-    // (3x, see `ADVERTISED_IHU_RATIO`) still fits the 16-bit Interval field without saturating.
+    // Long enough that it never fires again during a test unless a test means it to, but small
+    // enough that the IHU interval derived from it (3x, below) still fits the 16-bit Interval
+    // field without saturating.
     const IFACE_INTERVAL: Duration = Duration::from_secs(200);
+
+    /// The interval a neighbour on a ucast-Hello interface sends its unicast Hellos at.
+    ///
+    /// Deliberately the shortest interval here, so a ucast-Hello interface is recognisable by
+    /// `SetTimer` reporting this.
+    const UCAST_INTERVAL: Duration = Duration::from_secs(20);
+
+    /// The interval a fresh neighbour both advertises in and schedules its outgoing IHUs at:
+    /// `DEFAULT_LOSSLESS_IHU_RATIO` (3) times its interface's multicast Hello interval, per
+    /// RFC 8966 Appendix B.
+    ///
+    /// Being a multiple of `IFACE_INTERVAL`, an IHU is never the soonest thing due — the Hello it
+    /// is derived from always beats it, and the two coincide exactly when the IHU comes due.
+    const IHU_INTERVAL: Duration = Duration::from_secs(600);
 
     const NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
     /// The address family Babel normally runs on, and the only one the writer compresses.
@@ -495,11 +298,28 @@ mod test {
     const NEIGHBOUR_2_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
 
     fn router(name: &'static str) -> BabelRouter<'static> {
-        BabelRouter::new(RouterId::try_from(name).expect("bad router id"))
+        BabelRouter::new(BabelRouterConfig::new(
+            RouterId::try_from(name).expect("bad router id"),
+        ))
     }
 
     fn iface_handle(name: &str) -> InterfaceHandle {
         InterfaceHandle::try_from(name).expect("bad interface handle")
+    }
+
+    /// A wired interface config carrying an interval too long to fire again during a test.
+    fn iface_config(name: &str, address: Ipv6Addr) -> InterfaceConfig<NoExtension> {
+        let mut config = InterfaceConfig::new_wired(iface_handle(name), address.into());
+        config.set_mcast_hello_interval(IFACE_INTERVAL.into());
+        config
+    }
+
+    /// [`iface_config`], for an interface that also hands every neighbour discovered on it a
+    /// unicast Hello interval.
+    fn ucast_hello_iface_config(name: &str, address: Ipv6Addr) -> InterfaceConfig<NoExtension> {
+        let mut config = iface_config(name, address);
+        config.set_ucast_hello_interval(UCAST_INTERVAL.into());
+        config
     }
 
     fn expect_transmit<A: AddressExt>(output: Output<'_, A>) -> Transmit<'_, A> {
@@ -554,9 +374,27 @@ mod test {
         name: &str,
         address: Ipv6Addr,
     ) -> InterfaceHandle {
-        let handle = iface_handle(name);
-        router
-            .register_interface(now, handle, address, Some(IFACE_INTERVAL), None)
+        drained_iface_with_config(router, now, iface_config(name, address))
+    }
+
+    /// [`drained_iface`], for an interface that also sends unicast Hellos.
+    fn drained_ucast_hello_iface(
+        router: &mut BabelRouter<'static>,
+        now: Instant,
+        name: &str,
+        address: Ipv6Addr,
+    ) -> InterfaceHandle {
+        drained_iface_with_config(router, now, ucast_hello_iface_config(name, address))
+    }
+
+    /// [`drained_iface`] for tests that need to tweak the config before registering.
+    fn drained_iface_with_config(
+        router: &mut BabelRouter<'static>,
+        now: Instant,
+        config: InterfaceConfig<NoExtension>,
+    ) -> InterfaceHandle {
+        let handle = router
+            .register_interface(now, config)
             .expect("could not register interface");
 
         let transmit = expect_transmit(router.poll_output(now).expect("poll should succeed"));
@@ -568,25 +406,37 @@ mod test {
         handle
     }
 
-    /// Adds a neighbour and drains the immediate IHU every new neighbour is born owing, so that
-    /// IHU does not pollute assertions about unrelated TLVs.
-    fn drained_neighbour(
-        router: &mut BabelRouter<'static>,
-        now: Instant,
+    /// Borrows a neighbour the router already knows about.
+    fn neighbour<'r>(
+        router: &'r mut BabelRouter<'static>,
         iface: InterfaceHandle,
         address: Ipv6Addr,
-        ucast_hello_interval: Option<Duration>,
-    ) {
-        router
-            .add_neighbour(now, iface, address.into(), ucast_hello_interval)
-            .expect("add_neighbour should succeed");
+    ) -> &'r mut Neighbour<NoExtension> {
         router
             .neighbor_table
             .inner
             .get_mut_by_key(&NeighbourIndex(iface, address.into()))
             .expect("neighbour should exist")
+    }
+
+    /// Adds a neighbour and drains the immediate IHU every new neighbour is born owing, so that
+    /// IHU does not pollute assertions about unrelated TLVs.
+    ///
+    /// A neighbour on an interface that sends unicast Hellos is *also* born owing one of those,
+    /// which stays live here.
+    fn drained_ihu_neighbour(
+        router: &mut BabelRouter<'static>,
+        now: Instant,
+        iface: InterfaceHandle,
+        address: Ipv6Addr,
+    ) {
+        router
+            .add_neighbour(now, iface, address.into())
+            .expect("add_neighbour should succeed");
+        neighbour(router, iface, address)
             .pending
-            .ihu_due = false;
+            .outbound_ihu_timer
+            .restart(now);
     }
 
     //  __  __  ___    _   ___ _____   _  _ ___ _    _    ___
@@ -603,8 +453,8 @@ mod test {
         fn fires_immediately_on_first_poll() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let handle = iface_handle("iface_1");
-            r.register_interface(t0, handle, NODE_ADDR, Some(IFACE_INTERVAL), None)
+            let handle = r
+                .register_interface(t0, iface_config("iface_1", NODE_ADDR))
                 .expect("register should succeed");
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
@@ -647,11 +497,11 @@ mod test {
         fn only_one_interface_fires_per_poll_others_drained_next_poll() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let handle_a = iface_handle("iface_a");
-            let handle_b = iface_handle("iface_b");
-            r.register_interface(t0, handle_a, NODE_ADDR, Some(IFACE_INTERVAL), None)
+            let handle_a = r
+                .register_interface(t0, iface_config("iface_a", NODE_ADDR))
                 .expect("register should succeed");
-            r.register_interface(t0, handle_b, NEIGHBOUR_1_ADDR, Some(IFACE_INTERVAL), None)
+            let handle_b = r
+                .register_interface(t0, iface_config("iface_b", NEIGHBOUR_1_ADDR))
                 .expect("register should succeed");
 
             let first = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
@@ -668,11 +518,11 @@ mod test {
         fn for_iface_scoped_poll_ignores_other_due_interfaces() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let handle_a = iface_handle("iface_a");
-            let handle_b = iface_handle("iface_b");
-            r.register_interface(t0, handle_a, NODE_ADDR, Some(IFACE_INTERVAL), None)
+            let handle_a = r
+                .register_interface(t0, iface_config("iface_a", NODE_ADDR))
                 .expect("register should succeed");
-            r.register_interface(t0, handle_b, NEIGHBOUR_1_ADDR, Some(IFACE_INTERVAL), None)
+            let handle_b = r
+                .register_interface(t0, iface_config("iface_b", NEIGHBOUR_1_ADDR))
                 .expect("register should succeed");
 
             // iface_a is due too, but scoping to iface_b must still find and fire iface_b's hello.
@@ -698,46 +548,37 @@ mod test {
 
         use super::*;
 
-        const UCAST_INTERVAL: Duration = Duration::from_secs(20);
-
+        /// The interval is carried by the interface, so a neighbour on an interface that never
+        /// configured one has no unicast Hello state at all to fire.
         #[test]
         fn not_configured_never_sent() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
             let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            drained_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR, None);
+            drained_ihu_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
 
+            assert!(
+                neighbour(&mut r, iface, NEIGHBOUR_1_ADDR)
+                    .pending
+                    .ucast_hello
+                    .is_none()
+            );
+
+            // Nothing is left to send, and with no unicast Hello in the mix the soonest thing
+            // scheduled is the interface's own multicast Hello.
             let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(remaining, IFACE_INTERVAL);
         }
 
+        /// Like an interface's multicast Hello timer, a fresh unicast Hello timer is eager: it
+        /// fires on the very first poll rather than making a brand new neighbour wait a full
+        /// interval to hear from us.
         #[test]
-        fn not_due_immediately_after_registration() {
+        fn fires_eagerly_on_the_first_poll_with_correct_fields() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            drained_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR, Some(UCAST_INTERVAL));
-
-            // Unlike interface hellos, a fresh ucast hello timer is NOT eager.
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, UCAST_INTERVAL);
-        }
-
-        #[test]
-        fn fires_when_due_with_correct_fields() {
-            let mut r = router("node_1");
-            let t0 = Instant::from_secs(0);
-            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            drained_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR, Some(UCAST_INTERVAL));
-            r.neighbor_table
-                .inner
-                .get_mut_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
-                .expect("neighbour should exist")
-                .pending
-                .ucast_hello
-                .as_mut()
-                .expect("ucast hello should be configured")
-                .timer = Timer::new_eager(t0, UCAST_INTERVAL).expect("timer should be valid");
+            let iface = drained_ucast_hello_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            drained_ihu_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
 
@@ -754,29 +595,51 @@ mod test {
             assert_eq!(hello.seqno(), SeqNo(0));
             assert_eq!(hello.interval(), UCAST_INTERVAL.into());
 
-            // The timer restarted, so an immediate repoll does not refire it.
+            // The timer restarted, so an immediate repoll does not refire it — it just reports
+            // the full interval it is now waiting out, still the soonest thing scheduled.
             let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(remaining, UCAST_INTERVAL);
+        }
+
+        #[test]
+        fn refires_after_its_interval_with_incremented_seqno() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_ucast_hello_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            drained_ihu_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+            // Drain the eager first Hello with a real poll, so the seqno this test is about
+            // actually advances — only a successful write increments it.
+            let first = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(nth_hello(&first.contents, 0).seqno(), SeqNo(0));
+
+            // The unicast Hello is the only thing due this early — the interface's Hello and the
+            // neighbour's IHU are both far out — so it goes out alone.
+            let t1 = t0 + UCAST_INTERVAL;
+            let transmit = expect_transmit(r.poll_output(t1).expect("poll should succeed"));
+
+            assert_eq!(
+                transmit.destination,
+                TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
+            );
+            assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
+
+            let hello = nth_hello(&transmit.contents, 0);
+            assert!(hello.flags().is_unicast());
+            assert_eq!(hello.seqno(), SeqNo(1));
         }
 
         #[test]
         fn conflicting_destination_defers_to_next_poll() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            let iface = drained_ucast_hello_iface(&mut r, t0, "iface_1", NODE_ADDR);
             for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
-                drained_neighbour(&mut r, t0, iface, addr, Some(UCAST_INTERVAL));
-                r.neighbor_table
-                    .inner
-                    .get_mut_by_key(&NeighbourIndex(iface, addr.into()))
-                    .expect("neighbour should exist")
-                    .pending
-                    .ucast_hello
-                    .as_mut()
-                    .expect("ucast hello should be configured")
-                    .timer = Timer::new_eager(t0, UCAST_INTERVAL).expect("timer should be valid");
+                drained_ihu_neighbour(&mut r, t0, iface, addr);
             }
 
+            // Both neighbours are owed an eager unicast Hello, but a packet only carries one
+            // destination, so the second one waits.
             let first = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(
                 first.destination,
@@ -797,18 +660,9 @@ mod test {
         fn iface_mismatch_skips_for_scoped_poll() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let iface_a = drained_iface(&mut r, t0, "iface_a", NODE_ADDR);
+            let iface_a = drained_ucast_hello_iface(&mut r, t0, "iface_a", NODE_ADDR);
             let iface_b = drained_iface(&mut r, t0, "iface_b", NEIGHBOUR_2_ADDR);
-            drained_neighbour(&mut r, t0, iface_a, NEIGHBOUR_1_ADDR, Some(UCAST_INTERVAL));
-            r.neighbor_table
-                .inner
-                .get_mut_by_key(&NeighbourIndex(iface_a, NEIGHBOUR_1_ADDR.into()))
-                .expect("neighbour should exist")
-                .pending
-                .ucast_hello
-                .as_mut()
-                .expect("ucast hello should be configured")
-                .timer = Timer::new_eager(t0, UCAST_INTERVAL).expect("timer should be valid");
+            drained_ihu_neighbour(&mut r, t0, iface_a, NEIGHBOUR_1_ADDR);
 
             // Scoping to iface_b must not fire iface_a's due ucast hello.
             let remaining = expect_set_timer(
@@ -819,6 +673,7 @@ mod test {
 
             // It's still there, untouched, for an unrestricted poll.
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(transmit.iface, iface_a);
             assert_eq!(
                 transmit.destination,
                 TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
@@ -836,30 +691,6 @@ mod test {
 
         use super::*;
 
-        /// The advertised IHU interval is three times the interface's multicast Hello interval
-        /// (RFC 8966 Appendix B).
-        const EXPECTED_IHU_INTERVAL: Duration = Duration::from_secs(600);
-
-        fn add_neighbour_no_ucast(
-            r: &mut BabelRouter<'static>,
-            now: Instant,
-            iface: InterfaceHandle,
-            addr: Ipv6Addr,
-        ) {
-            r.add_neighbour(now, iface, addr.into(), None)
-                .expect("add_neighbour should succeed");
-        }
-
-        // TODO: There is no coverage of *periodic* IHUs, because there is no periodic IHU
-        // scheduling yet — `pending.ihu_due` is the only trigger, so a neighbour gets its one
-        // immediate IHU and nothing after that. Two cases dropped with the old per-neighbour
-        // `pending.ihu_timer` need to come back with the cadence:
-        //   - an IHU that is not yet due still contributes its remaining time to `SetTimer`
-        //   - an IHU refires after its interval elapses
-        //
-        // The RFC 8966 3.4.2 requirement they defend is that a neighbour that stops hearing IHUs
-        // lets its txcost expire to infinity, which only holds if we keep sending them.
-
         /// Every new neighbour is born owing an immediate IHU: waiting a full interval before
         /// telling a neighbour we can hear it delays convergence for no reason.
         #[test]
@@ -867,18 +698,20 @@ mod test {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
             let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+            r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into())
+                .expect("add_neighbour should succeed");
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
         }
 
         #[test]
-        fn fires_multicast_with_correct_fields_and_clears_the_flag() {
+        fn fires_multicast_with_correct_fields_and_restarts_the_timer() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
             let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+            r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into())
+                .expect("add_neighbour should succeed");
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(transmit.destination, TransmitDestination::Multicast);
@@ -890,12 +723,15 @@ mod test {
                 2,
                 "the neighbour's address is a non-link-local IPv6 address"
             );
+            // The rx cost is what we tell the neighbour it costs to reach *us*, and this
+            // neighbour was added out of band: we have never heard a Hello from it, so its Hello
+            // history is empty and `KOutOfJ` rightly calls the link down.
             assert_eq!(
                 ihu.rx_cost(),
-                RxCost::from_raw(10),
-                "default starting_rx_cost"
+                RxCost::INFINITY,
+                "a neighbour we have never heard from cannot be advertised as reachable"
             );
-            assert_eq!(ihu.interval(), EXPECTED_IHU_INTERVAL.into());
+            assert_eq!(ihu.interval(), IHU_INTERVAL.into());
             // The Address field names the IHU's destination — the neighbour it is for — so that
             // receivers can pick their own out of an aggregated multicast packet.
             assert_eq!(
@@ -903,10 +739,67 @@ mod test {
                 Address::<NoExtension>::from(NEIGHBOUR_1_ADDR).as_wire()
             );
 
-            // The flag was cleared by the successful write, so an immediate repoll doesn't refire
-            // it and only the interface's hello timer is left to report.
+            // The timer was restarted by the successful write, so an immediate repoll doesn't
+            // refire it and the interface's Hello — a third of the IHU interval — is what's next.
             let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(remaining, IFACE_INTERVAL);
+        }
+
+        /// The other half of the rx cost path: once enough Hellos have landed for `KOutOfJ` to
+        /// call the link up, that finite cost is what goes out on the wire. A neighbour cannot
+        /// compute a route through us until it hears one.
+        #[test]
+        fn rx_cost_reports_the_link_cost_once_the_hello_history_fills() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            // Left eager, so the IHU goes out on this poll rather than a whole interval later,
+            // by which point the interface's Hello would be sharing the packet.
+            r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into())
+                .expect("add_neighbour should succeed");
+
+            // `KOutOfJ::SPEC` wants 2 of the last 3 Hellos; give it 3.
+            neighbour(&mut r, iface, NEIGHBOUR_1_ADDR)
+                .mcast_hello_info
+                .history
+                .record_many(true, 3);
+
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
+
+            let ihu = nth_ihu(&transmit.contents, 0);
+            assert_eq!(ihu.rx_cost(), RxCost::from_raw(KOutOfJ::SPEC_CONST));
+        }
+
+        /// RFC 8966 3.4.2 has a neighbour let its txcost expire to infinity once it stops hearing
+        /// IHUs, which only stays correct while we keep sending them on a cadence.
+        #[test]
+        fn refires_after_its_interval_elapses() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            drained_ihu_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+            // Not yet due, so nothing is sent. The interface's Hello is nearer than the IHU and
+            // wins the wake-up — the IHU losing that race is inherent in deriving it as a
+            // multiple of the Hello interval.
+            let remaining = expect_set_timer(
+                r.poll_output(t0 + IFACE_INTERVAL / 2)
+                    .expect("poll should succeed"),
+            );
+            assert_eq!(remaining, IFACE_INTERVAL / 2);
+
+            // At three Hello intervals the IHU is due again, and the Hello it rode in on is due
+            // with it, so the two go out together exactly as they did on the first poll.
+            let transmit = expect_transmit(
+                r.poll_output(t0 + IHU_INTERVAL)
+                    .expect("poll should succeed"),
+            );
+            assert_eq!(
+                tlv_types(&transmit.contents),
+                vec![HelloSlice::TYPE_ID, IhuSlice::TYPE_ID]
+            );
+            assert_eq!(transmit.destination, TransmitDestination::Multicast);
         }
 
         /// AE=3 declares an 8-byte address, so the IHU has to carry exactly the 8-byte suffix.
@@ -918,7 +811,8 @@ mod test {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
             let iface = drained_iface(&mut r, t0, "iface_1", LINK_LOCAL_NODE_ADDR);
-            add_neighbour_no_ucast(&mut r, t0, iface, LINK_LOCAL_NEIGHBOUR_ADDR);
+            r.add_neighbour(t0, iface, LINK_LOCAL_NEIGHBOUR_ADDR.into())
+                .expect("add_neighbour should succeed");
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
@@ -940,45 +834,61 @@ mod test {
             );
         }
 
+        /// Naming the destination in the Address field is what lets one multicast packet carry an
+        /// IHU for every neighbour on the interface, each receiver picking out its own.
         #[test]
-        fn fires_unicast_when_interface_wants_unicast_ihu() {
+        fn every_due_neighbour_aggregates_into_one_multicast_packet() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
             let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            r.iface_table
-                .inner
-                .get_mut_by_key(&iface)
-                .expect("interface should exist")
-                .config
-                .unicast_ihu = true;
-            add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+            for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
+                r.add_neighbour(t0, iface, addr.into())
+                    .expect("add_neighbour should succeed");
+            }
+
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(transmit.destination, TransmitDestination::Multicast);
+            assert_eq!(
+                tlv_types(&transmit.contents),
+                vec![IhuSlice::TYPE_ID, IhuSlice::TYPE_ID]
+            );
+
+            for (idx, addr) in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR].into_iter().enumerate() {
+                let ihu = nth_ihu(&transmit.contents, idx);
+                assert_eq!(
+                    ihu.address(16).expect("should have a 16 byte address"),
+                    Address::<NoExtension>::from(addr).as_wire(),
+                    "each IHU should name the neighbour it is for"
+                );
+            }
+
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, IFACE_INTERVAL);
+        }
+
+        /// An IHU only *prefers* multicast: when a unicast Hello has already claimed the packet
+        /// for this same neighbour, the IHU rides along rather than being deferred a poll.
+        #[test]
+        fn rides_along_on_a_packet_a_ucast_hello_already_claimed() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_ucast_hello_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into())
+                .expect("add_neighbour should succeed");
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(
                 transmit.destination,
                 TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
             );
-            assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
-        }
+            assert_eq!(
+                tlv_types(&transmit.contents),
+                vec![HelloSlice::TYPE_ID, IhuSlice::TYPE_ID]
+            );
 
-        /// A unicast IHU is already unambiguous, so RFC 8966 4.6.6 lets it use the wildcard
-        /// encoding and omit the address, saving 16 bytes on every IHU.
-        #[test]
-        fn unicast_ihu_uses_the_wildcard_encoding_and_omits_the_address() {
-            let mut r = router("node_1");
-            let t0 = Instant::from_secs(0);
-            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            r.iface_table
-                .inner
-                .get_mut_by_key(&iface)
-                .expect("interface should exist")
-                .config
-                .unicast_ihu = true;
-            add_neighbour_no_ucast(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
-
-            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
-            let ihu = nth_ihu(&transmit.contents, 0);
-
+            // The packet is already addressed to this one neighbour, so the IHU is unambiguous
+            // without an Address field and drops it (RFC 8966 4.6.6).
+            let ihu = nth_ihu(&transmit.contents, 1);
             assert_eq!(ihu.ae(), 0, "a unicast IHU needs no explicit destination");
             assert!(
                 ihu.address(0)
@@ -986,39 +896,8 @@ mod test {
                     .is_empty(),
                 "no address bytes should follow the header"
             );
-            // 4 byte packet header + 2 byte TLV header + 6 byte IHU body, and nothing more.
-            assert_eq!(transmit.contents.len(), 12);
-        }
-
-        #[test]
-        fn conflicting_unicast_destination_defers_second_neighbour_to_next_poll() {
-            let mut r = router("node_1");
-            let t0 = Instant::from_secs(0);
-            let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            r.iface_table
-                .inner
-                .get_mut_by_key(&iface)
-                .expect("interface should exist")
-                .config
-                .unicast_ihu = true;
-            for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
-                add_neighbour_no_ucast(&mut r, t0, iface, addr);
-            }
-
-            let first = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(
-                first.destination,
-                TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
-            );
-
-            let second = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(
-                second.destination,
-                TransmitDestination::Unicast(NEIGHBOUR_2_ADDR.into())
-            );
-
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, IFACE_INTERVAL);
+            // 4 byte packet header, an 8 byte hello, and a 8 byte IHU carrying no address.
+            assert_eq!(transmit.contents.len(), 20);
         }
 
         #[test]
@@ -1027,7 +906,8 @@ mod test {
             let t0 = Instant::from_secs(0);
             let iface_a = drained_iface(&mut r, t0, "iface_a", NODE_ADDR);
             let iface_b = drained_iface(&mut r, t0, "iface_b", NEIGHBOUR_2_ADDR);
-            add_neighbour_no_ucast(&mut r, t0, iface_a, NEIGHBOUR_1_ADDR);
+            r.add_neighbour(t0, iface_a, NEIGHBOUR_1_ADDR.into())
+                .expect("add_neighbour should succeed");
 
             let remaining = expect_set_timer(
                 r.poll_output_for_iface(t0, iface_b)
@@ -1050,96 +930,112 @@ mod test {
 
         use super::*;
 
+        /// A multicast Hello and an IHU have compatible destinations, so a fresh interface with a
+        /// fresh neighbour empties both of its eager timers in a single packet.
         #[test]
-        fn ihu_precedes_ucast_and_mcast_hello_when_bundleable() {
+        fn mcast_hello_and_ihu_bundle_into_one_multicast_packet() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            // Not pre-drained: the interface's mcast hello is eager-due at the same time as the
+            // new neighbour's immediate IHU.
+            let iface = r
+                .register_interface(t0, iface_config("iface_1", NODE_ADDR))
+                .expect("register should succeed");
+            r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into())
+                .expect("add_neighbour should succeed");
+
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(transmit.destination, TransmitDestination::Multicast);
+            assert_eq!(
+                tlv_types(&transmit.contents),
+                vec![HelloSlice::TYPE_ID, IhuSlice::TYPE_ID]
+            );
+            assert!(nth_hello(&transmit.contents, 0).flags().is_multicast());
+
+            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(remaining, IFACE_INTERVAL);
+        }
+
+        /// Every other test registers its interface and its neighbours at the same instant, which
+        /// leaves the Hello and IHU timers phase-locked: the IHU interval is a whole multiple of
+        /// the Hello interval, so the two always come due together and the IHU's remaining time
+        /// is never strictly the soonest. A neighbour discovered mid-cycle breaks that lock, and
+        /// then the IHU really can be what the router next needs waking for.
+        #[test]
+        fn a_desynchronised_ihu_can_be_the_soonest_thing_due() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
             let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
-            r.iface_table
-                .inner
-                .get_mut_by_key(&iface)
-                .expect("interface should exist")
-                .config
-                .unicast_ihu = true;
-            let ucast_interval = Duration::from_secs(20);
-            // Left un-drained: the IHU every new neighbour owes is what competes with the ucast
-            // hello for this poll's packet.
-            r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into(), Some(ucast_interval))
+            let at = |secs| t0 + Duration::from_secs(secs);
+
+            // Discovered three quarters of the way through the Hello cycle, so this neighbour's
+            // IHU ends up 150s out of phase with the Hello interval it is derived from.
+            r.add_neighbour(at(150), iface, NEIGHBOUR_1_ADDR.into())
                 .expect("add_neighbour should succeed");
-            let neighbour = r
-                .neighbor_table
-                .inner
-                .get_mut_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
-                .expect("neighbour should exist");
-            neighbour
-                .pending
-                .ucast_hello
-                .as_mut()
-                .expect("configured")
-                .timer = Timer::new_eager(t0, ucast_interval).expect("valid timer");
+            let transmit = expect_transmit(r.poll_output(at(150)).expect("poll should succeed"));
+            assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
+            // The IHU is now due at 750s.
 
-            // IHU and a ucast hello addressed to the same neighbour bundle into one packet,
-            // in IHU-then-hello order; the interface's mcast hello (different destination) is
-            // blocked this pass since the packet's destination is already unicast.
-            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(
-                transmit.destination,
-                TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
-            );
-            assert_eq!(
-                tlv_types(&transmit.contents),
-                vec![IhuSlice::TYPE_ID, HelloSlice::TYPE_ID]
-            );
-            let hello = nth_hello(&transmit.contents, 1);
-            assert!(hello.flags().is_unicast());
+            // Drain the Hellos at 200, 400 and 600 so none of them is sitting overdue.
+            for secs in [200, 400, 600] {
+                let transmit =
+                    expect_transmit(r.poll_output(at(secs)).expect("poll should succeed"));
+                assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
+            }
+            // The Hello is now due at 800s, a full 50s behind the IHU.
 
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, ucast_interval);
+            let remaining = expect_set_timer(r.poll_output(at(740)).expect("poll should succeed"));
+            assert_eq!(
+                remaining,
+                Duration::from_secs(10),
+                "the IHU at 750s is nearer than the Hello at 800s"
+            );
         }
 
+        /// The multicast Hello is polled before any neighbour, so when both kinds of Hello are
+        /// eager-due at once the multicast one claims the packet and the unicast one waits — but
+        /// only for a poll, since its timer is never touched by the pass that skipped it.
         #[test]
-        fn unicast_ihu_defers_mcast_hello_to_next_immediate_poll() {
+        fn mcast_hello_claims_the_packet_and_the_ucast_hello_follows_next_poll() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let iface_handle = iface_handle("iface_1");
-            // Not pre-drained: the interface's mcast hello is eager-due at the same time as the
-            // new neighbour's immediate IHU, so both are competing for this poll's destination.
-            r.register_interface(t0, iface_handle, NODE_ADDR, Some(IFACE_INTERVAL), None)
+            // Neither is pre-drained, so the interface's mcast hello, the neighbour's ucast hello
+            // and the neighbour's immediate IHU are all due on this first poll.
+            let iface = r
+                .register_interface(t0, ucast_hello_iface_config("iface_1", NODE_ADDR))
                 .expect("register should succeed");
-            r.iface_table
-                .inner
-                .get_mut_by_key(&iface_handle)
-                .expect("interface should exist")
-                .config
-                .unicast_ihu = true;
-            r.add_neighbour(t0, iface_handle, NEIGHBOUR_1_ADDR.into(), None)
+            r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into())
                 .expect("add_neighbour should succeed");
 
-            // Pass 1: IHU wins the packet's unicast destination, blocking the mcast hello.
+            // Pass 1: the mcast hello claims multicast, which the IHU is happy to share and the
+            // ucast hello is not.
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
+            assert_eq!(transmit.destination, TransmitDestination::Multicast);
+            assert_eq!(
+                tlv_types(&transmit.contents),
+                vec![HelloSlice::TYPE_ID, IhuSlice::TYPE_ID]
+            );
+
+            // Pass 2, same `now`: the ucast hello's timer was never touched, so it fires on the
+            // very next poll with a fresh, unclaimed destination.
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
+            assert!(nth_hello(&transmit.contents, 0).flags().is_unicast());
             assert_eq!(
                 transmit.destination,
                 TransmitDestination::Unicast(NEIGHBOUR_1_ADDR.into())
             );
-
-            // Pass 2, same `now`: mcast hello's timer was never touched, so it fires on the very
-            // next poll with a fresh, unclaimed destination.
-            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
-            assert_eq!(transmit.destination, TransmitDestination::Multicast);
 
             // Pass 3: everything drained.
             let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, IFACE_INTERVAL);
+            assert_eq!(remaining, UCAST_INTERVAL);
         }
 
         #[test]
         fn oversized_borrowed_buffer_is_trimmed_to_the_bytes_written() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            let handle = iface_handle("iface_1");
-            r.register_interface(t0, handle, NODE_ADDR, Some(IFACE_INTERVAL), None)
+            r.register_interface(t0, iface_config("iface_1", NODE_ADDR))
                 .expect("register should succeed");
 
             // Far bigger than the eager mcast hello needs, so any untrimmed slack shows up as
@@ -1155,57 +1051,81 @@ mod test {
             assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
         }
 
+        /// With nothing written yet there is no destination to send to and no partial packet worth
+        /// salvaging, so the writer is useless and the error is surfaced rather than swallowed
+        /// into a `SetTimer` the caller would keep retrying against the same too-small buffer.
         #[test]
-        fn undersized_buffer_write_failure_yields_set_timer_without_panicking() {
+        fn buffer_too_small_for_even_one_tlv_is_an_error() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            r.register_interface(
-                t0,
-                iface_handle("iface_1"),
-                NODE_ADDR,
-                Some(IFACE_INTERVAL),
-                None,
-            )
-            .expect("register should succeed");
+            r.register_interface(t0, iface_config("iface_1", NODE_ADDR))
+                .expect("register should succeed");
 
             // 4 bytes is exactly the packet header, leaving 0 remaining for any TLV.
             let mut buf = [0u8; 4];
-            let output = r
+            let err = r
                 .poll_output_with_buf(t0, &mut buf[..])
-                .expect("a write failure should not surface as an Err from poll_output");
+                .expect_err("a buffer that cannot hold one TLV should be rejected");
 
-            // The write failure aborts the body before the mcast hello contributes its timer to
-            // next_poll, but the hello is still due — its timer was never restarted. The router
-            // must ask to be polled again rather than reporting that nothing is scheduled, which
-            // would silence it for good.
-            assert_eq!(expect_set_timer(output), WRITE_FAILURE_RETRY);
+            assert!(matches!(
+                err,
+                BabelError::PacketWriter(PacketWriterError::BufferTooSmall { .. })
+            ));
         }
 
-        /// The retry is a floor, not an override: a timer that comes due sooner than the retry
-        /// window still wins, so a write failure can't delay unrelated work.
+        /// Once the packet has a destination, a buffer that fills mid-body is not a failure: the
+        /// TLVs that fit go out now and the one that didn't stays due, because only a successful
+        /// write restarts the timer behind it.
         #[test]
-        fn write_failure_retry_does_not_delay_a_sooner_timer() {
+        fn a_buffer_that_fills_mid_packet_sends_what_fits_and_defers_the_rest() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
-            // Deliberately not drained: the mcast hello is eager-due, so it is the write that
-            // fails against the undersized buffer below.
-            let iface = iface_handle("iface_1");
-            r.register_interface(t0, iface, NODE_ADDR, Some(IFACE_INTERVAL), None)
+            let iface = r
+                .register_interface(t0, iface_config("iface_1", NODE_ADDR))
                 .expect("register should succeed");
+            r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into())
+                .expect("add_neighbour should succeed");
 
-            // Not yet due, and due sooner than the retry window. Ucast hellos are polled before
-            // the mcast hello, so this contributes to next_poll before the failure aborts the
-            // body. The neighbour's initial IHU is drained first — it is polled ahead of
-            // everything else, and would otherwise be the write that fails.
-            let soon = Duration::from_millis(5);
-            drained_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR, Some(soon));
+            // 4 byte packet header + 2 byte TLV header + 6 byte hello body, and not one byte more
+            // for the IHU that would otherwise bundle in behind it.
+            let mut buf = [0u8; 12];
+            let transmit = expect_transmit(
+                r.poll_output_with_buf(t0, &mut buf[..])
+                    .expect("poll should succeed"),
+            );
+            assert_eq!(transmit.destination, TransmitDestination::Multicast);
+            assert_eq!(tlv_types(&transmit.contents), vec![HelloSlice::TYPE_ID]);
 
-            let mut buf = [0u8; 4];
-            let output = r
-                .poll_output_with_buf(t0, &mut buf[..])
-                .expect("a write failure should not surface as an Err from poll_output");
+            // The IHU was never written, so it is still owed on the next poll.
+            let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
+            assert_eq!(tlv_types(&transmit.contents), vec![IhuSlice::TYPE_ID]);
+        }
 
-            assert_eq!(expect_set_timer(output), soon);
+        /// Scoping a poll to a handle that was never registered matches no interface. Answering
+        /// with a timer would be indistinguishable from a genuinely idle interface, so the bad
+        /// handle would go unnoticed while the router's real interfaces went unpolled.
+        #[test]
+        fn scoped_poll_for_an_unregistered_iface_is_an_error() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let real = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
+            let ghost = iface_handle("ghost");
+
+            let err = r
+                .poll_output_for_iface(t0, ghost)
+                .expect_err("an unregistered handle should be rejected");
+
+            assert!(matches!(
+                err,
+                BabelError::InterfaceDoesntExist(handle) if handle == ghost
+            ));
+
+            // The registered interface is untouched and still pollable.
+            let remaining = expect_set_timer(
+                r.poll_output_for_iface(t0, real)
+                    .expect("poll should succeed"),
+            );
+            assert_eq!(remaining, IFACE_INTERVAL);
         }
 
         /// A router with no interfaces can never send anything and has no timer to report, so
@@ -1223,7 +1143,7 @@ mod test {
 
             assert!(matches!(
                 err,
-                BabelError::IfaceTable(InterfaceTableError::NoInterfacesRegistered)
+                BabelError::IfaceTable(InterfaceError::NoInterfacesRegistered)
             ));
         }
 
@@ -1240,7 +1160,7 @@ mod test {
 
             assert!(matches!(
                 err,
-                BabelError::IfaceTable(InterfaceTableError::NoInterfacesRegistered)
+                BabelError::IfaceTable(InterfaceError::NoInterfacesRegistered)
             ));
         }
     }

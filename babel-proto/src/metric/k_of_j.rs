@@ -1,7 +1,8 @@
 use super::{Cost, LinkCostCalculator, RxCost, TxCost};
-use crate::metric::IhuRatio;
 use crate::metric::distance::INFINITY;
+use crate::utils::DurationMultiplier;
 use crate::utils::bit_history::BitHistory;
+use crate::utils::time::DurationSpec;
 /// A link cost calculator that is best used for wired interfaces.
 ///
 /// This link is either considered up or down with no in between. This is determined by counting
@@ -30,6 +31,16 @@ impl KOutOfJ {
     /// [Appendix B](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.6)
     pub const SPEC_CONST: u16 = 96;
 
+    /// A calculator using the values suggested by
+    /// [Appendix B](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.6).
+    ///
+    /// Available as a constant so it can be referenced with a `'static` lifetime.
+    pub const SPEC: Self = Self {
+        cost_const: Self::SPEC_CONST,
+        k_val: Self::SPEC_K,
+        j_val: Self::SPEC_J,
+    };
+
     /// Create a new KOutOfJ link cost calculator.
     ///
     /// Arguments:
@@ -54,11 +65,7 @@ impl KOutOfJ {
 
 impl Default for KOutOfJ {
     fn default() -> Self {
-        Self {
-            cost_const: Self::SPEC_CONST,
-            k_val: Self::SPEC_K,
-            j_val: Self::SPEC_J,
-        }
+        Self::SPEC
     }
 }
 
@@ -82,12 +89,12 @@ impl LinkCostCalculator for KOutOfJ {
         }
     }
 
-    fn hello_ihu_ratio(
+    fn ihu_interval(
         &self,
         _mcast_hello_history: BitHistory,
         _ucast_hello_history: BitHistory,
-    ) -> IhuRatio {
-        IhuRatio::new(3, 1)
+    ) -> DurationSpec {
+        DurationSpec::Multiple(DurationMultiplier::new(3, 1))
     }
 }
 

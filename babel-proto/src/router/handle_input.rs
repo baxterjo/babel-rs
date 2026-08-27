@@ -1,4 +1,4 @@
-use crate::data_structures::interface::InterfaceHandle;
+use crate::data_structures::interface::Interface;
 use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
 use crate::error::BabelError;
@@ -12,10 +12,10 @@ use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv};
 use crate::router::BabelRouter;
 use crate::utils::{Instant, ManagedSliceExt};
 
-impl<'storage, A, P, const MN: u8, const V: u8> BabelRouter<'storage, P, A, MN, V>
+impl<'storage, A, P> BabelRouter<'storage, P, A>
 where
     A: AddressExt,
-    P: ParserStateExt,
+    P: ParserStateExt<AddressEncoding = A::Encoding, Address = A>,
 {
     pub fn handle_input<'input>(
         &mut self,
@@ -24,26 +24,28 @@ where
     ) -> Result<(), BabelError<A>> {
         b_trace!("{:?}", input);
 
-        if self.iface_table.inner.get_by_key(&input.iface).is_none() {
+        // Have to copy the interface here to avoid indexing the interface table for every TLV in
+        // the loop below.
+        let Some(interface) = self.iface_table.inner.get_by_key(&input.iface).copied() else {
             return Err(BabelError::InterfaceDoesntExist(input.iface));
-        }
+        };
 
         let _parser: Parser<P> = Parser::default();
         let packet = PacketSlice::from_slice(input.contents)?;
         b_trace!("{:?}", packet);
 
         let magic = packet.magic();
-        if magic != MN {
+        if magic != self.magic_number {
             return Err(BabelError::IncorrectMagicNumber {
-                expected: MN,
+                expected: self.magic_number,
                 received: magic,
             });
         }
 
         let version = packet.version();
-        if version != V {
+        if version != self.version_number {
             return Err(BabelError::IncorrectVersionNumber {
-                expected: V,
+                expected: self.version_number,
                 received: version,
             });
         }
@@ -58,12 +60,12 @@ where
                 // are independent of one another, so letting one bad TLV discard the valid ones
                 // behind it hands any sender on the link a way to suppress them.
                 Tlv::Hello(hello) => {
-                    ok_or_continue!(self.handle_hello(now, input.iface, input.source_addr, hello));
+                    ok_or_continue!(self.handle_hello(now, &interface, input.source_addr, hello));
                 }
                 Tlv::Ihu(ihu) => {
                     ok_or_continue!(self.handle_ihu(
                         now,
-                        input.iface,
+                        &interface,
                         input.source_addr,
                         input.destination,
                         ihu
@@ -89,7 +91,7 @@ where
     fn handle_hello(
         &mut self,
         now: Instant,
-        interface: InterfaceHandle,
+        interface: &Interface<A>,
         address: Address<A>,
         hello: HelloSlice<'_>,
     ) -> Result<(), BabelError<A>> {
@@ -101,22 +103,12 @@ where
     fn handle_ihu(
         &mut self,
         now: Instant,
-        interface: InterfaceHandle,
+        interface: &Interface<A>,
         source_addr: Address<A>,
         destination: ReceiveDestination,
         ihu: IhuSlice<'_>,
     ) -> Result<(), BabelError<A>> {
-        // Our address on the interface the packet arrived on. The interface is validated at the
-        // top of `handle_input`, so it is still present here.
-        let our_addr = self
-            .iface_table
-            .inner
-            .get_by_key(&interface)
-            .ok_or(BabelError::InterfaceDoesntExist(interface))?
-            .config
-            .address;
-
-        if !ihu_is_addressed_to_us(&ihu, destination, our_addr)? {
+        if !ihu_is_addressed_to_us(&ihu, destination, interface.address)? {
             b_debug!("Ignoring IHU addressed to another neighbour");
             return Ok(());
         }
@@ -124,7 +116,7 @@ where
         // The rxcost belongs to whoever sent the packet. Nothing inside a Babel packet names its
         // sender, so the transport's source address is the only thing that identifies them.
         self.neighbor_table
-            .handle_ihu(now, interface, source_addr, ihu)?;
+            .handle_ihu(now, source_addr, interface, ihu)?;
         Ok(())
     }
 }
@@ -162,25 +154,29 @@ mod test {
     use core::net::Ipv6Addr;
 
     use super::*;
+    use crate::data_structures::interface::{InterfaceConfig, InterfaceHandle};
     use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_structures::seqno::SeqNo;
-    use crate::data_types::RouterId;
+    use crate::data_types::{Interval, RouterId};
     use crate::extension::NoExtension;
     use crate::metric::TxCost;
-    use crate::packet::packet_header::BabelPacketHeader;
+    use crate::packet::packet_header::PacketHeader;
     use crate::packet::tlv::TypedTlv;
     use crate::packet::tlv::hello_slice::HelloFlags;
+    use crate::router::config::BabelRouterConfig;
     use crate::utils::Duration;
 
     // Long enough not to fire again mid-test, still inside the Timer bound.
-    const IFACE_INTERVAL: Duration = Duration::from_secs(600);
+    const IFACE_INTERVAL: Interval = Interval::from_duration(Duration::from_secs(600));
 
     const NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
     const NEIGHBOUR_1_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
     const NEIGHBOUR_2_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
 
     fn router(name: &'static str) -> BabelRouter<'static> {
-        BabelRouter::new(RouterId::try_from(name).expect("bad router id"))
+        BabelRouter::new(BabelRouterConfig::new(
+            RouterId::try_from(name).expect("bad router id"),
+        ))
     }
 
     fn iface_handle(name: &str) -> InterfaceHandle {
@@ -189,10 +185,7 @@ mod test {
 
     /// Wraps a TLV body in a Babel packet header.
     fn packet(body: &[u8]) -> Vec<u8> {
-        let mut out = vec![
-            BabelPacketHeader::MAGIC_NUMBER,
-            BabelPacketHeader::VERSION_NUMBER,
-        ];
+        let mut out = vec![PacketHeader::MAGIC_NUMBER, PacketHeader::VERSION_NUMBER];
         out.extend_from_slice(&(body.len() as u16).to_be_bytes());
         out.extend_from_slice(body);
         out
@@ -265,8 +258,11 @@ mod test {
 
     /// Registers an interface and drains its mandatory eager initial multicast hello.
     fn drained_iface(r: &mut BabelRouter<'static>, now: Instant, name: &str) -> InterfaceHandle {
-        let handle = iface_handle(name);
-        r.register_interface(now, handle, NODE_ADDR, Some(IFACE_INTERVAL), None)
+        let mut config: InterfaceConfig<NoExtension> =
+            InterfaceConfig::new_wired(iface_handle(name), NODE_ADDR.into());
+        config.set_mcast_hello_interval(IFACE_INTERVAL);
+        let handle = r
+            .register_interface(now, config)
             .expect("register should succeed");
         r.poll_output(now).expect("poll should succeed");
         handle
@@ -319,7 +315,7 @@ mod test {
 
         let unknown = iface_handle("nope");
         let err = r
-            .add_neighbour(t0, unknown, NEIGHBOUR_1_ADDR.into(), None)
+            .add_neighbour(t0, unknown, NEIGHBOUR_1_ADDR.into())
             .expect_err("an unregistered interface should be rejected");
 
         assert!(matches!(err, BabelError::InterfaceDoesntExist(h) if h == unknown));
@@ -342,7 +338,7 @@ mod test {
         let iface = drained_iface(&mut r, t0, "iface_1");
 
         for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
-            r.add_neighbour(t0, iface, addr.into(), None)
+            r.add_neighbour(t0, iface, addr.into())
                 .expect("add_neighbour should succeed");
         }
 
@@ -375,7 +371,7 @@ mod test {
         let t0 = Instant::from_secs(0);
         let iface = drained_iface(&mut r, t0, "iface_1");
 
-        r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into(), None)
+        r.add_neighbour(t0, iface, NEIGHBOUR_1_ADDR.into())
             .expect("add_neighbour should succeed");
 
         // Neighbour 1 multicasts two IHUs: one for us, one for neighbour 2.
@@ -500,7 +496,7 @@ mod test {
         let iface = drained_iface(&mut r, t0, "iface_1");
 
         for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
-            r.add_neighbour(t0, iface, addr.into(), None)
+            r.add_neighbour(t0, iface, addr.into())
                 .expect("add_neighbour should succeed");
         }
 
