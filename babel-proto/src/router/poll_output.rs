@@ -261,7 +261,7 @@ mod test {
     use super::*;
     use crate::data_structures::interface::InterfaceConfig;
     use crate::data_structures::neighbour::{Neighbour, NeighbourIndex};
-    use crate::data_structures::seqno::SeqNo;
+    use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Address, RouterId};
     use crate::extension::NoExtension;
     use crate::metric::{KOutOfJ, RxCost};

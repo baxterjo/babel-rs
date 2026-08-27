@@ -156,7 +156,7 @@ mod test {
     use super::*;
     use crate::data_structures::interface::{InterfaceConfig, InterfaceHandle};
     use crate::data_structures::neighbour::NeighbourIndex;
-    use crate::data_structures::seqno::SeqNo;
+    use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Interval, RouterId};
     use crate::extension::NoExtension;
     use crate::metric::TxCost;

@@ -7,6 +7,8 @@ pub use interval::Interval;
 
 /// Addresses as described in section [4.1.4 and 4.1.5](https://datatracker.ietf.org/doc/html/rfc8966#name-address)
 pub mod address;
+/// Implementation of sequence number arithmetic as described in section [3.2.1-3.2.2](https://datatracker.ietf.org/doc/html/rfc8966#name-sequence-number-arithmetic)
+pub mod seqno;
 
 #[doc(inline)]
 pub use address::Address;

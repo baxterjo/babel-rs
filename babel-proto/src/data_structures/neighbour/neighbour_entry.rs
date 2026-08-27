@@ -5,7 +5,7 @@ use crate::data_structures::neighbour::neighbour_entry::RxHelloInfoErr::BigSeqno
 use crate::data_structures::neighbour::{
     HELLO_INTERVAL_MULTIPLIER, NeighbourConfig, NeighbourError,
 };
-use crate::data_structures::seqno::SeqNo;
+use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Address, Interval};
 use crate::extension::address::AddressExt;
 use crate::metric::LinkCostCalculator;
