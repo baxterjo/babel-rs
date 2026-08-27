@@ -542,14 +542,14 @@ impl RxHelloInfo {
         // Record the received hello in the bit history.
         self.history.record(true);
 
-        // Set the interval of this hello info with the new interval if applicable.
+        // A hello with a non-zero interval is scheduled.
         if !new_interval.is_zero() {
             self.timer
                 .set_tick_duration(*new_interval * HELLO_INTERVAL_MULTIPLIER)
                 .expect("Just checked that interval is not zero");
+            // Timer only restarts on scheduled hellos.
+            self.timer.restart(now);
         }
-
-        self.timer.restart(now);
 
         Ok(())
     }

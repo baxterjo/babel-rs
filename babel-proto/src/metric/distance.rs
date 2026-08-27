@@ -247,10 +247,10 @@ impl Add<Metric> for Cost {
         if self.is_infinite() || neighbour_metric.is_infinite() {
             Metric::INFINITY
         } else {
-            // Saturate at INFINITY - 1 rather than wrapping, so an
-            // overflowing sum reads as "infinite" instead of a bogus
-            // small metric.
-            Metric(self.0.saturating_add(neighbour_metric.0).min(INFINITY))
+            // Saturate at INFINITY - 1 rather than INFINITY. In the spec INFINITY means
+            // "unreachable", but adding link costs up to create a metric inherently means that the
+            // node we are calculating the metric for **IS** reachable, just very expensive.
+            Metric(self.0.saturating_add(neighbour_metric.0).min(INFINITY - 1))
         }
     }
 }
