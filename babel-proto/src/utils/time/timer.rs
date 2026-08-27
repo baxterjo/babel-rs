@@ -16,7 +16,7 @@ pub struct Timer {
 pub enum TimerError {
     #[error("The duration of a timer cannot be zero.")]
     DurationCannotBeZero,
-    #[error("Duration too large - given: {given} centiseconds, max: {max} centiseconds", given=0, max = u16::MAX)]
+    #[error("Duration too large - given: {given} centiseconds, max: {max} centiseconds", given=.0, max = u16::MAX)]
     DurationTooLarge(u64),
 }
 

@@ -34,16 +34,3 @@ macro_rules! ok_or_continue {
         }
     };
 }
-
-/// Used to unwrap packet writer errors
-macro_rules! writer_ok_or_debug_break {
-    ($result:expr) => {
-        match $result {
-            Ok(wr) => wr,
-            Err((err, wr)) => {
-                b_debug!("{:?} : {}", err, err);
-                break wr;
-            }
-        }
-    };
-}

@@ -3,8 +3,8 @@ use crate::data_structures::neighbour::DEFAULT_HOLD_TIME_MULTIPLIER;
 use crate::data_types::{Address, Interval};
 use crate::extension::address::AddressExt;
 use crate::metric::{KOutOfJ, LinkCostCalculator};
-use crate::utils::DurationMultiplier;
 use crate::utils::time::DurationSpec;
+use crate::utils::{Duration, DurationMultiplier};
 
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -46,7 +46,7 @@ impl<A: AddressExt> InterfaceConfig<A> {
     ///
     /// The given interval will be clamped to `1 <= duration <= u16::MAX centiseconds`
     pub fn set_mcast_hello_interval(&mut self, interval: Interval) {
-        self.mcast_hello_interval = interval;
+        self.mcast_hello_interval = interval.max(Duration::from_centis(1).into());
     }
 
     /// Sets the unicast hello interval for this interface.
@@ -55,7 +55,7 @@ impl<A: AddressExt> InterfaceConfig<A> {
     ///
     /// The given interval will be clamped to `1 <= duration <= u16::MAX centiseconds`
     pub fn set_ucast_hello_interval(&mut self, interval: Interval) {
-        self.ucast_hello_interval = Some(interval);
+        self.ucast_hello_interval = Some(interval.max(Duration::from_centis(1).into()));
     }
 
     /// Sets the cost calculator of this interface to a user provided struct.

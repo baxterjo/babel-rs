@@ -80,10 +80,13 @@ impl<A: AddressExt> NeighbourConfig<A> {
         Self {
             iface: interface.handle,
             address,
+            // This is set by incoming IHU TLVs, so there is no interface default start at a
+            // sensible defualt.
             inbound_ihu_interval: (DEFAULT_LOSSLESS_IHU_RATIO
                 .apply(*DEFAULT_MULTICAST_HELLO_INTERVAL)
                 * DEFAULT_HOLD_TIME_MULTIPLIER)
                 .into(),
+            // This is set as a ratio of mcast hellos to outbound IHUs
             outbound_ihu_interval: (DEFAULT_LOSSLESS_IHU_RATIO
                 .apply(interface.hello_timer.duration()))
             .into(),

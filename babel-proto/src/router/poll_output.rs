@@ -30,7 +30,7 @@ where
     /// Polls output for the given interface from the router.
     ///
     /// This is a useful optimization if other interfaces are busy. If the returned [`Output`] is
-    /// of the `SetTimer` variant. That duration **is not** specific to the provided interface.
+    /// of the `SetTimer` variant, it is specific to the polled interface.
     ///
     /// The returned [`Output`] owns its payload, so it does not borrow from the router and can
     /// outlive this call.
@@ -65,7 +65,7 @@ where
     /// efficiency with packed packets.
     ///
     /// This is a useful optimization if other interfaces are busy. If the returned [`Output`] is
-    /// of the `SetTimer` variant. That duration **is not** specific to the provided interface.
+    /// of the `SetTimer` variant, it is specific to the polled interface.
     pub fn poll_output_for_iface_with_buf<'output, B>(
         &mut self,
         now: Instant,

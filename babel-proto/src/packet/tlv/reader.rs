@@ -177,10 +177,15 @@ mod test {
             192, 168, 0, 5, // Address
         ];
 
-        let types: Vec<u8> = TlvReader::new(body).map(|tlv| tlv.r#type()).collect();
+        let mut types = [0u8; 4];
+        let mut count = 0;
+        for tlv in TlvReader::new(body) {
+            types[count] = tlv.r#type();
+            count += 1;
+        }
 
         assert_eq!(
-            types,
+            &types[..count],
             &[4, 5],
             "Malformed and unrecognized TLVs should be skipped, not end iteration"
         );
@@ -205,8 +210,17 @@ mod test {
             0, 200, // Interval
         ];
 
-        let types: Vec<u8> = TlvReader::new(body).map(|tlv| tlv.r#type()).collect();
+        let mut types = [0u8; 2];
+        let mut count = 0;
+        for tlv in TlvReader::new(body) {
+            types[count] = tlv.r#type();
+            count += 1;
+        }
 
-        assert_eq!(types, &[4], "Iteration should stop at the framing error");
+        assert_eq!(
+            &types[..count],
+            &[4],
+            "Iteration should stop at the framing error"
+        );
     }
 }

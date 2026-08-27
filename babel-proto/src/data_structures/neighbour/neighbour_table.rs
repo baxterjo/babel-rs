@@ -1,10 +1,10 @@
 use crate::data_structures::interface::{Interface, InterfaceHandle};
-use crate::data_structures::neighbour::neighbour_entry::{Neighbour, NeighbourIndex};
+use crate::data_structures::neighbour::neighbour_entry::Neighbour;
 use crate::data_structures::neighbour::{NeighbourConfig, NeighbourError};
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
-use crate::utils::{Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt as _, Timer};
+use crate::utils::{Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt as _};
 
 pub struct NeighbourTable<'storage, A>
 where

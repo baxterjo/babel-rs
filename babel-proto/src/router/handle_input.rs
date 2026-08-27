@@ -1,4 +1,4 @@
-use crate::data_structures::interface::{self, Interface, InterfaceHandle};
+use crate::data_structures::interface::Interface;
 use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
 use crate::error::BabelError;
@@ -154,7 +154,7 @@ mod test {
     use core::net::Ipv6Addr;
 
     use super::*;
-    use crate::data_structures::interface::InterfaceConfig;
+    use crate::data_structures::interface::{InterfaceConfig, InterfaceHandle};
     use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_structures::seqno::SeqNo;
     use crate::data_types::{Interval, RouterId};

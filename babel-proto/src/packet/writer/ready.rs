@@ -107,7 +107,7 @@ impl<'a> PacketWriterStep<'a, Ready> {
 
         // Early escape hatch
         if let Some(val) = step.state.remaining()
-            && val < IhuSlice::MIN_LEN
+            && val < TlvHeader::LEN + IhuSlice::MIN_LEN
         {
             return Err((
                 PacketWriterError::BufferTooSmall {
