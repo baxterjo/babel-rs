@@ -1,5 +1,8 @@
 use crate::data_structures::route::route_entry::Route;
 use crate::extension::address::AddressExt;
+use crate::extension::parser_state::ParserStateExt;
+use crate::packet::parser::Parser;
+use crate::packet::tlv::UpdateSlice;
 use crate::utils::ManagedSlice;
 
 /// Route table as defined in
@@ -39,5 +42,12 @@ where
         Self {
             inner: ManagedSlice::Owned(Default::default()),
         }
+    }
+
+    pub(crate) fn handle_update<P: ParserStateExt<AddressEncoding = A::Encoding, Address = A>>(
+        &mut self,
+        parser: Parser<P>,
+        update: UpdateSlice<'_>,
+    ) {
     }
 }
