@@ -88,6 +88,7 @@ where
     /// domain.
     #[cfg(any(feature = "std", feature = "alloc"))]
     pub fn new(config: BabelRouterConfig) -> Self {
+        use alloc::vec::Vec;
         Self::new_with_storage(config, Vec::new(), Vec::new(), Vec::new(), Vec::new())
     }
 

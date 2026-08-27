@@ -24,7 +24,7 @@ impl Debug for BitHistory {
 #[cfg(feature = "defmt")]
 impl defmt::Format for BitHistory {
     fn format(&self, f: defmt::Formatter) {
-        defmt::write!(f, "BitHistory({=usize:b})", self.0)
+        defmt::write!(f, "BitHistory({=u32:b})", self.0)
     }
 }
 

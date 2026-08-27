@@ -42,6 +42,7 @@ pub struct Interface<A: AddressExt> {
     pub(crate) ihu_hold_time_multiple: DurationMultiplier,
 
     /// Link cost calculator
+    #[cfg_attr(feature = "defmt", defmt(Debug2Format))]
     pub(crate) cost_calc: &'static dyn LinkCostCalculator,
 }
 

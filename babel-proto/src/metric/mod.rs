@@ -1,5 +1,4 @@
 use core::fmt::Debug;
-use core::ops::Div;
 
 #[doc(hidden)]
 pub mod distance;

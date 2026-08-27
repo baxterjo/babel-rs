@@ -15,6 +15,7 @@ pub struct InterfaceConfig<A: AddressExt> {
     pub(crate) ucast_hello_interval: Option<Interval>,
     pub(crate) update_interval_spec: DurationSpec,
     pub(crate) ihu_hold_time: DurationMultiplier,
+    #[cfg_attr(feature = "defmt", defmt(Debug2Format))]
     pub(crate) cost_calc: &'static dyn LinkCostCalculator,
 }
 

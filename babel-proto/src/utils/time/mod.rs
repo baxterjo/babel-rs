@@ -42,6 +42,7 @@ use crate::data_types::Interval;
 /// * `ihu_hold_time = 3.5 * advertised_ihu_interval`
 /// * `route_expiry_time = 3.5 * advertised_update_interval`
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum DurationSpec {
     Literal(Duration),
     Multiple(DurationMultiplier),
