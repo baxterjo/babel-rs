@@ -25,8 +25,29 @@ impl RouterId {
         Ok(Self(raw))
     }
 
-    pub(crate) fn octets(&self) -> &[u8; 8] {
+    pub(crate) fn as_octets(&self) -> &[u8; 8] {
         &self.0
+    }
+}
+
+impl From<&'_ [u8; 8]> for RouterId {
+    fn from(value: &'_ [u8; 8]) -> Self {
+        Self(*value)
+    }
+}
+
+/// Implement from &[u8] as specified in
+/// [Section 4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#section-4.6.9-7.4.1)
+impl TryFrom<&[u8]> for RouterId {
+    type Error = RouterIdError;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let mut id_bytes = [0; 8];
+        if value.len() >= 8 {
+            id_bytes[..].copy_from_slice(&value[value.len() - 8..]);
+        } else {
+            id_bytes[8 - value.len()..].copy_from_slice(value);
+        }
+        Self::new(id_bytes)
     }
 }
 
@@ -40,9 +61,7 @@ impl TryFrom<&str> for RouterId {
         let in_bytes = value.as_bytes();
         let mut id_bytes = [0u8; 8];
 
-        for (idx, byte) in in_bytes.iter().rev().enumerate() {
-            id_bytes[id_bytes.len() - 1 - idx] = *byte;
-        }
+        id_bytes[8 - in_bytes.len()..].copy_from_slice(in_bytes);
         Self::new(id_bytes)
     }
 }
@@ -86,5 +105,19 @@ mod test {
     fn display_with_non_utf8_characters() {
         let router_id = RouterId::new([1, 2, 0, 3, 4, 5, 6, 7]).expect("Bad router ID");
         assert_eq!(&router_id.to_string(), "x01 x02 x00 x03 x04 x05 x06 x07");
+    }
+
+    #[test]
+    fn from_greater_than_8_bytes_takes_right_8_bytes() {
+        let id_bytes: &[u8] = &[0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let router_id = RouterId::try_from(id_bytes).expect("bad router id");
+        assert_eq!(router_id.0, [2u8, 3, 4, 5, 6, 7, 8, 9])
+    }
+
+    #[test]
+    fn from_less_than_8_bytes_right_aligns() {
+        let id_bytes: &[u8] = &[4, 5, 6, 7, 8, 9];
+        let router_id = RouterId::try_from(id_bytes).expect("bad router id");
+        assert_eq!(router_id.0, [0u8, 0, 4, 5, 6, 7, 8, 9])
     }
 }

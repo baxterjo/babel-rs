@@ -181,15 +181,10 @@ impl<'a> UpdateSlice<'a> {
     }
 
     /// The size in octets of the Prefix field, (Plen/8 - Omitted) rounded upwards.
-    ///
-    /// [Section 4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update) only gives this
-    /// field a meaning when Omitted is no larger than the prefix it omits octets from, so an
-    /// Update claiming to omit more is invalid and MUST be ignored. Saturating at zero instead
-    /// would leave the prefix octets to be handed back as a sub-TLV region, so it is rejected
-    /// here.
-    fn prefix_len(&self) -> Result<usize, TlvError> {
+    fn prefix_field_len(&self) -> Result<usize, TlvError> {
         let plen_octets = self.plen().div_ceil(8);
         let omitted = self.ommitted();
+        // Can't have a negative length.
         if omitted > plen_octets {
             return Err(TlvError::OmittedTooLong {
                 plen: self.plen(),
@@ -200,18 +195,8 @@ impl<'a> UpdateSlice<'a> {
     }
 
     /// The prefix being advertised. This field's size is (Plen/8 - Omitted) rounded upwards.
-    ///
-    /// The prefix being advertised by an Update TLV is computed as follows:
-    ///   * the first Omitted octets of the prefix are taken from the previous Update TLV with the
-    /// Prefix flag set and the same address encoding, even if it was ignored due to an unknown
-    /// mandatory sub-TLV; if the Omitted field is not zero and there is no such TLV, then this
-    /// Update MUST be ignored;
-    ///   * the next (Plen/8 - Omitted) rounded upwards octets are taken from the Prefix field;
-    ///   * if Plen is not a multiple of 8, then any bits beyond Plen (i.e., the low-order (8 - Plen
-    ///     MOD 8) bits of the last octet) are cleared;
-    ///   * the remaining octets are set to 0.
     pub fn prefix(&self) -> Result<&'a [u8], TlvError> {
-        let idx_end = TlvHeader::LEN + Self::MIN_LEN + self.prefix_len()?;
+        let idx_end = TlvHeader::LEN + Self::MIN_LEN + self.prefix_field_len()?;
         // This **MUST** be checked as the source of idx_end is supplied through the tlv. So a
         // malicious packet could cause UB.
         Ok(self
@@ -228,7 +213,7 @@ impl<'a> UpdateSlice<'a> {
 
     /// This TLV is self-terminating and allows sub-TLVs.
     pub fn sub_tlvs(&self) -> Result<&'a [u8], TlvError> {
-        let idx_end = TlvHeader::LEN + Self::MIN_LEN + self.prefix_len()?;
+        let idx_end = TlvHeader::LEN + Self::MIN_LEN + self.prefix_field_len()?;
         // This **MUST** be checked as the source of idx_end is supplied through the tlv. So a
         // malicious packet could cause UB.
         Ok(self.slice.get(idx_end..).ok_or(LenError {

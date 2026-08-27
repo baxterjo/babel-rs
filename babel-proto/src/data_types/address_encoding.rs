@@ -20,7 +20,7 @@ where
     Extension(E::Error),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum AddressEncoding<E>
 where
@@ -84,8 +84,7 @@ where
 }
 
 impl<E: AddressEncodingExt> AddressEncoding<E> {
-    /// Get the length of the address in bytes with the given context.
-    // TODO: This will need to take in compression context to make an accurate determination.
+    /// Get the length of the uncompressed address.
     pub fn address_len(&self) -> usize {
         match self {
             AddressEncoding::WildCard => 0,
@@ -93,6 +92,19 @@ impl<E: AddressEncodingExt> AddressEncoding<E> {
             AddressEncoding::Ipv6 => 16,
             AddressEncoding::LocalIpv6 => 8,
             AddressEncoding::Extension(e) => e.address_len(),
+        }
+    }
+
+    /// Whether an Update TLV in this encoding may omit leading octets of its prefix.
+    ///
+    /// The wildcard encoding names no address for the omitted octets to come from, and
+    /// [Section 4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update) requires the
+    /// Omitted field to be 0 when AE is 3 (link-local IPv6).
+    pub fn can_compress(&self) -> bool {
+        match self {
+            AddressEncoding::WildCard | AddressEncoding::LocalIpv6 => false,
+            AddressEncoding::Ipv4 | AddressEncoding::Ipv6 => true,
+            AddressEncoding::Extension(e) => e.can_compress(),
         }
     }
 }

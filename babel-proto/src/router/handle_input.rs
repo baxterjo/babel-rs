@@ -5,6 +5,7 @@ use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::input::{Receive, ReceiveDestination};
+use crate::metric::Metric;
 use crate::packet::packet_slice::PacketSlice;
 use crate::packet::parser::Parser;
 use crate::packet::tlv::reader::TlvReader;
@@ -30,7 +31,7 @@ where
             return Err(BabelError::InterfaceDoesntExist(input.iface));
         };
 
-        let _parser: Parser<P> = Parser::default();
+        let mut parser: Parser<P> = Parser::new(input.source_addr);
         let packet = PacketSlice::from_slice(input.contents)?;
         b_trace!("{:?}", packet);
 
@@ -57,8 +58,9 @@ where
                     continue;
                 }
                 // A TLV that cannot be handled is skipped rather than aborting the packet. TLVs
-                // are independent of one another, so letting one bad TLV discard the valid ones
-                // behind it hands any sender on the link a way to suppress them.
+                // are (mostly) independent of one another, so letting one bad TLV discard the valid
+                // ones behind it hands any sender on the link a way to suppress
+                // them.
                 Tlv::Hello(hello) => {
                     ok_or_continue!(self.handle_hello(now, &interface, input.source_addr, hello));
                 }
@@ -71,15 +73,19 @@ where
                         ihu
                     ));
                 }
-                // Hello and IHU are matched above, so this covers the base-spec TLVs that are not
-                // implemented yet.
-                Tlv::AckReq(_)
-                | Tlv::Ack(_)
-                | Tlv::RouterId(_)
-                | Tlv::NextHop(_)
-                | Tlv::Update(_)
-                | Tlv::RouteRequest(_)
-                | Tlv::SeqnoRequest(_) => {
+                Tlv::RouterId(router_id) => {
+                    parser.handle_router_id_tlv(router_id);
+                }
+                Tlv::NextHop(next_hop) => {
+                    ok_or_continue!(parser.handle_next_hop_tlv(next_hop));
+                }
+                Tlv::Update(update) => {
+                    if update.ae() != 0 && update.metric() != Metric::INFINITY {
+                        let _update_info = ok_or_continue!(parser.handle_update(&update));
+                    }
+                }
+                // This covers the base-spec TLVs that are not implemented yet.
+                Tlv::AckReq(_) | Tlv::Ack(_) | Tlv::RouteRequest(_) | Tlv::SeqnoRequest(_) => {
                     unimplemented!("Unimplemented base spec TLV found, Type: {}", tlv.r#type());
                 }
             }

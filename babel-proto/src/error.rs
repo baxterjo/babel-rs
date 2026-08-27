@@ -7,6 +7,7 @@ use crate::data_types::address_encoding::AddressEncodingError;
 use crate::extension::address::AddressExt;
 use crate::packet::error::len_error::LenError;
 use crate::packet::error::tlv_err::TlvError;
+use crate::packet::parser::ParserError;
 use crate::packet::writer::PacketWriterError;
 
 #[derive(Debug, Error)]
@@ -43,4 +44,6 @@ where
     Tlv(#[from] TlvError),
     #[error(transparent)]
     Address(#[from] AddressError<A>),
+    #[error(transparent)]
+    Parser(#[from] ParserError<A>),
 }
