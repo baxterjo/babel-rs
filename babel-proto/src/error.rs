@@ -33,6 +33,10 @@ where
     NoWakeUpTime,
     #[error("Received {0} from an unregistered neighbour: {1}")]
     TlvFromUnknownNeighbour(&'static str, NeighbourIndex<A>),
+    #[error(
+        "Blanket retraction must have a Plen and Omitted of 0 - plen: {plen}, omitted: {omitted}"
+    )]
+    MalformedBlanketRetraction { plen: u8, omitted: u8 },
     #[error(transparent)]
     Len(#[from] LenError),
     #[error(transparent)]

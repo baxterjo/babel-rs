@@ -161,33 +161,52 @@ where
             .ok_or(BabelError::TlvFromUnknownNeighbour("update_tlv", idx))?;
 
         if update.is_blanket_retraction() {
-            todo!()
-        } else {
-            let update_info = parser.handle_update(&update)?;
-            if update.is_retraction() {
-                todo!()
-            } else {
-                let feasible = self.source_table.update_is_feasible(&update_info, &update);
-                let link_cost = interface.cost_calc.link_cost(
-                    interface.cost_calc.rx_cost(
-                        neighbour.mcast_hello_info.history,
-                        neighbour.ucast_hello_info.history,
-                    ),
-                    neighbour.tx_cost,
-                );
-                let route_metric = interface.cost_calc.metric(update.metric(), link_cost);
-
-                self.route_table.handle_update(
-                    now,
-                    neighbour,
-                    feasible,
-                    update_info,
-                    update,
-                    route_metric,
-                )?;
+            // Section 4.6.9: "If the metric is infinite and AE is 0, Plen and Omitted MUST both be
+            // 0; Update TLVs that do not satisfy this requirement MUST be ignored."
+            if update.plen() != 0 || update.ommitted() != 0 {
+                return Err(BabelError::MalformedBlanketRetraction {
+                    plen: update.plen(),
+                    omitted: update.ommitted(),
+                });
             }
+            self.route_table.handle_blanket_retraction(neighbour);
+        } else if update.is_retraction() {
+            // A retraction only has to name the entry it retracts. Section 4.6.9: "the router-id,
+            // next hop, and seqno are not used" This means that the parser does not need to have
+            // state for router-id or next hop in this branch.
+            let prefix = parser.resolve_address(&update)?;
+
+            self.route_table
+                .handle_retraction(neighbour, prefix, update.plen());
+        } else {
+            // Resolve the update (this also updates the parser state)
+            let resolved_update = parser.handle_update(update)?;
+
+            // Check if the update is feasible against the source table.
+            let feasible = self.source_table.update_is_feasible(&resolved_update);
+            // Calculate the link cost to this neighbour
+            let link_cost = interface.cost_calc.link_cost(
+                interface.cost_calc.rx_cost(
+                    neighbour.mcast_hello_info.history,
+                    neighbour.ucast_hello_info.history,
+                ),
+                neighbour.tx_cost,
+            );
+            // Calculate the route metric for this route.
+            let route_metric = interface
+                .cost_calc
+                .metric(resolved_update.slice.metric(), link_cost);
+
+            // Aquire the route
+            self.route_table.aquire_route(
+                now,
+                neighbour,
+                feasible,
+                resolved_update,
+                route_metric,
+            )?;
         }
-        todo!()
+        Ok(())
     }
 }
 
@@ -226,15 +245,16 @@ mod test {
     use super::*;
     use crate::data_structures::interface::{InterfaceConfig, InterfaceHandle};
     use crate::data_structures::neighbour::NeighbourIndex;
+    use crate::data_structures::route::{Route, RouteIndex};
     use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Interval, RouterId};
     use crate::extension::NoExtension;
-    use crate::metric::TxCost;
+    use crate::metric::{Metric, TxCost};
     use crate::packet::packet_header::PacketHeader;
-    use crate::packet::tlv::TypedTlv;
     use crate::packet::tlv::hello_slice::HelloFlags;
-    use crate::router::config::BabelRouterConfig;
-    use crate::utils::Duration;
+    use crate::packet::tlv::{NextHopSlice, RouterIdSlice, TypedTlv};
+    use crate::router::config::{BabelRouterConfig, DEFAULT_ROUTE_EXPIRY_TIME};
+    use crate::utils::{Duration, InternallyKeyed};
 
     // Long enough not to fire again mid-test, still inside the Timer bound.
     const IFACE_INTERVAL: Interval = Interval::from_duration(Duration::from_secs(600));
@@ -327,6 +347,234 @@ mod test {
             })
             .expect("neighbour should exist")
             .tx_cost
+    }
+
+    //  _   _ ___ ___   _ _____ ___   ___ _____ _____ _   _ ___ ___
+    // | | | | _ \   \ /_\_   _| __| | __|_   _|_   _| | | | _ \ __|
+    // | |_| |  _/ |) / _ \| | | _|  | _|  | |   | | | |_| |   / _|
+    //  \___/|_| |___/_/ \_\_| |___| |_|   |_|   |_|  \___/|_|_\___|
+
+    /// The Interval every Update here advertises unless it is testing the Interval itself.
+    const UPDATE_INTERVAL_CENTIS: u16 = 200;
+    /// The Metric field value that makes an Update a retraction.
+    const METRIC_INFINITY: u16 = 0xFFFF;
+    /// The rxcost neighbours advertise in their IHUs here. It becomes our txcost toward them and,
+    /// under the spec cost calculator, the link cost of the route as well.
+    const LINK_COST: u16 = 20;
+
+    const PREFIX_FLAG: u8 = 0x80;
+    const ROUTER_ID_FLAG: u8 = 0x40;
+
+    /// Two prefixes with the wire forms an AE 2 Update carries for a /64: the leading 8 octets.
+    const PLEN: u8 = 64;
+    const PREFIX_A_WIRE: [u8; 8] = [0xfd, 0x0a, 0, 0, 0, 0, 0, 0];
+    const PREFIX_B_WIRE: [u8; 8] = [0xfd, 0x0b, 0, 0, 0, 0, 0, 0];
+    const PREFIX_A: Ipv6Addr = Ipv6Addr::new(0xfd0a, 0, 0, 0, 0, 0, 0, 0);
+    const PREFIX_B: Ipv6Addr = Ipv6Addr::new(0xfd0b, 0, 0, 0, 0, 0, 0, 0);
+
+    /// The router-ids of the nodes the routes below originate from. Neither is this node.
+    const ORIGIN_1: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0x11];
+    const ORIGIN_2: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0x22];
+
+    /// An Update TLV laid out on the wire, so these tests reach `handle_update` through the same
+    /// accessors a real packet does.
+    #[derive(Clone)]
+    struct UpdateTlv {
+        ae: u8,
+        flags: u8,
+        plen: u8,
+        omitted: u8,
+        interval_centis: u16,
+        seqno: u16,
+        metric: u16,
+        /// The prefix as it appears on the wire, i.e. already compressed: (Plen/8 rounded upwards
+        /// - Omitted) octets.
+        prefix: Vec<u8>,
+    }
+
+    impl UpdateTlv {
+        /// A finite-metric IPv6 Update, which is what advertises a route.
+        fn v6(plen: u8, prefix: &[u8], metric: u16) -> Self {
+            Self {
+                ae: 2,
+                flags: 0,
+                plen,
+                omitted: 0,
+                interval_centis: UPDATE_INTERVAL_CENTIS,
+                seqno: 1,
+                metric,
+                prefix: prefix.to_vec(),
+            }
+        }
+
+        /// The retraction of a single prefix: an ordinary Update whose Metric field is infinity.
+        fn retraction_of(plen: u8, prefix: &[u8]) -> Self {
+            Self::v6(plen, prefix, METRIC_INFINITY)
+        }
+
+        /// AE 0 with an infinite metric, which retracts every route the sender previously
+        /// advertised on this interface. Plen and Omitted MUST both be 0.
+        fn blanket_retraction() -> Self {
+            Self {
+                ae: 0,
+                flags: 0,
+                plen: 0,
+                omitted: 0,
+                interval_centis: UPDATE_INTERVAL_CENTIS,
+                seqno: 0,
+                metric: METRIC_INFINITY,
+                prefix: Vec::new(),
+            }
+        }
+
+        fn ae(mut self, ae: u8) -> Self {
+            self.ae = ae;
+            self
+        }
+
+        fn flags(mut self, flags: u8) -> Self {
+            self.flags = flags;
+            self
+        }
+
+        fn omitted(mut self, omitted: u8, prefix: &[u8]) -> Self {
+            self.omitted = omitted;
+            self.prefix = prefix.to_vec();
+            self
+        }
+
+        fn plen(mut self, plen: u8) -> Self {
+            self.plen = plen;
+            self
+        }
+
+        fn seqno(mut self, seqno: u16) -> Self {
+            self.seqno = seqno;
+            self
+        }
+
+        fn interval(mut self, centis: u16) -> Self {
+            self.interval_centis = centis;
+            self
+        }
+
+        fn to_wire(&self) -> Vec<u8> {
+            let mut out = vec![
+                UpdateSlice::TYPE_ID,
+                (UpdateSlice::MIN_LEN + self.prefix.len()) as u8,
+                self.ae,
+                self.flags,
+                self.plen,
+                self.omitted,
+            ];
+            out.extend_from_slice(&self.interval_centis.to_be_bytes());
+            out.extend_from_slice(&self.seqno.to_be_bytes());
+            out.extend_from_slice(&self.metric.to_be_bytes());
+            out.extend_from_slice(&self.prefix);
+            out
+        }
+    }
+
+    fn router_id_tlv(id: [u8; 8]) -> Vec<u8> {
+        let mut out = vec![
+            RouterIdSlice::TYPE_ID,
+            RouterIdSlice::MIN_LEN as u8,
+            0, // Reserved
+            0, // Reserved
+        ];
+        out.extend_from_slice(&id);
+        out
+    }
+
+    fn next_hop_tlv(ae: u8, address: &[u8]) -> Vec<u8> {
+        let mut out = vec![
+            NextHopSlice::TYPE_ID,
+            (NextHopSlice::MIN_LEN + address.len()) as u8,
+            ae,
+            0, // Reserved
+        ];
+        out.extend_from_slice(address);
+        out
+    }
+
+    /// The hold time a route advertising `interval_centis` should end up with.
+    fn expected_expiry(interval_centis: u16) -> Duration {
+        Duration::from_centis(interval_centis.into()) * DEFAULT_ROUTE_EXPIRY_TIME
+    }
+
+    /// Sends a packet carrying a Router-Id TLV followed by `updates`, which is the shape an Update
+    /// normally arrives in.
+    fn send_updates(
+        r: &mut BabelRouter<'static>,
+        now: Instant,
+        iface: InterfaceHandle,
+        from: Ipv6Addr,
+        router_id: [u8; 8],
+        updates: &[UpdateTlv],
+    ) {
+        let mut body = router_id_tlv(router_id);
+        for update in updates {
+            body.extend_from_slice(&update.to_wire());
+        }
+        let pkt = packet(&body);
+
+        r.handle_input(
+            now,
+            receive(iface, from, ReceiveDestination::Multicast, &pkt),
+        )
+        .expect("handle_input should succeed");
+    }
+
+    /// Copies out the route table entry indexed by (prefix, plen, neighbour), if it exists.
+    fn route_for(
+        r: &mut BabelRouter<'static>,
+        iface: InterfaceHandle,
+        neighbour: Ipv6Addr,
+        prefix: Ipv6Addr,
+        plen: u8,
+    ) -> Option<Route<NoExtension>> {
+        let idx = RouteIndex {
+            prefix: prefix.into(),
+            prefix_len: plen,
+            neighbour: NeighbourIndex {
+                iface,
+                addr: neighbour.into(),
+            },
+        };
+        r.route_table
+            .iter_mut_entries()
+            .find(|route| route.key() == idx)
+            .map(|route| *route)
+    }
+
+    fn route_count(r: &mut BabelRouter<'static>) -> usize {
+        r.route_table.iter_mut_entries().count()
+    }
+
+    /// Brings a neighbour to the state an Update needs to yield a finite route metric: enough
+    /// hellos for a finite rxcost, and an IHU so the txcost — and with it the link cost — is finite
+    /// too. Missing either one makes every route this neighbour advertises compute to infinity.
+    fn established_neighbour(
+        r: &mut BabelRouter<'static>,
+        now: Instant,
+        iface: InterfaceHandle,
+        addr: Ipv6Addr,
+    ) {
+        for seqno in 0..2 {
+            let pkt = packet(&hello_tlv(seqno, 100));
+            r.handle_input(
+                now,
+                receive(iface, addr, ReceiveDestination::Multicast, &pkt),
+            )
+            .expect("hello should be handled");
+        }
+
+        let pkt = packet(&ihu_tlv(LINK_COST, 100, NODE_ADDR));
+        r.handle_input(
+            now,
+            receive(iface, addr, ReceiveDestination::Multicast, &pkt),
+        )
+        .expect("ihu should be handled");
     }
 
     /// Registers an interface and drains its mandatory eager initial multicast hello.
@@ -595,5 +843,949 @@ mod test {
 
         assert_eq!(tx_cost(&r, iface, NEIGHBOUR_1_ADDR), TxCost::from_raw(42));
         assert_eq!(tx_cost(&r, iface, NEIGHBOUR_2_ADDR), TxCost::INFINITY);
+    }
+
+    //  ___  ___  _   _ _____ ___     _   ___ ___  _   _ ___ ___ ___ _____ ___ ___  _  _
+    // | _ \/ _ \| | | |_   _| __|   /_\ / __/ _ \| | | |_ _/ __|_ _|_   _|_ _/ _ \| \| |
+    // |   / (_) | |_| | | | | _|   / _ \ (_| (_) | |_| || |\__ \| |  | |  | | (_) | .` |
+    // |_|_\\___/ \___/  |_| |___| /_/ \_\___\__\_\\___/|___|___/___| |_| |___\___/|_|\_|
+
+    /// RFC 8966 [3.5.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-acquisition): a
+    /// first Update for (prefix, plen, neigh) creates an entry whose source is
+    /// (prefix, plen, router-id), whose seqno and advertised metric come straight off the wire, and
+    /// whose hold time is a small multiple of the Interval the Update carried.
+    #[test]
+    fn an_update_creates_a_route_entry() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).seqno(7)],
+        );
+
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the update should have created a route");
+
+        assert_eq!(route.source.prefix, PREFIX_A.into());
+        assert_eq!(route.source.prefix_len, PLEN);
+        assert_eq!(
+            route.source.router_id,
+            RouterId::from(&ORIGIN_1),
+            "the source router-id comes from the preceding Router-Id TLV"
+        );
+        assert_eq!(
+            route.neigbour,
+            NeighbourIndex {
+                iface,
+                addr: NEIGHBOUR_1_ADDR.into()
+            },
+            "the route is attributed to the neighbour that advertised it"
+        );
+        assert_eq!(route.seqno, SeqNo(7));
+        assert_eq!(
+            route.advertised_metric,
+            Metric::from_raw(100),
+            "the advertised metric is the one the neighbour sent, unchanged"
+        );
+        assert_eq!(
+            route.computed_metric,
+            Metric::from_raw(100 + LINK_COST),
+            "the computed metric adds the cost of the link the update arrived over"
+        );
+        assert_eq!(
+            route.next_hop,
+            NEIGHBOUR_1_ADDR.into(),
+            "with no Next Hop TLV the next hop is the packet's source address"
+        );
+        assert_eq!(
+            route.expiry.duration(),
+            expected_expiry(UPDATE_INTERVAL_CENTIS),
+            "the hold time is a small multiple of the advertised Interval"
+        );
+    }
+
+    /// The route table is indexed by (prefix, plen, neigh), so the same prefix heard from two
+    /// neighbours is two entries. Collapsing them would throw away the alternative the route
+    /// selection procedure exists to choose between.
+    #[test]
+    fn one_prefix_from_two_neighbours_is_two_route_entries() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+
+        for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
+            established_neighbour(&mut r, t0, iface, addr);
+        }
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_2_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 300)],
+        );
+
+        assert_eq!(route_count(&mut r), 2);
+        assert_eq!(
+            route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+                .expect("neighbour 1 should have a route")
+                .advertised_metric,
+            Metric::from_raw(100)
+        );
+        assert_eq!(
+            route_for(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN)
+                .expect("neighbour 2 should have a route")
+                .advertised_metric,
+            Metric::from_raw(300)
+        );
+    }
+
+    /// A route entry names the neighbour that advertised it, so there is nothing to index an Update
+    /// from a node the neighbour table has never heard of.
+    #[test]
+    fn an_update_from_an_unknown_neighbour_creates_no_route() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+
+        // No hello, no IHU, no `add_neighbour`: this address is a stranger.
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+
+        assert_eq!(route_count(&mut r), 0);
+    }
+
+    /// An Update with no Router-Id in scope has no source to be filed under, and RFC 8966
+    /// [4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update) says such an update is
+    /// ignored.
+    #[test]
+    fn an_update_with_no_router_id_in_scope_creates_no_route() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        // The packet body is the Update alone — no preceding Router-Id TLV.
+        let pkt = packet(&UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).to_wire());
+        r.handle_input(
+            t0,
+            receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Multicast, &pkt),
+        )
+        .expect("handle_input should succeed");
+
+        assert_eq!(route_count(&mut r), 0);
+    }
+
+    /// A Next Hop TLV names where packets for the advertised prefix should actually be sent, which
+    /// need not be the node that sent the packet.
+    #[test]
+    fn a_next_hop_tlv_becomes_the_routes_next_hop() {
+        const NEXT_HOP: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x99);
+
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        let mut body = router_id_tlv(ORIGIN_1);
+        body.extend_from_slice(&next_hop_tlv(2, &NEXT_HOP.octets()));
+        body.extend_from_slice(&UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).to_wire());
+        let pkt = packet(&body);
+
+        r.handle_input(
+            t0,
+            receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Multicast, &pkt),
+        )
+        .expect("handle_input should succeed");
+
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the update should have created a route");
+
+        assert_eq!(
+            route.next_hop,
+            NEXT_HOP.into(),
+            "the announced next hop should win over the packet's source address"
+        );
+        assert_eq!(
+            route.neigbour.addr,
+            NEIGHBOUR_1_ADDR.into(),
+            "the next hop must not change which neighbour advertised the route"
+        );
+    }
+
+    /// The parser state is threaded through the whole packet, so an Update that establishes a
+    /// default prefix has to still be in force when the next Update in that packet omits octets.
+    #[test]
+    fn an_update_can_omit_octets_from_an_earlier_default_prefix_in_the_same_packet() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[
+                // Sets fd0a::/64 as the default prefix for AE 2.
+                UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).flags(PREFIX_FLAG),
+                // fd0a:0:0:1::/64 with its first two octets taken from that default.
+                UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 200).omitted(2, &[0, 0, 0, 0, 0, 1]),
+            ],
+        );
+
+        assert_eq!(route_count(&mut r), 2);
+        assert!(
+            route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN).is_some(),
+            "the default-setting update should have created its own route"
+        );
+
+        let compressed = route_for(
+            &mut r,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            Ipv6Addr::new(0xfd0a, 0, 0, 1, 0, 0, 0, 0),
+            PLEN,
+        )
+        .expect("the compressed update should have created a route");
+
+        assert_eq!(compressed.advertised_metric, Metric::from_raw(200));
+    }
+
+    //  ___  ___  _   _ _____ ___   ___ ___ ___ ___ ___ ___ _  _
+    // | _ \/ _ \| | | |_   _| __| | _ \ __| __| _ \ __/ __| || |
+    // |   / (_) | |_| | | | | _|  |   / _|| _||   / _|\__ \ __ |
+    // |_|_\\___/ \___/  |_| |___| |_|_\___|_| |_|_\___|___/_||_|
+
+    /// A repeat Update for a prefix already heard from that neighbour refreshes the entry in place
+    /// rather than adding a second one, and every field it carries is applied.
+    #[test]
+    fn a_second_update_for_the_same_prefix_refreshes_the_existing_entry() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).seqno(1)],
+        );
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 300).seqno(2)],
+        );
+
+        assert_eq!(
+            route_count(&mut r),
+            1,
+            "the second update names the same (prefix, plen, neigh)"
+        );
+
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the route should still exist");
+
+        assert_eq!(route.seqno, SeqNo(2));
+        assert_eq!(route.advertised_metric, Metric::from_raw(300));
+        assert_eq!(route.computed_metric, Metric::from_raw(300 + LINK_COST));
+    }
+
+    /// The route table key does not include the router-id, so a prefix that changes hands keeps its
+    /// entry and updates the source it is advertised for.
+    #[test]
+    fn an_update_carrying_a_new_router_id_repoints_the_existing_entry() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_2,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+
+        assert_eq!(route_count(&mut r), 1);
+        assert_eq!(
+            route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+                .expect("the route should still exist")
+                .source
+                .router_id,
+            RouterId::from(&ORIGIN_2),
+            "the entry should now be advertised for the new source"
+        );
+    }
+
+    /// The hold time is derived from the Interval of the update that most recently refreshed the
+    /// route, not from the one that created it.
+    #[test]
+    fn a_later_update_resets_the_expiry_timer_from_its_own_interval() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+
+        // Well inside the first hold time, and advertising a longer interval than before.
+        let t1 = t0 + Duration::from_secs(3);
+        send_updates(
+            &mut r,
+            t1,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)
+                .seqno(2)
+                .interval(400)],
+        );
+
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the route should still exist");
+
+        assert_eq!(route.expiry.duration(), expected_expiry(400));
+        assert_eq!(
+            route.expiry.time_remaining(t1),
+            Some(expected_expiry(400)),
+            "the timer should run from the second update, not from the first"
+        );
+    }
+
+    //  ___ ___ _____ ___    _   ___ _____ ___ ___  _  _
+    // | _ \ __|_   _| _ \  /_\ / __|_   _|_ _/ _ \| \| |
+    // |   / _|  | | |   / / _ \ (__  | |  | | (_) | .` |
+    // |_|_\___| |_| |_|_\/_/ \_\___| |_| |___\___/|_|\_|
+
+    /// A Metric of FFFF hexadecimal retracts the route. The entry stays in the table carrying an
+    /// infinite metric — dropping it outright would lose the record that this neighbour has spoken
+    /// about the prefix at all.
+    #[test]
+    fn a_retraction_drives_a_known_route_to_infinity_and_keeps_the_entry() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE)],
+        );
+
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("a retraction should not remove the entry");
+
+        assert_eq!(route_count(&mut r), 1);
+        assert_eq!(route.advertised_metric, Metric::INFINITY);
+        assert_eq!(route.computed_metric, Metric::INFINITY);
+    }
+
+    /// Retracting a prefix this neighbour never advertised is not an error — there is simply no
+    /// entry to drive to infinity, and one must not be conjured up.
+    #[test]
+    fn a_retraction_for_an_unknown_route_creates_nothing() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE)],
+        );
+
+        assert_eq!(route_count(&mut r), 0);
+    }
+
+    /// RFC 8966 [3.5.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-acquisition)
+    /// resets a route's expiry timer only when the advertised metric is finite. A retracted route
+    /// therefore runs out the hold time it already had and is flushed when it fires; handing it a
+    /// fresh timer would keep it alive for another full hold time every time the neighbour repeats
+    /// the retraction.
+    #[test]
+    fn a_retraction_leaves_the_expiry_timer_it_already_had() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+
+        // Part way through the hold time the update bought, and the retraction advertises a much
+        // longer Interval than the original update did.
+        let t1 = t0 + Duration::from_secs(3);
+        send_updates(
+            &mut r,
+            t1,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE).interval(60_000)],
+        );
+
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the route should still exist");
+
+        assert_eq!(
+            route.expiry.duration(),
+            expected_expiry(UPDATE_INTERVAL_CENTIS),
+            "the retraction's own Interval must not become the hold time"
+        );
+        assert_eq!(
+            route.expiry.time_remaining(t1),
+            Some(expected_expiry(UPDATE_INTERVAL_CENTIS) - Duration::from_secs(3)),
+            "the timer should still be running from the update that created the route"
+        );
+    }
+
+    /// A blanket retraction is a retraction of every route from the neighbour, so it leaves their
+    /// expiry timers alone for the same reason a single one does.
+    #[test]
+    fn a_blanket_retraction_leaves_the_expiry_timers_it_already_had() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+
+        let t1 = t0 + Duration::from_secs(3);
+        send_updates(
+            &mut r,
+            t1,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::blanket_retraction().interval(60_000)],
+        );
+
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the route should still exist");
+
+        assert_eq!(route.computed_metric, Metric::INFINITY);
+        assert_eq!(
+            route.expiry.time_remaining(t1),
+            Some(expected_expiry(UPDATE_INTERVAL_CENTIS) - Duration::from_secs(3)),
+            "the timer should still be running from the update that created the route"
+        );
+    }
+
+    /// RFC 8966 [4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update): for a
+    /// retraction "the router-id, next hop, and seqno are not used". A sender is free to put
+    /// anything in those fields, so the entry keeps what its last real advertisement set.
+    #[test]
+    fn a_retraction_keeps_the_seqno_and_router_id_of_the_last_advertisement() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).seqno(7)],
+        );
+        // A retraction whose unused fields say something else entirely.
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_2,
+            &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE).seqno(0)],
+        );
+
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the route should still exist");
+
+        assert_eq!(route.computed_metric, Metric::INFINITY);
+        assert_eq!(route.seqno, SeqNo(7), "the retraction's seqno is not used");
+        assert_eq!(
+            route.source.router_id,
+            RouterId::from(&ORIGIN_1),
+            "the retraction's router-id is not used"
+        );
+    }
+
+    /// A retraction is valid in a packet that established no router-id, because it does not use
+    /// one. Demanding one would let a node's parting retraction be silently dropped.
+    #[test]
+    fn a_retraction_needs_no_router_id_in_scope() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+
+        // The packet body is the retraction alone — no Router-Id TLV in front of it.
+        let pkt = packet(&UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE).to_wire());
+        r.handle_input(
+            t0,
+            receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Multicast, &pkt),
+        )
+        .expect("handle_input should succeed");
+
+        assert_eq!(
+            route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+                .expect("the route should still exist")
+                .computed_metric,
+            Metric::INFINITY
+        );
+    }
+
+    /// The Prefix flag "establishes a new default prefix for subsequent Update TLVs with a matching
+    /// address encoding within the same packet" regardless of what the flagged TLV itself does, so
+    /// a retraction carrying it still has that side effect.
+    #[test]
+    fn a_retraction_still_establishes_the_default_prefix_for_the_updates_behind_it() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[
+                UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE).flags(PREFIX_FLAG),
+                UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).omitted(2, &[0, 0, 0, 0, 0, 1]),
+            ],
+        );
+
+        assert!(
+            route_for(
+                &mut r,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                Ipv6Addr::new(0xfd0a, 0, 0, 1, 0, 0, 0, 0),
+                PLEN
+            )
+            .is_some(),
+            "the update behind the retraction should have resolved against its default prefix"
+        );
+    }
+
+    /// A retraction names one (prefix, plen, neigh). Every other entry — another prefix from the
+    /// same neighbour, or the same prefix from another one — is somebody else's route.
+    #[test]
+    fn a_retraction_only_touches_the_route_it_names() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+
+        for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
+            established_neighbour(&mut r, t0, iface, addr);
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                addr,
+                ORIGIN_1,
+                &[
+                    UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100),
+                    UpdateTlv::v6(PLEN, &PREFIX_B_WIRE, 100),
+                ],
+            );
+        }
+        assert_eq!(route_count(&mut r), 4);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE)],
+        );
+
+        assert_eq!(
+            route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+                .expect("the retracted route should still exist")
+                .computed_metric,
+            Metric::INFINITY
+        );
+        assert_eq!(
+            route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_B, PLEN)
+                .expect("the other prefix should still exist")
+                .computed_metric,
+            Metric::from_raw(100 + LINK_COST),
+            "a retraction of one prefix must not touch another prefix from the same neighbour"
+        );
+        assert_eq!(
+            route_for(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN)
+                .expect("the other neighbour's route should still exist")
+                .computed_metric,
+            Metric::from_raw(100 + LINK_COST),
+            "one neighbour cannot retract another neighbour's route"
+        );
+    }
+
+    //  ___ _      _   _  _ _  _____ _____   ___ ___ _____ ___    _   ___ _____ ___ ___  _  _
+    // | _ ) |    /_\ | \| | |/ / __|_   _| | _ \ __|_   _| _ \  /_\ / __|_   _|_ _/ _ \| \| |
+    // | _ \ |__ / _ \| .` | ' <| _|  | |   |   / _|  | | |   / / _ \ (__  | |  | | (_) | .` |
+    // |___/____/_/ \_\_|\_|_|\_\___| |_|   |_|_\___| |_| |_|_\/_/ \_\___| |_| |___\___/|_|\_|
+
+    /// RFC 8966 [4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update): with an
+    /// infinite metric, AE MAY be 0, "in which case this Update retracts all of the routes
+    /// previously advertised by the sending interface". Routes learned from anybody else are
+    /// untouched.
+    #[test]
+    fn a_blanket_retraction_retracts_every_route_from_the_sending_neighbour() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+
+        for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
+            established_neighbour(&mut r, t0, iface, addr);
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                addr,
+                ORIGIN_1,
+                &[
+                    UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100),
+                    UpdateTlv::v6(PLEN, &PREFIX_B_WIRE, 100),
+                ],
+            );
+        }
+        assert_eq!(route_count(&mut r), 4);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::blanket_retraction()],
+        );
+
+        assert_eq!(
+            route_count(&mut r),
+            4,
+            "a blanket retraction retracts routes, it does not remove their entries"
+        );
+        for prefix in [PREFIX_A, PREFIX_B] {
+            let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, prefix, PLEN)
+                .expect("the retracted route should still exist");
+            assert_eq!(route.advertised_metric, Metric::INFINITY);
+            assert_eq!(route.computed_metric, Metric::INFINITY);
+
+            let other = route_for(&mut r, iface, NEIGHBOUR_2_ADDR, prefix, PLEN)
+                .expect("the other neighbour's route should still exist");
+            assert_eq!(
+                other.computed_metric,
+                Metric::from_raw(100 + LINK_COST),
+                "one neighbour's blanket retraction must not touch another neighbour's routes"
+            );
+        }
+    }
+
+    /// For a retraction "the router-id, next hop, and seqno are not used", and a blanket retraction
+    /// carries no prefix to decompress either. It therefore has to be honoured in a packet with no
+    /// parser state at all — which is exactly the packet a node sends when it is going away.
+    #[test]
+    fn a_blanket_retraction_needs_no_router_id_in_scope() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+
+        // The packet body is the blanket retraction alone — no Router-Id TLV in front of it.
+        let pkt = packet(&UpdateTlv::blanket_retraction().to_wire());
+        r.handle_input(
+            t0,
+            receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Multicast, &pkt),
+        )
+        .expect("handle_input should succeed");
+
+        assert_eq!(
+            route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+                .expect("the route should still exist")
+                .computed_metric,
+            Metric::INFINITY
+        );
+    }
+
+    //  __  __   _   _    ___ ___  ___ __  __ ___ ___
+    // |  \/  | /_\ | |  | __/ _ \| _ \  \/  | __|   \
+    // | |\/| |/ _ \| |__| _| (_) |   / |\/| | _|| |) |
+    // |_|  |_/_/ \_\____|_| \___/|_|_\_|  |_|___|___/
+
+    /// RFC 8966 [4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update): "If the metric
+    /// is finite, AE MUST NOT be 0; Update TLVs with finite metric and AE equal to 0 MUST be
+    /// ignored." There is no address for such an Update to be about.
+    ///
+    /// Ignoring it also has to be local: the Router-Id flag on a TLV with no address must not
+    /// establish anything for the Updates behind it.
+    #[test]
+    fn a_finite_metric_update_with_the_wildcard_encoding_is_ignored() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[
+                UpdateTlv::v6(0, &[], 100).ae(0).flags(ROUTER_ID_FLAG),
+                UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100),
+            ],
+        );
+
+        assert_eq!(
+            route_count(&mut r),
+            1,
+            "only the well-formed update should have created a route"
+        );
+        assert_eq!(
+            route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+                .expect("the well-formed update should still have been handled")
+                .source
+                .router_id,
+            RouterId::from(&ORIGIN_1),
+            "the ignored update must not have established a router-id for the one behind it"
+        );
+    }
+
+    /// RFC 8966 [4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update): "If the metric
+    /// is infinite and AE is 0, Plen and Omitted MUST both be 0; Update TLVs that do not satisfy
+    /// this requirement MUST be ignored."
+    ///
+    /// A blanket retraction wipes out every route from the neighbour that sent it, so honouring a
+    /// malformed one hands anybody on the link a cheap way to blackhole a neighbour's routes.
+    #[test]
+    fn a_malformed_blanket_retraction_is_ignored() {
+        for malformed in [
+            UpdateTlv::blanket_retraction().plen(64),
+            UpdateTlv::blanket_retraction().omitted(2, &[]),
+        ] {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1");
+            established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+            );
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                &[malformed.clone()],
+            );
+
+            assert_eq!(
+                route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+                    .expect("the route should still exist")
+                    .computed_metric,
+                Metric::from_raw(100 + LINK_COST),
+                "plen {} / omitted {} does not name a blanket retraction",
+                malformed.plen,
+                malformed.omitted
+            );
+        }
+    }
+
+    /// An Update the router rejects has to leave the entry it names exactly as it was. Applying the
+    /// new metric and then bailing out on the Interval would leave a route advertising a metric
+    /// under a hold time that was never agreed to, and skip the deselect that follows.
+    #[test]
+    fn a_rejected_update_leaves_an_existing_entry_untouched() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).seqno(7)],
+        );
+        let before = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the update should have created a route");
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_2,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 500)
+                .seqno(8)
+                .interval(0)],
+        );
+        let after = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the route should still exist");
+
+        assert_eq!(after.seqno, before.seqno);
+        assert_eq!(after.advertised_metric, before.advertised_metric);
+        assert_eq!(after.computed_metric, before.computed_metric);
+        assert_eq!(after.source.router_id, before.source.router_id);
+        assert_eq!(after.expiry.duration(), before.expiry.duration());
+    }
+
+    /// The Interval "MUST NOT be 0" — it is the only thing an Update says about when to stop
+    /// believing it, so without one there is no hold time the route could be created with.
+    #[test]
+    fn an_update_with_a_zero_interval_creates_no_route() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).interval(0)],
+        );
+
+        assert_eq!(route_count(&mut r), 0);
+    }
+
+    /// Updates in a packet are independent, so one the router cannot handle must not discard the
+    /// ones behind it. A /129 IPv6 prefix names bits the address does not have.
+    #[test]
+    fn a_malformed_update_does_not_discard_the_updates_behind_it() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[
+                UpdateTlv::v6(129, &[0xfd; 17], 100),
+                UpdateTlv::v6(PLEN, &PREFIX_B_WIRE, 100),
+            ],
+        );
+
+        assert_eq!(route_count(&mut r), 1);
+        assert!(
+            route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_B, PLEN).is_some(),
+            "the update behind the malformed one should still have been handled"
+        );
     }
 }

@@ -147,14 +147,49 @@ where
         }
     }
 
-    /// Handle the compression part of the update and return the [`UpdateInfo`]
+    /// Handle the compression part of the update and return the [`ResolvedUpdate`]
+    ///
+    /// The router-id and next hop are only meaningful for a finite metric, so a retraction should
+    /// go through [`Self::resolve_address`] instead of being rejected here for lacking them.
     ///
     /// This method assumes the update is **NOT** a blanket retraction.
     /// (`metric == 0xFFFF && ae == 0`)
-    pub(crate) fn handle_update(
+    pub(crate) fn handle_update<'a>(
+        &mut self,
+        update: UpdateSlice<'a>,
+    ) -> Result<ResolvedUpdate<'a, A>, ParserError<A>> {
+        let ae: AddressEncoding<A::Encoding> = update.ae().try_into()?;
+        let address = self.resolve_address(&update)?;
+
+        let router_id = self
+            .router_id
+            .ok_or(ParserError::MissingState("router_id", None))?;
+        let next_hop = self
+            .get_next_hop(&ae)
+            .ok_or(ParserError::MissingState("next_hop", Some(ae)))?;
+
+        Ok(ResolvedUpdate {
+            router_id,
+            address,
+            next_hop,
+            slice: update,
+        })
+    }
+    /// Resolve the prefix an update advertises, applying the parser state side effects its flags
+    /// ask for.
+    ///
+    /// This is everything an Update carries that does not depend on its Metric field, which makes
+    /// it the whole of what a retraction needs:
+    /// [Section 4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update) says that for a
+    /// retraction "the router-id, next hop, and seqno are not used", so a retraction stays valid in
+    /// a packet that has established neither a router-id nor a next hop.
+    ///
+    /// This method assumes the update is **NOT** a blanket retraction.
+    /// (`metric == 0xFFFF && ae == 0`)
+    pub(crate) fn resolve_address(
         &mut self,
         update: &UpdateSlice<'_>,
-    ) -> Result<UpdateInfo<A>, ParserError<A>> {
+    ) -> Result<Address<A>, ParserError<A>> {
         // Extract the necessary info.
         let ae: AddressEncoding<A::Encoding> = update.ae().try_into()?;
         let flags = update.flags();
@@ -179,18 +214,7 @@ where
             self.set_default_address(address);
         }
 
-        let router_id = self
-            .router_id
-            .ok_or(ParserError::MissingState("router_id", None))?;
-        let next_hop = self
-            .get_next_hop(&ae)
-            .ok_or(ParserError::MissingState("next_hop", Some(ae)))?;
-
-        Ok(UpdateInfo {
-            router_id,
-            address,
-            next_hop,
-        })
+        Ok(address)
     }
 
     fn decompress_address(&self, update: &UpdateSlice<'_>) -> Result<Address<A>, ParserError<A>> {
@@ -210,8 +234,8 @@ where
         if addr_len > MAX_ADDRESS_LEN {
             // This will not get hit with the base spec.
             //
-            // TODO(#13): Need to create a way for users to test their extension types before running a
-            // babel router.
+            // TODO(#13): Need to create a way for users to test their extension types before
+            // running a babel router.
             return Err(ParserError::AddressTooLong);
         }
 
@@ -249,10 +273,11 @@ where
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct UpdateInfo<A: AddressExt> {
+pub struct ResolvedUpdate<'a, A: AddressExt> {
     pub(crate) router_id: RouterId,
     pub(crate) address: Address<A>,
     pub(crate) next_hop: Address<A>,
+    pub(crate) slice: UpdateSlice<'a>,
 }
 
 #[derive(Debug, Error)]
@@ -586,7 +611,7 @@ mod test {
 
         let update = update_tlv(1, NO_FLAGS, 24, 0, &[192, 168, 0]);
         let info = parser
-            .handle_update(&update.slice())
+            .handle_update(update.slice())
             .expect("an uncompressed update should resolve");
 
         assert_eq!(
@@ -617,7 +642,7 @@ mod test {
         // A /64 carries 8 of the 16 octets of an IPv6 address.
         let update = update_tlv(2, NO_FLAGS, 64, 0, &[0xfd, 0x00, 0x00, 0x2a, 0, 0, 0, 0]);
         let info = parser
-            .handle_update(&update.slice())
+            .handle_update(update.slice())
             .expect("a /64 update should resolve");
 
         assert_eq!(
@@ -653,7 +678,7 @@ mod test {
         ] {
             let update = update_tlv(1, NO_FLAGS, plen, 0, prefix);
             let info = parser
-                .handle_update(&update.slice())
+                .handle_update(update.slice())
                 .unwrap_or_else(|e| panic!("a /{plen} update should resolve: {e:?}"));
 
             assert_eq!(
@@ -674,7 +699,7 @@ mod test {
 
         let update = update_tlv(1, NO_FLAGS, 24, 0, &[10, 0, 0xff]);
         let info = parser
-            .handle_update(&update.slice())
+            .handle_update(update.slice())
             .expect("a /24 update should resolve");
 
         assert_eq!(
@@ -697,7 +722,7 @@ mod test {
         // that straddles the boundary is the default's second one (20 = 0b0001_0100).
         let update = update_tlv(1, NO_FLAGS, 12, 2, &[]);
         let info = parser
-            .handle_update(&update.slice())
+            .handle_update(update.slice())
             .expect("a fully omitted /12 should resolve");
 
         assert_eq!(
@@ -719,7 +744,7 @@ mod test {
         // carries a fifth octet that no IPv4 address has room for.
         let update = update_tlv(1, NO_FLAGS, 33, 0, &[192, 168, 0, 1, 0x80]);
         let err = parser
-            .handle_update(&update.slice())
+            .handle_update(update.slice())
             .expect_err("a /33 IPv4 prefix should be rejected");
 
         assert!(
@@ -747,7 +772,7 @@ mod test {
         let host_v4 = update_tlv(1, NO_FLAGS, 32, 0, &[192, 168, 0, 1]);
         assert_eq!(
             parser
-                .handle_update(&host_v4.slice())
+                .handle_update(host_v4.slice())
                 .expect("a /32 IPv4 prefix should resolve")
                 .address,
             v4(StdIpv4Addr::new(192, 168, 0, 1)),
@@ -763,7 +788,7 @@ mod test {
         );
         assert_eq!(
             parser
-                .handle_update(&host_v6.slice())
+                .handle_update(host_v6.slice())
                 .expect("a /128 IPv6 prefix should resolve")
                 .address,
             v6(StdIpv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 9)),
@@ -774,7 +799,7 @@ mod test {
         let link_local = update_tlv(3, NO_FLAGS, 64, 0, &[0, 0, 0, 0, 0, 0, 0, 7]);
         assert_eq!(
             parser
-                .handle_update(&link_local.slice())
+                .handle_update(link_local.slice())
                 .expect("a /64 link-local suffix should resolve")
                 .address,
             v6(StdIpv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 7)),
@@ -793,7 +818,7 @@ mod test {
 
         let update = update_tlv(1, NO_FLAGS, 153, 0, &[0xff; 20]);
         let err = parser
-            .handle_update(&update.slice())
+            .handle_update(update.slice())
             .expect_err("a 153-bit IPv4 prefix should be rejected");
 
         assert!(
@@ -812,13 +837,13 @@ mod test {
 
         let default = update_tlv(1, PREFIX_FLAG, 24, 0, &[192, 168, 0]);
         parser
-            .handle_update(&default.slice())
+            .handle_update(default.slice())
             .expect("the default-setting update should resolve");
 
         // Two octets omitted, so 192.168 comes from the default and only the third is on the wire.
         let compressed = update_tlv(1, NO_FLAGS, 24, 2, &[7]);
         let info = parser
-            .handle_update(&compressed.slice())
+            .handle_update(compressed.slice())
             .expect("the compressed update should resolve");
 
         assert_eq!(
@@ -838,17 +863,17 @@ mod test {
 
         let default = update_tlv(1, PREFIX_FLAG, 24, 0, &[192, 168, 0]);
         parser
-            .handle_update(&default.slice())
+            .handle_update(default.slice())
             .expect("the default-setting update should resolve");
 
         let ordinary = update_tlv(1, NO_FLAGS, 24, 0, &[10, 20, 30]);
         parser
-            .handle_update(&ordinary.slice())
+            .handle_update(ordinary.slice())
             .expect("the ordinary update should resolve");
 
         let compressed = update_tlv(1, NO_FLAGS, 24, 2, &[9]);
         let info = parser
-            .handle_update(&compressed.slice())
+            .handle_update(compressed.slice())
             .expect("the compressed update should resolve");
 
         assert_eq!(
@@ -868,7 +893,7 @@ mod test {
 
         let update = update_tlv(1, NO_FLAGS, 24, 2, &[7]);
         let err = parser
-            .handle_update(&update.slice())
+            .handle_update(update.slice())
             .expect_err("omitting octets with no default should be rejected");
 
         assert!(
@@ -890,7 +915,7 @@ mod test {
         // A /32 is four octets, all four of them omitted.
         let update = update_tlv(1, NO_FLAGS, 32, 4, &[]);
         let info = parser
-            .handle_update(&update.slice())
+            .handle_update(update.slice())
             .expect("a fully omitted prefix should resolve");
 
         assert_eq!(
@@ -910,7 +935,7 @@ mod test {
         // No preceding Router-Id TLV: the flag is the only source of a router-id here.
         let update = update_tlv(1, ROUTER_ID_FLAG, 24, 0, &[192, 168, 0]);
         let info = parser
-            .handle_update(&update.slice())
+            .handle_update(update.slice())
             .expect("the Router-Id flag should supply the router-id");
 
         assert_eq!(
@@ -922,7 +947,7 @@ mod test {
         // The flag also establishes the router-id for the Updates that follow it.
         let follower = update_tlv(1, NO_FLAGS, 24, 0, &[10, 20, 30]);
         let info = parser
-            .handle_update(&follower.slice())
+            .handle_update(follower.slice())
             .expect("the follow-up update should resolve");
 
         assert_eq!(
@@ -939,7 +964,7 @@ mod test {
 
         let update = update_tlv(1, NO_FLAGS, 24, 0, &[192, 168, 0]);
         let err = parser
-            .handle_update(&update.slice())
+            .handle_update(update.slice())
             .expect_err("an update with no router-id in scope should be rejected");
 
         assert!(
@@ -958,7 +983,7 @@ mod test {
 
         let update = update_tlv(3, NO_FLAGS, 64, 4, &[1, 2, 3, 4]);
         let err = parser
-            .handle_update(&update.slice())
+            .handle_update(update.slice())
             .expect_err("AE 3 must not omit octets");
 
         assert!(
@@ -980,7 +1005,7 @@ mod test {
         // Plen 24 is 3 octets; claiming 5 of them are omitted is nonsense.
         let update = update_tlv(1, NO_FLAGS, 24, 5, &[]);
         let err = parser
-            .handle_update(&update.slice())
+            .handle_update(update.slice())
             .expect_err("an inconsistent Plen/Omitted pair should be rejected");
 
         assert!(
