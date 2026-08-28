@@ -25,13 +25,14 @@ use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, Timer
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct NeighbourIndex<A>(pub InterfaceHandle, pub Address<A>)
-where
-    A: AddressExt;
+pub struct NeighbourIndex<A: AddressExt> {
+    pub(crate) iface: InterfaceHandle,
+    pub(crate) addr: Address<A>,
+}
 
 impl<A: AddressExt> core::fmt::Display for NeighbourIndex<A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{} via {}", self.1, self.0)
+        write!(f, "{} via {}", self.iface, self.addr)
     }
 }
 
@@ -116,7 +117,10 @@ pub struct NeighbourPending {
 impl<A: AddressExt> InternallyKeyed for Neighbour<A> {
     type Key = NeighbourIndex<A>;
     fn key(&self) -> Self::Key {
-        NeighbourIndex(self.iface, self.address)
+        NeighbourIndex {
+            iface: self.iface,
+            addr: self.address,
+        }
     }
 }
 

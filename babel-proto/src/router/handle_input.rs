@@ -257,7 +257,10 @@ mod test {
     fn tx_cost(r: &BabelRouter<'static>, iface: InterfaceHandle, addr: Ipv6Addr) -> TxCost {
         r.neighbor_table
             .inner
-            .get_by_key(&NeighbourIndex(iface, addr.into()))
+            .get_by_key(&NeighbourIndex {
+                iface,
+                addr: addr.into(),
+            })
             .expect("neighbour should exist")
             .tx_cost
     }
@@ -304,7 +307,10 @@ mod test {
         assert!(
             r.neighbor_table
                 .inner
-                .get_by_key(&NeighbourIndex(unknown, NEIGHBOUR_1_ADDR.into()))
+                .get_by_key(&NeighbourIndex {
+                    iface: unknown,
+                    addr: NEIGHBOUR_1_ADDR.into()
+                })
                 .is_none(),
             "no neighbour should have been created on an unknown interface"
         );
@@ -399,7 +405,10 @@ mod test {
         assert!(
             r.neighbor_table
                 .inner
-                .get_by_key(&NeighbourIndex(iface, NEIGHBOUR_2_ADDR.into()))
+                .get_by_key(&NeighbourIndex {
+                    iface,
+                    addr: NEIGHBOUR_2_ADDR.into()
+                })
                 .is_none(),
             "an IHU addressed to another node must not create a neighbour for it"
         );
@@ -439,7 +448,10 @@ mod test {
         assert!(
             r.neighbor_table
                 .inner
-                .get_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
+                .get_by_key(&NeighbourIndex {
+                    iface,
+                    addr: NEIGHBOUR_1_ADDR.into()
+                })
                 .is_none(),
             "an unaddressable IHU must not be claimed"
         );
@@ -473,7 +485,10 @@ mod test {
         let neighbour = r
             .neighbor_table
             .inner
-            .get_by_key(&NeighbourIndex(iface, NEIGHBOUR_1_ADDR.into()))
+            .get_by_key(&NeighbourIndex {
+                iface,
+                addr: NEIGHBOUR_1_ADDR.into(),
+            })
             .expect("neighbour should exist");
 
         // Recording the hello advances the expected multicast seqno, so this proves the hello

@@ -66,7 +66,10 @@ fn two_nodes_say_hello_and_ihu() {
     node_2
         .neighbor_table
         .inner
-        .get_by_key(&NeighbourIndex(node_2_iface, node_1_addr.into()))
+        .get_by_key(&NeighbourIndex {
+            iface: node_2_iface,
+            addr: node_1_addr.into(),
+        })
         .expect("Node 1 should be in node 2's neighbour table");
 
     // Poll output for node 2
@@ -96,7 +99,10 @@ fn two_nodes_say_hello_and_ihu() {
     node_1
         .neighbor_table
         .inner
-        .get_by_key(&NeighbourIndex(node_1_iface, node_2_addr.into()))
+        .get_by_key(&NeighbourIndex {
+            iface: node_1_iface,
+            addr: node_2_addr.into(),
+        })
         .expect("Node 2 should be in node 1's neighbour table");
 
     let output = node_1

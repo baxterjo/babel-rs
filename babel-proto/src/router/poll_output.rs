@@ -415,7 +415,7 @@ mod test {
         router
             .neighbor_table
             .inner
-            .get_mut_by_key(&NeighbourIndex(iface, address.into()))
+            .get_mut_by_key(&NeighbourIndex{iface, addr:address.into()})
             .expect("neighbour should exist")
     }
 
