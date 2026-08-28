@@ -1,7 +1,8 @@
 use thiserror::Error;
 
 use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
-use crate::data_structures::neighbour::NeighbourError;
+use crate::data_structures::neighbour::{NeighbourError, NeighbourIndex};
+use crate::data_structures::route::RouteError;
 use crate::data_types::address::AddressError;
 use crate::data_types::address_encoding::AddressEncodingError;
 use crate::extension::address::AddressExt;
@@ -30,12 +31,16 @@ where
     InterfaceDoesntExist(InterfaceHandle),
     #[error("Polled for output but no interface reported a wake-up time")]
     NoWakeUpTime,
+    #[error("Received {0} from an unregistered neighbour: {1}")]
+    TlvFromUnknownNeighbour(&'static str, NeighbourIndex<A>),
     #[error(transparent)]
     Len(#[from] LenError),
     #[error(transparent)]
-    IfaceTable(#[from] InterfaceError),
+    Interface(#[from] InterfaceError),
     #[error(transparent)]
-    NeighbourTable(#[from] NeighbourError<A>),
+    Neighbour(#[from] NeighbourError<A>),
+    #[error(transparent)]
+    Route(#[from] RouteError),
     #[error(transparent)]
     PacketWriter(#[from] PacketWriterError),
     #[error(transparent)]

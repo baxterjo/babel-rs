@@ -15,6 +15,9 @@ use crate::utils::time::DurationSpec;
 use crate::utils::{Duration, DurationMultiplier};
 
 /// A type that calculates the RxCost from a history of neighbour hellos.
+// TODO: Need a better way for users to get more information about the route being advertised.
+// The contraint here is that dyn compatible traits cannot have generics (and address is generic
+// over AddressExt)
 pub trait LinkCostCalculator: Debug {
     /// Calculates the RX cost as a function of the hello histories from hello's received from a
     /// node.
@@ -55,6 +58,16 @@ pub trait LinkCostCalculator: Debug {
     /// * `rx_cost`: This node's own calculated rx_cost as defined by [`Self::rx_cost`]
     /// * `tx_cost`: The tx_cost reported by this neighbour in its IHU TLV.
     fn link_cost(&self, rx_cost: RxCost, tx_cost: TxCost) -> Cost;
+
+    /// Local policy for metric computation as defined in
+    /// [Section 3.5.2](https://datatracker.ietf.org/doc/html/rfc8966#name-metric-computation)
+    ///
+    /// A simple additive metric is the **RECOMMENDED** spec default. But there are methods for
+    /// fine tuning route filtering in
+    /// [Appendix C](https://datatracker.ietf.org/doc/html/rfc8966#name-route-filtering)
+    fn metric(&self, advertised: Metric, link_cost: Cost) -> Metric {
+        advertised + link_cost
+    }
 }
 
 /// The ratio of IHU's per multicast hello for this interface.

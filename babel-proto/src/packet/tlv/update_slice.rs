@@ -224,6 +224,14 @@ impl<'a> UpdateSlice<'a> {
             layer_start_offset: 0,
         })?)
     }
+
+    pub fn is_retraction(&self) -> bool {
+        self.metric() == Metric::INFINITY
+    }
+
+    pub fn is_blanket_retraction(&self) -> bool {
+        self.ae() == 0 && self.is_retraction()
+    }
 }
 
 /// Update flags as defined in

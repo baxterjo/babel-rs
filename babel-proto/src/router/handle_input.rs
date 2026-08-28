@@ -1,15 +1,15 @@
 use crate::data_structures::interface::Interface;
+use crate::data_structures::neighbour::NeighbourIndex;
 use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::input::{Receive, ReceiveDestination};
-use crate::metric::Metric;
 use crate::packet::packet_slice::PacketSlice;
 use crate::packet::parser::Parser;
 use crate::packet::tlv::reader::TlvReader;
-use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv};
+use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, UpdateSlice};
 use crate::router::BabelRouter;
 use crate::utils::{Instant, ManagedSliceExt};
 
@@ -51,6 +51,8 @@ where
             });
         }
 
+        let mut run_selection = false;
+
         for tlv in TlvReader::new(packet.body()) {
             b_trace!("{:?}", tlv);
             match tlv {
@@ -80,9 +82,13 @@ where
                     ok_or_continue!(parser.handle_next_hop_tlv(next_hop));
                 }
                 Tlv::Update(update) => {
-                    if update.ae() != 0 && update.metric() != Metric::INFINITY {
-                        let _update_info = ok_or_continue!(parser.handle_update(&update));
-                    }
+                    ok_or_continue!(self.handle_update(
+                        now,
+                        &interface,
+                        &input.source_addr,
+                        &mut parser,
+                        update
+                    ));
                 }
                 // This covers the base-spec TLVs that are not implemented yet.
                 Tlv::AckReq(_) | Tlv::Ack(_) | Tlv::RouteRequest(_) | Tlv::SeqnoRequest(_) => {
@@ -124,6 +130,59 @@ where
         self.neighbor_table
             .handle_ihu(now, source_addr, interface, ihu)?;
         Ok(())
+    }
+
+    //  _  _   _   _  _ ___  _    ___   _   _ ___ ___   _ _____ ___
+    // | || | /_\ | \| |   \| |  | __| | | | | _ \   \ /_\_   _| __|
+    // | __ |/ _ \| .` | |) | |__| _|  | |_| |  _/ |) / _ \| | | _|
+    // |_||_/_/ \_\_|\_|___/|____|___|  \___/|_| |___/_/ \_\_| |___|
+
+    fn handle_update(
+        &mut self,
+        now: Instant,
+        interface: &Interface<A>,
+        source_addr: &Address<A>,
+        parser: &mut Parser<P>,
+        update: UpdateSlice<'_>,
+    ) -> Result<(), BabelError<A>> {
+        let idx = NeighbourIndex {
+            iface: interface.handle,
+            addr: *source_addr,
+        };
+        let neighbour = self
+            .neighbor_table
+            .inner
+            .get_by_key(&idx)
+            .ok_or(BabelError::TlvFromUnknownNeighbour("update_tlv", idx))?;
+
+        if update.is_blanket_retraction() {
+            todo!()
+        } else {
+            let update_info = parser.handle_update(&update)?;
+            if update.is_retraction() {
+                todo!()
+            } else {
+                let feasible = self.source_table.update_is_feasible(&update_info, &update);
+                let link_cost = interface.cost_calc.link_cost(
+                    interface.cost_calc.rx_cost(
+                        neighbour.mcast_hello_info.history,
+                        neighbour.ucast_hello_info.history,
+                    ),
+                    neighbour.tx_cost,
+                );
+                let route_metric = interface.cost_calc.metric(update.metric(), link_cost);
+
+                self.route_table.handle_update(
+                    now,
+                    neighbour,
+                    feasible,
+                    update_info,
+                    update,
+                    route_metric,
+                )?;
+            }
+        }
+        todo!()
     }
 }
 

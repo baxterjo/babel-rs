@@ -250,9 +250,9 @@ where
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct UpdateInfo<A: AddressExt> {
-    router_id: RouterId,
-    address: Address<A>,
-    next_hop: Address<A>,
+    pub(crate) router_id: RouterId,
+    pub(crate) address: Address<A>,
+    pub(crate) next_hop: Address<A>,
 }
 
 #[derive(Debug, Error)]

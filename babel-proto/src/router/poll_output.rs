@@ -1143,7 +1143,7 @@ mod test {
 
             assert!(matches!(
                 err,
-                BabelError::IfaceTable(InterfaceError::NoInterfacesRegistered)
+                BabelError::Interface(InterfaceError::NoInterfacesRegistered)
             ));
         }
 
@@ -1160,7 +1160,7 @@ mod test {
 
             assert!(matches!(
                 err,
-                BabelError::IfaceTable(InterfaceError::NoInterfacesRegistered)
+                BabelError::Interface(InterfaceError::NoInterfacesRegistered)
             ));
         }
     }

@@ -5,9 +5,12 @@
 //! integer where `0xFFFF` means "infinite" but they are semantically distinct quantities that are
 //! easy to get mixed up.
 
+use core::cmp::Ordering;
 use core::convert::TryFrom;
 use core::fmt;
 use core::ops::Add;
+
+use crate::data_types::seqno::SeqNo;
 
 /// Any distance that is 0xFFFF is considered "infinity"
 pub const INFINITY: u16 = 0xFFFF;
@@ -185,6 +188,57 @@ impl fmt::Display for NonPositiveCost {
             f,
             "a finite link cost must be strictly positive (greater than zero, less than infinity)"
         )
+    }
+}
+
+/// The fesibility condition as described in
+/// [Section 3.5.1](https://datatracker.ietf.org/doc/html/rfc8966#name-the-feasibility-condition)
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Feasibility {
+    pub(crate) seqno: SeqNo,
+    pub(crate) metric: Metric,
+}
+
+impl Feasibility {
+    pub fn new(seqno: SeqNo, metric: Metric) -> Self {
+        Self { seqno, metric }
+    }
+}
+
+impl Ord for Feasibility {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        // Early escape hatch for equality
+        if self.seqno == other.seqno && self.metric == other.metric {
+            return Ordering::Equal;
+        }
+        // Section 3.5.1 with modifications for readability:
+        // (self.seqno, self.metric) < (other.seqno, other.metric)
+
+        // when
+
+        // self.seqno > other.seqno or (self.seqno = other.seqno and self.metric < other.metric)
+
+        // where sequence numbers are compared modulo 216.
+
+        // If our seqno is greater, than our fesibility is less.
+        if self.seqno > other.seqno {
+            return Ordering::Less;
+        }
+
+        // If the seqnos are equal and our metric is less, than our fesibility is less.
+        if self.seqno == other.seqno && self.metric < other.metric {
+            return Ordering::Less;
+        }
+
+        // If none of the above conditions are met, then our feasibility is greater.
+        Ordering::Greater
+    }
+}
+
+impl PartialOrd for Feasibility {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
