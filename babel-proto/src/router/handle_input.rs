@@ -89,12 +89,17 @@ where
                         &mut parser,
                         update
                     ));
+                    run_selection = true;
                 }
                 // This covers the base-spec TLVs that are not implemented yet.
                 Tlv::AckReq(_) | Tlv::Ack(_) | Tlv::RouteRequest(_) | Tlv::SeqnoRequest(_) => {
                     unimplemented!("Unimplemented base spec TLV found, Type: {}", tlv.r#type());
                 }
             }
+        }
+
+        if run_selection {
+            // TODO: Route selection
         }
 
         Ok(())
