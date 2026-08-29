@@ -32,8 +32,6 @@ where
     default_v4_addr: Option<Ipv4Addr>,
     /// Default address for address encoding 2
     default_v6_addr: Option<Ipv6Addr>,
-    /// Default address for address encoding 3
-    default_local_v6_addr: Option<Ipv6Addr>,
     /// Current next hop address for v4 address family
     v4_next_hop: Option<Ipv4Addr>,
     /// Current next hop address for v6 address family
@@ -123,12 +121,14 @@ where
         encoding: &AddressEncoding<A::Encoding>,
     ) -> Option<Address<A>> {
         match encoding {
+            // Cannot compress wildcard addresses
             AddressEncoding::WildCard => {
                 return None;
             }
             AddressEncoding::Ipv4 => self.default_v4_addr.map(Address::V4),
             AddressEncoding::Ipv6 => self.default_v6_addr.map(Address::V6),
-            AddressEncoding::LocalIpv6 => self.default_local_v6_addr.map(Address::V6),
+            // Cannot compress Local Ipv6 addresses
+            AddressEncoding::LocalIpv6 => None,
             AddressEncoding::Extension(ext) => self
                 .extension
                 .get_default_address_for_encoding(&ext)
@@ -139,9 +139,6 @@ where
     pub(crate) fn set_default_address(&mut self, address: Address<A>) {
         match address {
             Address::V4(v4) => self.default_v4_addr = Some(v4),
-            Address::V6(v6) if core::net::Ipv6Addr::from(v6).is_unicast_link_local() => {
-                self.default_local_v6_addr = Some(v6)
-            }
             Address::V6(v6) => self.default_v6_addr = Some(v6),
             Address::Extension(ext) => self.extension.set_default_address_for_encoding(ext),
         }
@@ -223,10 +220,7 @@ where
         let plen = update.plen();
         let addr_len = ae.address_len();
 
-        // Plen is measured against the uncompressed address length, which is fixed by AE.
-        // A Plen longer than the uncompressed address names bits the address does not have, so the
-        // Update is malformed.
-        let max_plen = addr_len.saturating_mul(8);
+        let max_plen = ae.max_plen();
         if usize::from(plen) > max_plen {
             return Err(ParserError::PlenTooLong { plen, ae, max_plen });
         }
@@ -239,8 +233,7 @@ where
             return Err(ParserError::AddressTooLong);
         }
 
-        // A prefix from this accessor is already (Plen/8 - omitted).ceil() bytes long.
-        let prefix = update.prefix()?;
+        let prefix = update.prefix(ae.implied_prefix_octets())?;
         let omitted = update.ommitted() as usize;
 
         // If there are any omitted bytes, fetch them from the default
@@ -260,7 +253,7 @@ where
         out[omitted..omitted + prefix.len()].copy_from_slice(prefix);
         // If Plen is not a multiple of 8, then any bits beyond Plen (i.e., the low-order
         // (8 - Plen MOD 8) bits of the last octet) are cleared. (Because prefix.len() was rounded
-        // upward from plen/8 - omitted)
+        // upward from plen/8 - implied - omitted)
         if plen % 8 != 0 {
             let shift_in = 8 - (plen % 8);
             let mask = 0xFFu8.unbounded_shl(shift_in.into());
@@ -458,12 +451,10 @@ mod test {
         let mut parser = TestParser::default();
 
         let global = StdIpv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0xaa);
-        let link_local = StdIpv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0xbb);
         let ipv4 = StdIpv4Addr::new(192, 168, 0, 0);
 
         parser.set_default_address(v4(ipv4));
         parser.set_default_address(v6(global));
-        parser.set_default_address(v6(link_local));
 
         assert_eq!(
             parser.get_default_address(&TestEncoding::Ipv4),
@@ -474,11 +465,6 @@ mod test {
             parser.get_default_address(&TestEncoding::Ipv6),
             Some(v6(global)),
             "AE 2 should hold the global IPv6 default"
-        );
-        assert_eq!(
-            parser.get_default_address(&TestEncoding::LocalIpv6),
-            Some(v6(link_local)),
-            "a link-local address belongs to AE 3, not AE 2"
         );
     }
 
@@ -795,15 +781,109 @@ mod test {
             "128 bits is exactly an IPv6 address"
         );
 
-        // AE 3 puts only the 8-octet suffix on the wire, so its Plen is measured against that.
-        let link_local = update_tlv(3, NO_FLAGS, 64, 0, &[0, 0, 0, 0, 0, 0, 0, 7]);
+        // AE 3 implies `fe80::/64` and puts only the 8-octet suffix on the wire, but Plen counts
+        // the whole prefix — so a link-local host route is /128 with 8 octets of Prefix
+        // field, and 128 is the longest Plen it can carry.
+        let link_local = update_tlv(3, NO_FLAGS, 128, 0, &[0, 0, 0, 0, 0, 0, 0, 7]);
         assert_eq!(
             parser
                 .handle_update(link_local.slice())
-                .expect("a /64 link-local suffix should resolve")
+                .expect("a /128 link-local prefix should resolve")
                 .address,
             v6(StdIpv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 7)),
-            "64 bits is exactly the link-local suffix AE 3 carries"
+            "128 bits is the whole address AE 3 names, 64 of them implied"
+        );
+    }
+
+    /// The counterpart to the AE 3 case above: Plen 64 is the implied prefix on its own, so the
+    /// Prefix field is empty. This is the boundary the implied-octet arithmetic turns on — one bit
+    /// lower and there is no prefix left to describe.
+    #[test]
+    fn a_link_local_update_at_the_implied_prefix_carries_no_octets() {
+        let mut parser = TestParser::new(v6(SOURCE_V6));
+        let router_id = router_id_tlv(ROUTER_ID);
+        parser.handle_router_id_tlv(router_id.slice());
+
+        let update = update_tlv(3, NO_FLAGS, 64, 0, &[]);
+        assert_eq!(
+            parser
+                .handle_update(update.slice())
+                .expect("a /64 link-local prefix should resolve")
+                .address,
+            v6(StdIpv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0)),
+            "Plen 64 is exactly the implied fe80::/64, so nothing is sent"
+        );
+    }
+
+    /// A Plen below the implied prefix names bits underneath the floor AE 3 sets. `babeld` rejects
+    /// these too, so there is no interoperable meaning to salvage.
+    #[test]
+    fn a_link_local_update_below_the_implied_prefix_is_rejected() {
+        let mut parser = TestParser::new(v6(SOURCE_V6));
+        let router_id = router_id_tlv(ROUTER_ID);
+        parser.handle_router_id_tlv(router_id.slice());
+
+        // 56 rounds up to 7 octets, one short of the 8 the encoding implies.
+        let update = update_tlv(3, NO_FLAGS, 56, 0, &[]);
+        let err = parser
+            .handle_update(update.slice())
+            .expect_err("a /56 link-local prefix should be rejected");
+
+        assert!(
+            matches!(
+                err,
+                ParserError::Tlv(TlvError::PlenBelowImpliedPrefix {
+                    plen: 56,
+                    implied_octets: 8
+                })
+            ),
+            "expected PlenBelowImpliedPrefix, got {err:?}"
+        );
+    }
+
+    /// AE 3 tops out at 128, not at the 64 bits of suffix it puts on the wire.
+    #[test]
+    fn a_link_local_update_past_128_bits_is_rejected() {
+        let mut parser = TestParser::new(v6(SOURCE_V6));
+        let router_id = router_id_tlv(ROUTER_ID);
+        parser.handle_router_id_tlv(router_id.slice());
+
+        let update = update_tlv(3, NO_FLAGS, 129, 0, &[0; 9]);
+        let err = parser
+            .handle_update(update.slice())
+            .expect_err("a /129 link-local prefix should be rejected");
+
+        assert!(
+            matches!(
+                err,
+                ParserError::PlenTooLong {
+                    plen: 129,
+                    ae: TestEncoding::LocalIpv6,
+                    max_plen: 128
+                }
+            ),
+            "expected PlenTooLong with a 128 bit ceiling, got {err:?}"
+        );
+    }
+
+    /// The implied octets shift the prefix boundary by a whole number of octets, so the masking of
+    /// bits beyond Plen has to keep working unchanged for AE 3.
+    #[test]
+    fn a_link_local_update_clears_the_bits_beyond_plen() {
+        let mut parser = TestParser::new(v6(SOURCE_V6));
+        let router_id = router_id_tlv(ROUTER_ID);
+        parser.handle_router_id_tlv(router_id.slice());
+
+        // /100 is 64 implied bits plus 36 on the wire: 5 octets of Prefix field, the last of which
+        // keeps only its top 4 bits.
+        let update = update_tlv(3, NO_FLAGS, 100, 0, &[0x11, 0x22, 0x33, 0x44, 0xff]);
+        assert_eq!(
+            parser
+                .handle_update(update.slice())
+                .expect("a /100 link-local prefix should resolve")
+                .address,
+            v6(StdIpv6Addr::new(0xfe80, 0, 0, 0, 0x1122, 0x3344, 0xf000, 0)),
+            "the low 4 bits of the fifth suffix octet are beyond /100"
         );
     }
 

@@ -1076,6 +1076,86 @@ mod test {
         assert_eq!(compressed.advertised_metric, Metric::from_raw(200));
     }
 
+    /// AE 3 implies `fe80::/64` and puts only the suffix on the wire, but Plen counts the whole
+    /// prefix — so a link-local host route arrives as Plen 128 with 8 octets of Prefix field. The
+    /// route table has to record the full 128, because a `(prefix, prefix_len)` pair is only
+    /// meaningful as a CIDR: storing the 64 bits that reached the wire would turn every link-local
+    /// host route into `fe80::/64`.
+    ///
+    /// This is the convention `babeld` implements (`message.c:network_prefix`, `AE_IPV6_LOCAL`).
+    #[test]
+    fn a_link_local_update_is_stored_with_its_full_prefix_length() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[
+                UpdateTlv::v6(128, &[0, 0, 0, 0, 0, 0, 0, 1], 100).ae(3),
+                UpdateTlv::v6(128, &[0, 0, 0, 0, 0, 0, 0, 2], 100).ae(3),
+            ],
+        );
+
+        assert_eq!(
+            route_count(&mut r),
+            2,
+            "two link-local host routes are two entries"
+        );
+
+        for suffix in [1u16, 2] {
+            let route = route_for(
+                &mut r,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, suffix),
+                128,
+            )
+            .expect("the link-local host route should have been acquired");
+
+            assert_eq!(
+                route.source.prefix_len, 128,
+                "the entry records the whole prefix, not the part that reached the wire"
+            );
+            assert_eq!(route.advertised_metric, Metric::from_raw(100));
+        }
+    }
+
+    /// The other end of the AE 3 range: Plen 64 is the implied prefix by itself, so the Update
+    /// carries no Prefix field at all and advertises `fe80::/64`.
+    #[test]
+    fn a_link_local_update_at_the_implied_prefix_carries_no_octets() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(64, &[], 100).ae(3)],
+        );
+
+        let route = route_for(
+            &mut r,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0),
+            64,
+        )
+        .expect("fe80::/64 should have been acquired");
+
+        assert_eq!(route.source.prefix_len, 64);
+    }
+
     //  ___  ___  _   _ _____ ___   ___ ___ ___ ___ ___ ___ _  _
     // | _ \/ _ \| | | |_   _| __| | _ \ __| __| _ \ __/ __| || |
     // |   / (_) | |_| | | | | _|  |   / _|| _||   / _|\__ \ __ |

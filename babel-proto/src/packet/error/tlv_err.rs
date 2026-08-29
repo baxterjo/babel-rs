@@ -19,4 +19,8 @@ pub enum TlvError {
     UnrecognizedTlvType(u8),
     #[error("Omitted ({omitted}) is larger than the {plen} bit prefix it omits octets from")]
     OmittedTooLong { plen: u8, omitted: u8 },
+    #[error(
+        "Plen ({plen} bits) is shorter than the {implied_octets} octets its address encoding implies"
+    )]
+    PlenBelowImpliedPrefix { plen: u8, implied_octets: usize },
 }

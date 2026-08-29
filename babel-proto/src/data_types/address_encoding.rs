@@ -95,6 +95,32 @@ impl<E: AddressEncodingExt> AddressEncoding<E> {
         }
     }
 
+    /// The number of leading octets this encoding implies rather than carrying on the wire.
+    ///
+    /// AE 3 names an address under `fe80::/64`, so the first 8 octets are fixed by the encoding and
+    /// only the remaining 8 ever reach an Update's Prefix field. Every other base-spec encoding
+    /// puts its whole address on the wire, so this is 0 for them.
+    ///
+    /// Plen counts the whole advertised prefix, implied octets included, so these come off the
+    /// Prefix field length as a second, implicit `Omitted` — see
+    /// [`UpdateSlice::prefix`](crate::packet::tlv::UpdateSlice::prefix).
+    pub fn implied_prefix_octets(&self) -> usize {
+        match self {
+            AddressEncoding::LocalIpv6 => 8,
+            AddressEncoding::WildCard | AddressEncoding::Ipv4 | AddressEncoding::Ipv6 => 0,
+            AddressEncoding::Extension(e) => e.implied_prefix_octets(),
+        }
+    }
+
+    /// The largest Plen an Update TLV in this encoding may carry, in bits.
+    ///
+    /// This is the whole advertised prefix — the octets on the wire *plus* the ones the encoding
+    /// implies — which is why it is not simply `address_len() * 8`. For AE 3 it is 128, not the 64
+    /// bits of suffix [`Self::address_len`] reports.
+    pub fn max_plen(&self) -> usize {
+        (self.implied_prefix_octets() + self.address_len()) * 8
+    }
+
     /// Whether an Update TLV in this encoding may omit leading octets of its prefix.
     ///
     /// The wildcard encoding names no address for the omitted octets to come from, and

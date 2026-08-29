@@ -301,10 +301,10 @@ impl Add<Metric> for Cost {
         if self.is_infinite() || neighbour_metric.is_infinite() {
             Metric::INFINITY
         } else {
-            // Saturate at INFINITY - 1 rather than INFINITY. In the spec INFINITY means
-            // "unreachable", but adding link costs up to create a metric inherently means that the
-            // node we are calculating the metric for **IS** reachable, just very expensive.
-            Metric(self.0.saturating_add(neighbour_metric.0).min(INFINITY - 1))
+            // The spec requires strict monotonicity to avoid loops. That is M(m, c) > m. If a link
+            // cost saturates, then M(m, c) = INFINITY and INFINITY is always greater than some
+            // finite m.
+            Metric(self.0.saturating_add(neighbour_metric.0))
         }
     }
 }
@@ -352,5 +352,75 @@ mod tests {
         assert!(Cost::new(0).is_err());
         assert!(Cost::new(1).is_ok());
         assert_eq!(Cost::new(INFINITY).unwrap(), Cost::INFINITY);
+    }
+
+    // ---- Feasibility ------------------------------------------------------------------------
+
+    /// A feasibility distance as it would be read out of an Update: (seqno, advertised metric).
+    fn fd(seqno: u16, metric: u16) -> Feasibility {
+        Feasibility::new(SeqNo(seqno), Metric::from_raw(metric))
+    }
+
+    /// RFC 8966 [3.5.1](https://datatracker.ietf.org/doc/html/rfc8966#name-the-feasibility-condition):
+    /// `(s, m) < (s', m')` when `s > s'`, or when `s = s'` and `m < m'`.
+    ///
+    /// Seqno takes strict precedence, so a newer announcement wins even when its metric is far
+    /// worse — that is what lets a node recover from a bad metric without waiting out the old one.
+    ///
+    /// Note the ordering runs opposite to intuition: a *smaller* `Feasibility` is the better one,
+    /// because `update_is_feasible` asks whether the incoming distance is strictly less than the
+    /// one already recorded for the source.
+    #[test]
+    fn a_newer_seqno_wins_regardless_of_metric() {
+        assert!(fd(10, 500) < fd(5, 1));
+        assert!(fd(5, 1) > fd(10, 500));
+    }
+
+    /// The metric only breaks ties within a single seqno.
+    #[test]
+    fn with_equal_seqnos_the_smaller_metric_wins() {
+        assert!(fd(5, 10) < fd(5, 20));
+        assert!(fd(5, 20) > fd(5, 10));
+    }
+
+    /// The condition is *strictly* less than, so an update that merely repeats the distance
+    /// already on record is not feasible.
+    #[test]
+    fn an_identical_distance_is_neither_better_nor_worse() {
+        assert_eq!(fd(5, 10).cmp(&fd(5, 10)), Ordering::Equal);
+        assert!(!(fd(5, 10) < fd(5, 10)));
+    }
+
+    /// A retraction carries an infinite metric, so at its own seqno it has to be the worst distance
+    /// there is — while still losing to any newer seqno, since seqno takes precedence.
+    #[test]
+    fn an_infinite_metric_is_the_worst_distance_at_its_seqno() {
+        assert!(fd(5, INFINITY) > fd(5, INFINITY - 1));
+        assert!(fd(6, INFINITY) < fd(5, 0));
+    }
+
+    /// Seqnos are compared modulo 2^16, so a distance whose seqno has just wrapped is *newer* than
+    /// one sitting just below the wrap — not 65535 steps older.
+    #[test]
+    fn seqno_comparison_wraps() {
+        assert!(fd(0, 100) < fd(65_535, 100));
+        assert!(fd(65_535, 100) > fd(0, 100));
+    }
+
+    /// [3.2.1](https://datatracker.ietf.org/doc/html/rfc8966#name-sequence-numbers) leaves two
+    /// seqnos exactly 32768 apart undefined — there is no answer to which came first. An update at
+    /// that distance therefore cannot be shown to be *strictly* better than what is on record, so
+    /// it is not feasible, and that has to hold from both sides.
+    ///
+    /// This asserts the `<` outcome rather than what `cmp` returns: the outcome is what 3.5.1
+    /// actually requires, and it stays correct however the incomparability ends up being
+    /// represented.
+    #[test]
+    fn seqnos_half_the_space_apart_are_feasible_in_neither_direction() {
+        let a = fd(0, 100);
+        let b = fd(32_768, 100);
+
+        assert!(!(a < b));
+        assert!(!(b < a));
     }
 }

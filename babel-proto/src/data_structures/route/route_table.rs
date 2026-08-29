@@ -70,6 +70,9 @@ where
                 // if the metric is infinite (the update is a retraction of a route we do not know
                 // about), the update is ignored;
                 if update.slice.is_retraction() {
+                    // This is technically dead code since the logic of the calling function does
+                    // not allow a retraction to reach this point. But I'm keeping it as a
+                    // regression backstop.
                     return Ok(());
                 }
                 // otherwise, a new entry is created in the route table, indexed by (prefix, plen,
@@ -122,6 +125,9 @@ where
                 route.source.router_id = update.router_id;
                 route.computed_metric = route_metric;
                 if !update.slice.is_retraction() {
+                    // This if statement is redundant since the logic of the calling function does
+                    // not allow a retraction to reach this point. But I'm keeping it as a
+                    // regression backstop.
                     route.expiry = expiry;
                 }
                 if !feasible {

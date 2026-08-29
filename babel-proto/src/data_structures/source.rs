@@ -3,7 +3,6 @@ use crate::data_types::address::Address;
 use crate::extension::address::AddressExt;
 use crate::metric::distance::Feasibility;
 use crate::packet::parser::ResolvedUpdate;
-use crate::packet::tlv::UpdateSlice;
 use crate::utils::ManagedSlice;
 use crate::utils::storage::{InternallyKeyed, ManagedSliceExt};
 
