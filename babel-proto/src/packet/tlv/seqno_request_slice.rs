@@ -1,6 +1,6 @@
 use core::fmt::Debug;
 
-use crate::data_structures::seqno::SeqNo;
+use crate::data_types::seqno::SeqNo;
 use crate::packet::error::layer::Layer;
 use crate::packet::error::len_error::LenError;
 use crate::packet::error::tlv_err::TlvError;

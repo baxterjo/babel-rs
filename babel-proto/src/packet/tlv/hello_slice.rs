@@ -1,7 +1,7 @@
 use core::fmt::Debug;
 
-use crate::data_structures::seqno::SeqNo;
 use crate::data_types::Interval;
+use crate::data_types::seqno::SeqNo;
 use crate::packet::tlv::TypedTlv;
 use crate::packet::tlv::tlv_header::TlvHeader;
 use crate::packet::tlv::tlv_slice::TlvSlice;

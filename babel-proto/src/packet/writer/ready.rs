@@ -1,7 +1,7 @@
 use super::tlv::Tlv;
 use super::{PacketWriterError, PacketWriterStep};
-use crate::data_structures::seqno::SeqNo;
 use crate::data_types::Interval;
+use crate::data_types::seqno::SeqNo;
 use crate::metric::RxCost;
 use crate::packet::packet_header_slice::PacketHeaderSlice;
 use crate::packet::tlv::hello_slice::HelloFlags;

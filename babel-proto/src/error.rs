@@ -1,12 +1,14 @@
 use thiserror::Error;
 
 use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
-use crate::data_structures::neighbour::NeighbourError;
+use crate::data_structures::neighbour::{NeighbourError, NeighbourIndex};
+use crate::data_structures::route::RouteError;
 use crate::data_types::address::AddressError;
 use crate::data_types::address_encoding::AddressEncodingError;
 use crate::extension::address::AddressExt;
 use crate::packet::error::len_error::LenError;
 use crate::packet::error::tlv_err::TlvError;
+use crate::packet::parser::ParserError;
 use crate::packet::writer::PacketWriterError;
 
 #[derive(Debug, Error)]
@@ -29,12 +31,20 @@ where
     InterfaceDoesntExist(InterfaceHandle),
     #[error("Polled for output but no interface reported a wake-up time")]
     NoWakeUpTime,
+    #[error("Received {0} from an unregistered neighbour: {1}")]
+    TlvFromUnknownNeighbour(&'static str, NeighbourIndex<A>),
+    #[error(
+        "Blanket retraction must have a Plen and Omitted of 0 - plen: {plen}, omitted: {omitted}"
+    )]
+    MalformedBlanketRetraction { plen: u8, omitted: u8 },
     #[error(transparent)]
     Len(#[from] LenError),
     #[error(transparent)]
-    IfaceTable(#[from] InterfaceError),
+    Interface(#[from] InterfaceError),
     #[error(transparent)]
-    NeighbourTable(#[from] NeighbourError<A>),
+    Neighbour(#[from] NeighbourError<A>),
+    #[error(transparent)]
+    Route(#[from] RouteError),
     #[error(transparent)]
     PacketWriter(#[from] PacketWriterError),
     #[error(transparent)]
@@ -43,4 +53,6 @@ where
     Tlv(#[from] TlvError),
     #[error(transparent)]
     Address(#[from] AddressError<A>),
+    #[error(transparent)]
+    Parser(#[from] ParserError<A>),
 }

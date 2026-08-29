@@ -5,7 +5,7 @@ use crate::data_structures::neighbour::neighbour_entry::RxHelloInfoErr::BigSeqno
 use crate::data_structures::neighbour::{
     HELLO_INTERVAL_MULTIPLIER, NeighbourConfig, NeighbourError,
 };
-use crate::data_structures::seqno::SeqNo;
+use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Address, Interval};
 use crate::extension::address::AddressExt;
 use crate::metric::LinkCostCalculator;
@@ -25,13 +25,14 @@ use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, Timer
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct NeighbourIndex<A>(pub InterfaceHandle, pub Address<A>)
-where
-    A: AddressExt;
+pub struct NeighbourIndex<A: AddressExt> {
+    pub(crate) iface: InterfaceHandle,
+    pub(crate) addr: Address<A>,
+}
 
 impl<A: AddressExt> core::fmt::Display for NeighbourIndex<A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{} via {}", self.1, self.0)
+        write!(f, "{} via {}", self.iface, self.addr)
     }
 }
 
@@ -116,7 +117,10 @@ pub struct NeighbourPending {
 impl<A: AddressExt> InternallyKeyed for Neighbour<A> {
     type Key = NeighbourIndex<A>;
     fn key(&self) -> Self::Key {
-        NeighbourIndex(self.iface, self.address)
+        NeighbourIndex {
+            iface: self.iface,
+            addr: self.address,
+        }
     }
 }
 
@@ -542,14 +546,14 @@ impl RxHelloInfo {
         // Record the received hello in the bit history.
         self.history.record(true);
 
-        // Set the interval of this hello info with the new interval if applicable.
+        // A hello with a non-zero interval is scheduled.
         if !new_interval.is_zero() {
             self.timer
                 .set_tick_duration(*new_interval * HELLO_INTERVAL_MULTIPLIER)
                 .expect("Just checked that interval is not zero");
+            // Timer only restarts on scheduled hellos.
+            self.timer.restart(now);
         }
-
-        self.timer.restart(now);
 
         Ok(())
     }

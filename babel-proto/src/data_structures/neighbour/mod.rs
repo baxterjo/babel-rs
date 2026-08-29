@@ -95,7 +95,10 @@ impl<A: AddressExt> NeighbourConfig<A> {
     }
 
     pub(crate) fn index(&self) -> NeighbourIndex<A> {
-        NeighbourIndex(self.iface, self.address)
+        NeighbourIndex {
+            iface: self.iface,
+            addr: self.address,
+        }
     }
 }
 

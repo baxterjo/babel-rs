@@ -261,7 +261,7 @@ mod test {
     use super::*;
     use crate::data_structures::interface::InterfaceConfig;
     use crate::data_structures::neighbour::{Neighbour, NeighbourIndex};
-    use crate::data_structures::seqno::SeqNo;
+    use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Address, RouterId};
     use crate::extension::NoExtension;
     use crate::metric::{KOutOfJ, RxCost};
@@ -415,7 +415,10 @@ mod test {
         router
             .neighbor_table
             .inner
-            .get_mut_by_key(&NeighbourIndex(iface, address.into()))
+            .get_mut_by_key(&NeighbourIndex {
+                iface,
+                addr: address.into(),
+            })
             .expect("neighbour should exist")
     }
 
@@ -1143,7 +1146,7 @@ mod test {
 
             assert!(matches!(
                 err,
-                BabelError::IfaceTable(InterfaceError::NoInterfacesRegistered)
+                BabelError::Interface(InterfaceError::NoInterfacesRegistered)
             ));
         }
 
@@ -1160,7 +1163,7 @@ mod test {
 
             assert!(matches!(
                 err,
-                BabelError::IfaceTable(InterfaceError::NoInterfacesRegistered)
+                BabelError::Interface(InterfaceError::NoInterfacesRegistered)
             ));
         }
     }

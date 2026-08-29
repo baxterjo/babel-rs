@@ -96,10 +96,14 @@ pub struct DurationMultiplier {
 }
 
 impl DurationMultiplier {
-    /// Creates a new multiplier clamping the denominator to a minimum of 1
+    /// Creates a new multiplier clamping the numerator and denominator to a minimum of 1
     pub const fn new(num: u8, den: u8) -> Self {
         let denom = if den == 0 { 1 } else { den };
-        Self { num, den: denom }
+        let numer = if num == 0 { 1 } else { num };
+        Self {
+            num: numer,
+            den: denom,
+        }
     }
 
     pub fn num(&self) -> u8 {

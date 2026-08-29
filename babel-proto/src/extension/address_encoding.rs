@@ -11,14 +11,27 @@ use crate::extension::NoExtension;
 /// Meant to be used in conjunction with [`AddressExt`](crate::extension::address::AddressExt)
 pub trait AddressEncodingExt
 where
-    Self: Debug + Sized + PartialEq + Eq + MaybeDefmt,
+    Self: Debug + Sized + PartialEq + Eq + Copy + MaybeDefmt,
 {
     type Error: ErrorT + PartialEq + Eq + MaybeDefmt;
 
+    /// Try to create this type from the wire representation of this address encoding.
     fn from_value(value: u8) -> Result<Self, AddressEncodingError<Self>>;
+    /// Returns the wire representation value of this address encoding.
     fn as_value(&self) -> u8;
+    /// Returns the length of the uncompressed address in bytes.
     fn address_len(&self) -> usize;
+    /// Returns whether an address with this encoding can be compressed in an update TLV.
     fn can_compress(&self) -> bool;
+    /// Returns the number of leading octets this encoding fixes itself, and which therefore never
+    /// appear on the wire.
+    ///
+    /// Example: Link local IPv6 addresses have an implied prefix of `fe80::/64` so those first 8
+    /// octets are never emitted on the wire because the encoding implies them for all addresses
+    /// with this encoding.
+    fn implied_prefix_octets(&self) -> usize {
+        0
+    }
 }
 
 impl AddressEncodingExt for NoExtension {

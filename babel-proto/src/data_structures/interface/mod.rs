@@ -18,14 +18,10 @@ use crate::data_types::Interval;
 use crate::utils::short_id::fmt_short_id;
 use crate::utils::{Duration, TimerError};
 
-const DEFAULT_MULTICAST_HELLO_INTERVAL_SECS: u64 = 4;
+pub(crate) const DEFAULT_MULTICAST_HELLO_INTERVAL_SECS: u64 = 4;
 /// Recommended message intervals indicated in [Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.2)
 pub const DEFAULT_MULTICAST_HELLO_INTERVAL: Interval =
     Interval::from_duration(Duration::from_secs(DEFAULT_MULTICAST_HELLO_INTERVAL_SECS));
-/// Recommended message intervals indicated in [Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.10)
-pub const DEFAULT_UPDATE_INTERVAL: Interval = Interval::from_duration(Duration::from_secs(
-    DEFAULT_MULTICAST_HELLO_INTERVAL_SECS * 4,
-));
 
 /// An interface handle is used to reference a registered interface f:willor incoming and outgoing
 /// operations.

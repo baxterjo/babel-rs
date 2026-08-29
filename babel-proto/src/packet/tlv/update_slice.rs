@@ -1,7 +1,7 @@
 use core::fmt::Debug;
 
-use crate::data_structures::seqno::SeqNo;
 use crate::data_types::Interval;
+use crate::data_types::seqno::SeqNo;
 use crate::metric::Metric;
 use crate::packet::error::layer::Layer;
 use crate::packet::error::len_error::LenError;
@@ -180,38 +180,41 @@ impl<'a> UpdateSlice<'a> {
         }
     }
 
-    /// The size in octets of the Prefix field, (Plen/8 - Omitted) rounded upwards.
+    /// The size in octets of the Prefix field, `(Plen/8).ceil() - implied_octets - Omitted`.
     ///
-    /// [Section 4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update) only gives this
-    /// field a meaning when Omitted is no larger than the prefix it omits octets from, so an
-    /// Update claiming to omit more is invalid and MUST be ignored. Saturating at zero instead
-    /// would leave the prefix octets to be handed back as a sub-TLV region, so it is rejected
-    /// here.
-    fn prefix_len(&self) -> Result<usize, TlvError> {
-        let plen_octets = self.plen().div_ceil(8);
-        let omitted = self.ommitted();
-        if omitted > plen_octets {
-            return Err(TlvError::OmittedTooLong {
-                plen: self.plen(),
-                omitted,
+    /// `implied_octets` is the number of leading octets the address encoding fixes itself and which
+    /// therefore never reach the wire - 8 for AE 3, whose `fe80::/64` prefix is implied, and 0 for
+    /// every other base-spec encoding. Plen counts the whole advertised prefix including those
+    /// octets, so they come off the field length as a second, implicit `Omitted`.
+    fn prefix_field_len(&self, implied_octets: usize) -> Result<usize, TlvError> {
+        let plen = self.plen();
+
+        // A Plen below the implied prefix names bits underneath the floor the encoding sets, so
+        // there is no prefix it could be describing.
+        if usize::from(plen) < implied_octets * 8 {
+            return Err(TlvError::PlenBelowImpliedPrefix {
+                plen,
+                implied_octets,
             });
         }
-        Ok((plen_octets - omitted).into())
+
+        // The check above makes this subtraction safe.
+        let uncompressed_len = usize::from(plen.div_ceil(8)) - implied_octets;
+
+        let omitted = self.ommitted();
+        // Can't have a negative length.
+        if usize::from(omitted) > uncompressed_len {
+            return Err(TlvError::OmittedTooLong { plen, omitted });
+        }
+        Ok(uncompressed_len - usize::from(omitted))
     }
 
-    /// The prefix being advertised. This field's size is (Plen/8 - Omitted) rounded upwards.
+    /// The prefix being advertised, as it appears on the wire.
     ///
-    /// The prefix being advertised by an Update TLV is computed as follows:
-    ///   * the first Omitted octets of the prefix are taken from the previous Update TLV with the
-    /// Prefix flag set and the same address encoding, even if it was ignored due to an unknown
-    /// mandatory sub-TLV; if the Omitted field is not zero and there is no such TLV, then this
-    /// Update MUST be ignored;
-    ///   * the next (Plen/8 - Omitted) rounded upwards octets are taken from the Prefix field;
-    ///   * if Plen is not a multiple of 8, then any bits beyond Plen (i.e., the low-order (8 - Plen
-    ///     MOD 8) bits of the last octet) are cleared;
-    ///   * the remaining octets are set to 0.
-    pub fn prefix(&self) -> Result<&'a [u8], TlvError> {
-        let idx_end = TlvHeader::LEN + Self::MIN_LEN + self.prefix_len()?;
+    /// The field holds `(Plen/8).ceil() - implied_octets - Omitted` octets; see
+    /// [`Self::prefix_field_len`] for what `implied_octets` means and why it is a parameter.
+    pub fn prefix(&self, implied_octets: usize) -> Result<&'a [u8], TlvError> {
+        let idx_end = TlvHeader::LEN + Self::MIN_LEN + self.prefix_field_len(implied_octets)?;
         // This **MUST** be checked as the source of idx_end is supplied through the tlv. So a
         // malicious packet could cause UB.
         Ok(self
@@ -227,8 +230,11 @@ impl<'a> UpdateSlice<'a> {
     }
 
     /// This TLV is self-terminating and allows sub-TLVs.
-    pub fn sub_tlvs(&self) -> Result<&'a [u8], TlvError> {
-        let idx_end = TlvHeader::LEN + Self::MIN_LEN + self.prefix_len()?;
+    ///
+    /// The sub-TLVs start where the Prefix field ends, so this needs the same `implied_octets` as
+    /// [`Self::prefix`].
+    pub fn sub_tlvs(&self, implied_octets: usize) -> Result<&'a [u8], TlvError> {
+        let idx_end = TlvHeader::LEN + Self::MIN_LEN + self.prefix_field_len(implied_octets)?;
         // This **MUST** be checked as the source of idx_end is supplied through the tlv. So a
         // malicious packet could cause UB.
         Ok(self.slice.get(idx_end..).ok_or(LenError {
@@ -238,6 +244,14 @@ impl<'a> UpdateSlice<'a> {
             layer: Layer::BabelTlvBody,
             layer_start_offset: 0,
         })?)
+    }
+
+    pub fn is_retraction(&self) -> bool {
+        self.metric() == Metric::INFINITY
+    }
+
+    pub fn is_blanket_retraction(&self) -> bool {
+        self.ae() == 0 && self.is_retraction()
     }
 }
 
@@ -364,12 +378,12 @@ mod test {
             "Incorrect metric"
         );
         assert_eq!(
-            update.prefix().expect("Should be able to get prefix"),
+            update.prefix(0).expect("Should be able to get prefix"),
             &[192, 168, 0],
             "Incorrect prefix"
         );
         assert_eq!(
-            update.sub_tlvs().expect("Should have sub tlvs"),
+            update.sub_tlvs(0).expect("Should have sub tlvs"),
             &[1, 2, 3, 4, 5, 6, 7, 8, 9],
             "Incorrect sub tlvs"
         );
@@ -398,12 +412,12 @@ mod test {
         );
         assert_eq!(update.ommitted(), 2, "Incorrect omitted");
         assert_eq!(
-            update.prefix().expect("Should be able to get prefix"),
+            update.prefix(0).expect("Should be able to get prefix"),
             &[5],
             "Incorrect prefix"
         );
         assert_eq!(
-            update.sub_tlvs().expect("Should be able to get sub tlvs"),
+            update.sub_tlvs(0).expect("Should be able to get sub tlvs"),
             &[],
             "Should have no sub tlvs"
         );
@@ -425,12 +439,12 @@ mod test {
         let update = UpdateSlice::from_untyped(tlv_slice).expect("Update should parse.");
 
         assert_eq!(
-            update.prefix().expect("Should be able to get prefix"),
+            update.prefix(0).expect("Should be able to get prefix"),
             &[],
             "Should have an empty prefix"
         );
         assert_eq!(
-            update.sub_tlvs().expect("Should be able to get sub tlvs"),
+            update.sub_tlvs(0).expect("Should be able to get sub tlvs"),
             &[],
             "Should have no sub tlvs"
         );
@@ -485,7 +499,7 @@ mod test {
         let update = UpdateSlice::from_untyped(tlv_slice).expect("Update should parse.");
 
         assert_eq!(
-            update.prefix().expect_err("Prefix should be rejected"),
+            update.prefix(0).expect_err("Prefix should be rejected"),
             TlvError::OmittedTooLong {
                 plen: 24,
                 omitted: 5
@@ -493,7 +507,7 @@ mod test {
             "Incorrect prefix error"
         );
         assert_eq!(
-            update.sub_tlvs().expect_err("Sub tlvs should be rejected"),
+            update.sub_tlvs(0).expect_err("Sub tlvs should be rejected"),
             TlvError::OmittedTooLong {
                 plen: 24,
                 omitted: 5
@@ -519,12 +533,12 @@ mod test {
         let update = UpdateSlice::from_untyped(tlv_slice).expect("Update should parse.");
 
         assert_eq!(
-            update.prefix().expect("Should be able to get prefix"),
+            update.prefix(0).expect("Should be able to get prefix"),
             &[],
             "Should have an empty prefix"
         );
         assert_eq!(
-            update.sub_tlvs().expect("Should be able to get sub tlvs"),
+            update.sub_tlvs(0).expect("Should be able to get sub tlvs"),
             &[],
             "Should have no sub tlvs"
         );
@@ -589,9 +603,9 @@ mod test {
 
         let update = UpdateSlice::from_untyped(untyped).expect("Update should parse");
 
-        update.prefix().expect_err("Prefix should be too short.");
+        update.prefix(0).expect_err("Prefix should be too short.");
         update
-            .sub_tlvs()
+            .sub_tlvs(0)
             .expect_err("Sub tlvs should start past the end of the TLV.");
     }
 

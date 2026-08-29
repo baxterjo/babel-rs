@@ -1,5 +1,5 @@
 use crate::data_structures::interface::{InterfaceConfig, InterfaceError, InterfaceHandle};
-use crate::data_structures::seqno::SeqNo;
+use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Address, Interval};
 use crate::extension::address::AddressExt;
 use crate::metric::LinkCostCalculator;
