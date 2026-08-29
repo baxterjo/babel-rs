@@ -1,17 +1,20 @@
 use crate::data_structures::interface::Interface;
 use crate::data_structures::neighbour::NeighbourIndex;
+use crate::data_structures::route::Route;
+use crate::data_structures::source::{SourceIndex, SourceTable};
 use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::input::{Receive, ReceiveDestination};
+use crate::metric::Metric;
 use crate::packet::packet_slice::PacketSlice;
 use crate::packet::parser::Parser;
 use crate::packet::tlv::reader::TlvReader;
 use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, UpdateSlice};
 use crate::router::BabelRouter;
-use crate::utils::{Instant, ManagedSliceExt};
+use crate::utils::{Instant, InternallyKeyed, ManagedSliceExt};
 
 impl<'storage, A, P> BabelRouter<'storage, P, A>
 where
@@ -51,6 +54,11 @@ where
             });
         }
 
+        // Route selection is run:
+        // * After receiving a hello or after the router has determined it has missed one (handled
+        // in poll_output)
+        // * After updating a neighbour's tx_cost (which does not necesarrily mean upon IHU receipt)
+        // * After the route table is updated
         let mut run_selection = false;
 
         for tlv in TlvReader::new(packet.body()) {
@@ -65,9 +73,10 @@ where
                 // them.
                 Tlv::Hello(hello) => {
                     ok_or_continue!(self.handle_hello(now, &interface, input.source_addr, hello));
+                    run_selection = true;
                 }
                 Tlv::Ihu(ihu) => {
-                    ok_or_continue!(self.handle_ihu(
+                    run_selection |= ok_or_continue!(self.handle_ihu(
                         now,
                         &interface,
                         input.source_addr,
@@ -99,7 +108,8 @@ where
         }
 
         if run_selection {
-            // TODO: Route selection
+            // TODO: Triggered updates
+            let _triggered_update = self.select_routes();
         }
 
         Ok(())
@@ -117,6 +127,9 @@ where
         Ok(())
     }
 
+    /// Handle an incoming IHU from a neighbour.
+    ///
+    /// Returns `true` if the route selection procedure needs to be run
     fn handle_ihu(
         &mut self,
         now: Instant,
@@ -124,17 +137,17 @@ where
         source_addr: Address<A>,
         destination: ReceiveDestination,
         ihu: IhuSlice<'_>,
-    ) -> Result<(), BabelError<A>> {
+    ) -> Result<bool, BabelError<A>> {
         if !ihu_is_addressed_to_us(&ihu, destination, interface.address)? {
             b_debug!("Ignoring IHU addressed to another neighbour");
-            return Ok(());
+            return Ok(false);
         }
 
         // The rxcost belongs to whoever sent the packet. Nothing inside a Babel packet names its
         // sender, so the transport's source address is the only thing that identifies them.
-        self.neighbor_table
-            .handle_ihu(now, source_addr, interface, ihu)?;
-        Ok(())
+        Ok(self
+            .neighbor_table
+            .handle_ihu(now, source_addr, interface, ihu)?)
     }
 
     //  _  _   _   _  _ ___  _    ___   _   _ ___ ___   _ _____ ___
@@ -183,31 +196,106 @@ where
             let resolved_update = parser.handle_update(update)?;
 
             // Check if the update is feasible against the source table.
-            let feasible = self.source_table.update_is_feasible(&resolved_update);
-            // Calculate the link cost to this neighbour
-            let link_cost = interface.cost_calc.link_cost(
-                interface.cost_calc.rx_cost(
-                    neighbour.mcast_hello_info.history,
-                    neighbour.ucast_hello_info.history,
-                ),
-                neighbour.tx_cost,
+            let feasible = self.source_table.is_feasible(
+                &SourceIndex {
+                    router_id: resolved_update.router_id,
+                    prefix: resolved_update.address,
+                    prefix_len: resolved_update.slice.plen(),
+                },
+                resolved_update.slice.metric(),
+                resolved_update.slice.seqno(),
             );
-            // Calculate the route metric for this route.
-            let route_metric = interface
-                .cost_calc
-                .metric(resolved_update.slice.metric(), link_cost);
 
             // Aquire the route
-            self.route_table.aquire_route(
-                now,
-                neighbour,
-                feasible,
-                resolved_update,
-                route_metric,
-            )?;
+            self.route_table
+                .aquire_route(now, interface, neighbour, feasible, resolved_update)?;
         }
         Ok(())
     }
+
+    /// The recommended route selection procedure as defined in
+    /// [Section 3.6](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection)
+    /// and [Appendix A.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection)
+    ///
+    /// Returns `true` if the selection process triggered an update.
+    pub(crate) fn select_routes(&mut self) -> bool {
+        let mut send_update = false;
+        // A shared borrow of one field while `route_table` is borrowed mutably below.
+        let source_table = &self.source_table;
+
+        for mut destination_group in self.route_table.destination_groups_mut() {
+            // The route this destination was pointing at before this run, whether or not it is
+            // still usable. Only the change detection at the bottom cares about that distinction.
+            let previous: Option<Route<A>> = destination_group
+                .iter()
+                .find(|route| route.selected)
+                .copied();
+
+            // The incumbent for hysteresis purposes: the previously selected route, but only
+            // while it still passes the hard rules. One that has been retracted or has gone
+            // unfeasible has no claim on the destination at all.
+            let incumbent = previous.filter(|route| is_eligible(source_table, route));
+
+            // The best route on offer, hard rules applied. Ties break on the route index so that
+            // the winner does not depend on where the entries happen to sit in the table.
+            let challenger = destination_group
+                .iter()
+                .filter(|route| is_eligible(source_table, route))
+                .min_by_key(|route| (route.computed_metric, route.key()))
+                .copied();
+
+            // Appendix A.3's hysteresis. The comparison is against the *incumbent* rather than
+            // against whichever entry the scan reached first: the smoothed metric only says
+            // something about whether it is worth moving away from the route already in use, so
+            // measuring it against an arbitrary scan position both makes the outcome depend on
+            // route table ordering and lets a worse route take a destination it never held.
+            let winner = match (incumbent, challenger) {
+                // A still-eligible incumbent keeps the destination unless the best route on offer
+                // beats it on the real metric *and* on the smoothed one. Requiring both is what
+                // stops a route whose metric is briefly flapping from taking over.
+                (Some(incumbent), Some(challenger)) => Some(
+                    if challenger.computed_metric < incumbent.computed_metric
+                        && challenger.smoothed_metric < incumbent.smoothed_metric
+                    {
+                        challenger
+                    } else {
+                        incumbent
+                    },
+                ),
+                // Nothing to defend the destination, so the best route takes it outright. This is
+                // also the path a destination whose selected route was just retracted takes.
+                (None, challenger) => challenger,
+                // An eligible incumbent is itself a candidate, so this cannot happen. Keeping it
+                // rather than dropping the selection is the harmless reading either way.
+                (Some(incumbent), None) => Some(incumbent),
+            };
+
+            // Deselect everything, then switch the winner back on. Doing it in that order means a
+            // destination that no longer has an eligible route ends up with nothing selected.
+            for route in destination_group.iter_mut() {
+                route.selected = false;
+            }
+            if let Some(winner) = winner {
+                destination_group
+                    .iter_mut()
+                    .find(|route| route.key() == winner.key())
+                    .expect("the winner was picked out of this same group")
+                    .selected = true;
+            }
+
+            // Section 3.7.2 wants an update sent when the selected route changes, which is a
+            // different question from whether this run had a candidate at all.
+            send_update |= winner.map(|w| w.key()) != previous.map(|p| p.key());
+        }
+        send_update
+    }
+}
+
+/// Section 3.6's hard rules, which no amount of hysteresis can talk a route past: a route with an
+/// infinite metric has been retracted, and an unfeasible one risks a routing loop.
+fn is_eligible<A: AddressExt>(source_table: &SourceTable<'_, A>, route: &Route<A>) -> bool {
+    route.computed_metric != Metric::INFINITY
+        && source_table.is_feasible(route.source(), route.computed_metric, route.seqno)
 }
 
 /// Decides whether an IHU was meant for this node.
@@ -245,6 +333,7 @@ mod test {
     use super::*;
     use crate::data_structures::interface::{InterfaceConfig, InterfaceHandle};
     use crate::data_structures::neighbour::NeighbourIndex;
+    use crate::data_structures::route::route_table::DEFAULT_SMOOTHING_MULTIPLE;
     use crate::data_structures::route::{Route, RouteIndex};
     use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Interval, RouterId};
@@ -579,9 +668,21 @@ mod test {
 
     /// Registers an interface and drains its mandatory eager initial multicast hello.
     fn drained_iface(r: &mut BabelRouter<'static>, now: Instant, name: &str) -> InterfaceHandle {
+        drained_iface_with_hello(r, now, name, IFACE_INTERVAL)
+    }
+
+    /// As [`drained_iface`], but with the multicast hello interval chosen by the caller. The
+    /// smoothing time constant is derived from that interval, so the tests that exercise it need
+    /// one short enough to step over.
+    fn drained_iface_with_hello(
+        r: &mut BabelRouter<'static>,
+        now: Instant,
+        name: &str,
+        hello: Interval,
+    ) -> InterfaceHandle {
         let mut config: InterfaceConfig<NoExtension> =
             InterfaceConfig::new_wired(iface_handle(name), NODE_ADDR.into());
-        config.set_mcast_hello_interval(IFACE_INTERVAL);
+        config.set_mcast_hello_interval(hello);
         let handle = r
             .register_interface(now, config)
             .expect("register should succeed");
@@ -873,15 +974,15 @@ mod test {
         let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
             .expect("the update should have created a route");
 
-        assert_eq!(route.source.prefix, PREFIX_A.into());
-        assert_eq!(route.source.prefix_len, PLEN);
+        assert_eq!(route.source().prefix, PREFIX_A.into());
+        assert_eq!(route.source().prefix_len, PLEN);
         assert_eq!(
-            route.source.router_id,
+            route.source().router_id,
             RouterId::from(&ORIGIN_1),
             "the source router-id comes from the preceding Router-Id TLV"
         );
         assert_eq!(
-            route.neigbour,
+            *route.neigbour(),
             NeighbourIndex {
                 iface,
                 addr: NEIGHBOUR_1_ADDR.into()
@@ -1029,7 +1130,7 @@ mod test {
             "the announced next hop should win over the packet's source address"
         );
         assert_eq!(
-            route.neigbour.addr,
+            route.neigbour().addr,
             NEIGHBOUR_1_ADDR.into(),
             "the next hop must not change which neighbour advertised the route"
         );
@@ -1119,7 +1220,8 @@ mod test {
             .expect("the link-local host route should have been acquired");
 
             assert_eq!(
-                route.source.prefix_len, 128,
+                route.source().prefix_len,
+                128,
                 "the entry records the whole prefix, not the part that reached the wire"
             );
             assert_eq!(route.advertised_metric, Metric::from_raw(100));
@@ -1153,7 +1255,7 @@ mod test {
         )
         .expect("fe80::/64 should have been acquired");
 
-        assert_eq!(route.source.prefix_len, 64);
+        assert_eq!(route.source().prefix_len, 64);
     }
 
     //  ___  ___  _   _ _____ ___   ___ ___ ___ ___ ___ ___ _  _
@@ -1231,7 +1333,7 @@ mod test {
         assert_eq!(
             route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
                 .expect("the route should still exist")
-                .source
+                .source()
                 .router_id,
             RouterId::from(&ORIGIN_2),
             "the entry should now be advertised for the new source"
@@ -1462,7 +1564,7 @@ mod test {
         assert_eq!(route.computed_metric, Metric::INFINITY);
         assert_eq!(route.seqno, SeqNo(7), "the retraction's seqno is not used");
         assert_eq!(
-            route.source.router_id,
+            route.source().router_id,
             RouterId::from(&ORIGIN_1),
             "the retraction's router-id is not used"
         );
@@ -1726,7 +1828,7 @@ mod test {
         assert_eq!(
             route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
                 .expect("the well-formed update should still have been handled")
-                .source
+                .source()
                 .router_id,
             RouterId::from(&ORIGIN_1),
             "the ignored update must not have established a router-id for the one behind it"
@@ -1816,7 +1918,7 @@ mod test {
         assert_eq!(after.seqno, before.seqno);
         assert_eq!(after.advertised_metric, before.advertised_metric);
         assert_eq!(after.computed_metric, before.computed_metric);
-        assert_eq!(after.source.router_id, before.source.router_id);
+        assert_eq!(after.source().router_id, before.source().router_id);
         assert_eq!(after.expiry.duration(), before.expiry.duration());
     }
 
@@ -1866,6 +1968,624 @@ mod test {
         assert!(
             route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_B, PLEN).is_some(),
             "the update behind the malformed one should still have been handled"
+        );
+    }
+
+    //  __  __ ___ _____ ___ ___ ___   ___ __  __  ___  ___ _____ _  _ ___ _  _  ___
+    // |  \/  | __|_   _| _ \_ _/ __| / __|  \/  |/ _ \/ _ \_   _| || |_ _| \| |/ __|
+    // | |\/| | _|  | | |   /| | (__  \__ \ |\/| | (_) | (_) || | | __ || || .` | (_ |
+    // |_|  |_|___| |_| |_|_\___\___| |___/_|  |_|\___/ \___/ |_| |_||_|___|_|\_|\___|
+
+    /// The smoothing time constant is `max(our mcast hello interval, the neighbour's ucast hello
+    /// interval) * DEFAULT_SMOOTHING_MULTIPLE`. Nothing here sends unicast hellos, so a one second
+    /// interface hello puts the constant at three seconds — short enough to step a whole time
+    /// constant while staying well inside a route's hold time.
+    const SMOOTHING_HELLO: Interval = Interval::from_duration(Duration::from_secs(1));
+    const SMOOTHING_TAU: Duration = Duration::from_secs(3);
+
+    /// Registers an interface whose hello interval yields [`SMOOTHING_TAU`], and an established
+    /// neighbour on it.
+    fn smoothing_setup(r: &mut BabelRouter<'static>, now: Instant) -> InterfaceHandle {
+        assert_eq!(
+            Duration::from(SMOOTHING_HELLO) * DEFAULT_SMOOTHING_MULTIPLE,
+            SMOOTHING_TAU,
+            "the time constant these tests assume has drifted from the router's"
+        );
+        let iface = drained_iface_with_hello(r, now, "iface_1", SMOOTHING_HELLO);
+        established_neighbour(r, now, iface, NEIGHBOUR_1_ADDR);
+        iface
+    }
+
+    /// A route has no history to smooth against when it is created, so Appendix A.3's smoothed
+    /// metric has to start life equal to the real one. Starting it anywhere else would make a
+    /// brand new route look better or worse than it is for the first few updates.
+    #[test]
+    fn a_new_route_starts_smoothed_at_its_computed_metric() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = smoothing_setup(&mut r, t0);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the update should have created a route");
+
+        assert_eq!(route.computed_metric, Metric::from_raw(100 + LINK_COST));
+        assert_eq!(
+            route.smoothed_metric, route.computed_metric,
+            "a new route is its own history"
+        );
+        assert_eq!(
+            route.smoothed_metric_time, t0,
+            "and the clock starts at the update that created it"
+        );
+    }
+
+    /// The point of the smoothed metric is that it lags the real one. A single update one time
+    /// constant later must move it part of the way, not all of it.
+    #[test]
+    fn a_later_update_pulls_the_smoothed_metric_towards_the_new_one() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = smoothing_setup(&mut r, t0);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+
+        // One time constant later the same neighbour advertises a much worse metric.
+        let t1 = t0 + SMOOTHING_TAU;
+        send_updates(
+            &mut r,
+            t1,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 300)],
+        );
+
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the route should still be there");
+
+        assert_eq!(
+            route.computed_metric,
+            Metric::from_raw(300 + LINK_COST),
+            "the computed metric follows the update immediately"
+        );
+        // round(120 + (320 - 120) * 0.6321) == 246
+        assert_eq!(
+            route.smoothed_metric,
+            Metric::from_raw(246),
+            "the smoothed metric closes 1 - 1/e of the gap in one time constant"
+        );
+        assert_eq!(
+            route.smoothed_metric_time, t1,
+            "the step is measured from the last update, so the stamp has to advance"
+        );
+    }
+
+    /// Two updates for one prefix inside a single packet share an `Instant`. The second one must
+    /// not be smoothed as though a step had elapsed, or a neighbour could drag the smoothed metric
+    /// wherever it liked by repeating an update.
+    #[test]
+    fn updates_at_the_same_instant_do_not_advance_the_smoothed_metric() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = smoothing_setup(&mut r, t0);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+        for _ in 0..5 {
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 300)],
+            );
+        }
+
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the route should still be there");
+
+        assert_eq!(
+            route.computed_metric,
+            Metric::from_raw(300 + LINK_COST),
+            "the computed metric still tracks the newest update"
+        );
+        assert_eq!(
+            route.smoothed_metric,
+            Metric::from_raw(100 + LINK_COST),
+            "but no time passed, so the smoothed metric is untouched"
+        );
+    }
+
+    //  ___  ___  _   _ _____ ___   ___ ___ _    ___ ___ _____ ___ ___  _  _
+    // | _ \/ _ \| | | |_   _| __| / __| __| |  | __/ __|_   _|_ _/ _ \| \| |
+    // |   / (_) | |_| | | | | _|  \__ \ _|| |__| _| (__  | |  | | (_) | .` |
+    // |_|_\\___/ \___/  |_| |___| |___/___|____|___\___| |_| |___\___/|_|\_|
+
+    /// Whether a route is selected is read straight off the entry.
+    fn is_selected(
+        r: &mut BabelRouter<'static>,
+        iface: InterfaceHandle,
+        neighbour: Ipv6Addr,
+        prefix: Ipv6Addr,
+        plen: u8,
+    ) -> bool {
+        route_for(r, iface, neighbour, prefix, plen)
+            .expect("route should exist")
+            .selected
+    }
+
+    /// Selection runs at the end of any packet that carried an Update, so a lone feasible route is
+    /// already selected by the time `handle_input` returns.
+    #[test]
+    fn the_only_route_to_a_destination_is_selected() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+
+        assert!(is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN));
+    }
+
+    /// Section 3.6: a route with an infinite metric is never selected. With only a retracted route
+    /// on offer the destination is left with nothing selected rather than falling back to it.
+    #[test]
+    fn a_retracted_route_is_never_selected() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+        assert!(
+            is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+            "the route has to be selected first for the retraction to have something to undo"
+        );
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE)],
+        );
+
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("a retraction keeps the entry");
+        assert_eq!(route.computed_metric, Metric::INFINITY);
+        assert!(!route.selected, "an infinite metric is never selected");
+    }
+
+    /// The lower computed metric wins. Asserted from both directions because the routes are walked
+    /// in route table order — by neighbour address — and the outcome must not depend on which of
+    /// the two the comparison happens to see first.
+    #[test]
+    fn the_lower_metric_route_wins_whichever_neighbour_offers_it() {
+        for (better, worse) in [
+            (NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR),
+            (NEIGHBOUR_2_ADDR, NEIGHBOUR_1_ADDR),
+        ] {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1");
+            for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
+                established_neighbour(&mut r, t0, iface, addr);
+            }
+
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                worse,
+                ORIGIN_1,
+                &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 300)],
+            );
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                better,
+                ORIGIN_1,
+                &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+            );
+
+            assert!(
+                is_selected(&mut r, iface, better, PREFIX_A, PLEN),
+                "the metric 100 route from {better} should be selected"
+            );
+            assert!(
+                !is_selected(&mut r, iface, worse, PREFIX_A, PLEN),
+                "the metric 300 route from {worse} should not be"
+            );
+        }
+    }
+
+    /// Retracting the selected route has to hand the destination to the surviving alternative
+    /// rather than leaving it unreachable. This is the case the route table keeps per-neighbour
+    /// entries for.
+    #[test]
+    fn retracting_the_selected_route_hands_over_to_the_alternative() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
+            established_neighbour(&mut r, t0, iface, addr);
+        }
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_2_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 300)],
+        );
+        assert!(is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN));
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE)],
+        );
+
+        assert!(
+            !is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+            "the retracted route is dropped"
+        );
+        assert!(
+            is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
+            "and the worse but still usable route takes over"
+        );
+    }
+
+    /// Selection is per destination: the groups the route table hands out must not let the winner
+    /// for one prefix suppress the winner for another.
+    #[test]
+    fn each_destination_selects_its_own_route() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
+            established_neighbour(&mut r, t0, iface, addr);
+        }
+
+        // Neighbour 1 is the better way to PREFIX_A, neighbour 2 the better way to PREFIX_B.
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[
+                UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100),
+                UpdateTlv::v6(PLEN, &PREFIX_B_WIRE, 300),
+            ],
+        );
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_2_ADDR,
+            ORIGIN_1,
+            &[
+                UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 300),
+                UpdateTlv::v6(PLEN, &PREFIX_B_WIRE, 100),
+            ],
+        );
+
+        assert!(is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN));
+        assert!(!is_selected(
+            &mut r,
+            iface,
+            NEIGHBOUR_2_ADDR,
+            PREFIX_A,
+            PLEN
+        ));
+        assert!(!is_selected(
+            &mut r,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            PREFIX_B,
+            PLEN
+        ));
+        assert!(is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_B, PLEN));
+    }
+
+    /// Section 3.7.2 wants an update sent when the selected route *changes*, so the return value
+    /// has to distinguish a change from a re-run that settled on the same route. Re-running
+    /// selection over an unchanged table must not keep asking for updates.
+    #[test]
+    fn selection_reports_a_change_only_when_the_selected_route_moves() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = drained_iface(&mut r, t0, "iface_1");
+        for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR] {
+            established_neighbour(&mut r, t0, iface, addr);
+        }
+
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_2_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 300)],
+        );
+
+        assert!(
+            !r.select_routes(),
+            "handle_input already ran selection, so a re-run settles on the same route"
+        );
+
+        // Drive the selected route to infinity behind selection's back, the way an expiry sweep
+        // would, so the next run has a real change to report.
+        for route in r
+            .route_table
+            .iter_mut_entries()
+            .filter(|route| route.selected)
+        {
+            route.computed_metric = Metric::INFINITY;
+        }
+
+        assert!(
+            r.select_routes(),
+            "the destination moved to a different route, which is what triggers an update"
+        );
+        assert!(
+            !r.select_routes(),
+            "and once reported the state is stable again"
+        );
+        assert!(
+            is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
+            "the alternative is what it moved to"
+        );
+    }
+
+    /// Puts the two neighbours' routes towards PREFIX_A into the one state where the real metric
+    /// and the smoothed metric disagree about which is better:
+    ///
+    /// * neighbour 1 at computed 320, smoothed 246 — it used to be the good route and the
+    ///   smoothing has not caught up with how far it has fallen;
+    /// * neighbour 2 at computed 270, smoothed 270 — brand new, so it has no history to lag.
+    ///
+    /// Neighbour 1 has the *worse* real metric and the *better* smoothed one, and it also sorts
+    /// first in the route table, so it is the entry a scan over the group reaches first.
+    fn diverged_metrics(r: &mut BabelRouter<'static>, iface: InterfaceHandle, t0: Instant) {
+        send_updates(
+            r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+        let t1 = t0 + SMOOTHING_TAU;
+        send_updates(
+            r,
+            t1,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 300)],
+        );
+        send_updates(
+            r,
+            t1,
+            iface,
+            NEIGHBOUR_2_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 250)],
+        );
+
+        // Guard the premise. If the smoothing arithmetic moves, the tests below should fail here
+        // rather than quietly turn into a test of something else.
+        let n1 = route_for(r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN).expect("neighbour 1 route");
+        let n2 = route_for(r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN).expect("neighbour 2 route");
+        assert_eq!(
+            (n1.computed_metric, n1.smoothed_metric),
+            (Metric::from_raw(320), Metric::from_raw(246)),
+            "neighbour 1 should be the worse route with the better history"
+        );
+        assert_eq!(
+            (n2.computed_metric, n2.smoothed_metric),
+            (Metric::from_raw(270), Metric::from_raw(270)),
+            "neighbour 2 should be the better route with no history"
+        );
+    }
+
+    /// Selects exactly the routes advertised by `neighbour`, bypassing selection itself, so a test
+    /// can hand `select_routes` a starting point instead of having to manoeuvre the router into
+    /// one. Every test using this has a single destination in the table.
+    fn force_selected(r: &mut BabelRouter<'static>, iface: InterfaceHandle, neighbour: Ipv6Addr) {
+        let idx = NeighbourIndex {
+            iface,
+            addr: neighbour.into(),
+        };
+        for route in r.route_table.iter_mut_entries() {
+            route.selected = *route.neigbour() == idx;
+        }
+    }
+
+    /// With nothing selected there is no incumbent to defend the destination, so the lowest metric
+    /// takes it outright and the smoothed metric has no say.
+    ///
+    /// This is the case that went the other way while hysteresis was measured against the first
+    /// entry the scan reached rather than against the selected route: neighbour 1 seeded the
+    /// comparison, its lagging smoothed metric then vetoed the only challenger, and the route with
+    /// the worse metric won a destination it had no claim on — purely because it sorted first.
+    #[test]
+    fn the_best_metric_wins_when_no_route_is_selected_yet() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = smoothing_setup(&mut r, t0);
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_2_ADDR);
+        diverged_metrics(&mut r, iface, t0);
+
+        // Clear the selection the updates left behind. This is the state a destination is in when
+        // every route towards it has just come back from having been retracted.
+        for route in r.route_table.iter_mut_entries() {
+            route.selected = false;
+        }
+
+        assert!(
+            r.select_routes(),
+            "a destination going from nothing to a route is a change worth an update"
+        );
+        assert!(
+            is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
+            "metric 270 beats metric 320"
+        );
+        assert!(
+            !is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+            "a better smoothed metric does not entitle a worse route to an unheld destination"
+        );
+    }
+
+    /// Hysteresis exists to keep the selected route where it is, so it must never be the reason
+    /// the selection *moves*, least of all to a worse route. Neighbour 2 holds the destination
+    /// with the better metric while neighbour 1 sorts first and has the better smoothed metric.
+    #[test]
+    fn hysteresis_never_moves_the_selection_to_a_worse_route() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = smoothing_setup(&mut r, t0);
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_2_ADDR);
+        diverged_metrics(&mut r, iface, t0);
+        force_selected(&mut r, iface, NEIGHBOUR_2_ADDR);
+
+        assert!(
+            !r.select_routes(),
+            "the selected route is already the best on offer, so nothing changed"
+        );
+        assert!(
+            is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
+            "the selected route keeps the destination"
+        );
+        assert!(
+            !is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+            "a route that sorts first must not be able to take a destination off a better one"
+        );
+    }
+
+    /// The other half of the rule. A challenger with the better real metric does not get the
+    /// destination while the incumbent's smoothed metric says the incumbent has been the better
+    /// route over time. Without this the rule would collapse into "always take the lowest metric",
+    /// which is the oscillation Appendix A.3's hysteresis exists to damp.
+    #[test]
+    fn hysteresis_keeps_the_selected_route_against_a_challenger_with_no_history() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = smoothing_setup(&mut r, t0);
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_2_ADDR);
+        diverged_metrics(&mut r, iface, t0);
+        force_selected(&mut r, iface, NEIGHBOUR_1_ADDR);
+
+        assert!(!r.select_routes(), "the selection did not move");
+        assert!(
+            is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+            "metric 270 beats 320, but not by enough smoothed metric to be worth moving for"
+        );
+        assert!(!is_selected(
+            &mut r,
+            iface,
+            NEIGHBOUR_2_ADDR,
+            PREFIX_A,
+            PLEN
+        ));
+    }
+
+    /// A retracted incumbent has no claim to defend, so hysteresis must not keep it. Without the
+    /// eligibility filter on the incumbent this would leave the destination pointing at a route
+    /// with an infinite metric.
+    #[test]
+    fn a_retracted_incumbent_does_not_hold_the_destination_through_hysteresis() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = smoothing_setup(&mut r, t0);
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_2_ADDR);
+        diverged_metrics(&mut r, iface, t0);
+        force_selected(&mut r, iface, NEIGHBOUR_1_ADDR);
+
+        // Neighbour 1 retracts the prefix it was holding the destination with. Its smoothed metric
+        // is left where it was, so by that measure alone it still looks like the better route.
+        send_updates(
+            &mut r,
+            t0 + SMOOTHING_TAU,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE)],
+        );
+
+        let n1 = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("a retraction keeps the entry");
+        assert_eq!(n1.computed_metric, Metric::INFINITY);
+        assert!(
+            n1.smoothed_metric < Metric::from_raw(270),
+            "the retraction leaves the smoothed metric looking better than neighbour 2's"
+        );
+        assert!(!n1.selected, "a retracted route is never selected");
+        assert!(
+            is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
+            "the destination moves to the only route still eligible for it"
         );
     }
 }

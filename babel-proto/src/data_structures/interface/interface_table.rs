@@ -79,13 +79,19 @@ impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
         self.inner.get_by_key(handle).is_some()
     }
 
-    pub(crate) fn iter_mut(
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Interface<A>> {
+        self.inner.iter().filter_map(|v| v.as_ref())
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Interface<A>> {
+        self.inner.iter_mut().filter_map(|v| v.as_mut())
+    }
+
+    pub(crate) fn iter_mut_filter(
         &mut self,
         poll_only: Option<InterfaceHandle>,
     ) -> impl Iterator<Item = &mut Interface<A>> {
-        self.inner
-            .iter_mut()
-            .filter_map(|v| v.as_mut())
+        self.iter_mut()
             .filter(move |iface| poll_only.is_none_or(|p| p == iface.handle))
     }
 }

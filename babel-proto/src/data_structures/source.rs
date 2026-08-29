@@ -1,6 +1,10 @@
-use crate::data_types::RouterId;
+use core::ops::Deref;
+
 use crate::data_types::address::Address;
+use crate::data_types::seqno::SeqNo;
+use crate::data_types::{RouterId, seqno};
 use crate::extension::address::AddressExt;
+use crate::metric::Metric;
 use crate::metric::distance::Feasibility;
 use crate::packet::parser::ResolvedUpdate;
 use crate::utils::ManagedSlice;
@@ -10,7 +14,7 @@ pub struct SourceTable<'storage, A>
 where
     A: AddressExt,
 {
-    inner: ManagedSlice<'storage, Option<Source<A>>>,
+    pub(crate) inner: ManagedSlice<'storage, Option<Source<A>>>,
 }
 
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -50,22 +54,18 @@ where
 impl<A: AddressExt> SourceTable<'_, A> {
     /// This is a read only check to see if an incoming update is feasible. The source table will
     /// be updated when updates are sent to neighbours.
-    pub fn update_is_feasible(&self, update: &ResolvedUpdate<'_, A>) -> bool {
+    pub fn is_feasible(&self, idx: &SourceIndex<A>, metric: Metric, seqno: SeqNo) -> bool {
         // If the update is a retraction then it is automatically feasible.
-        if update.slice.is_retraction() {
+        if metric == Metric::INFINITY {
             return true;
         }
         // If the table does not contain the source, then the update is automatically feasible.
-        let Some(source) = self.inner.get_by_key(&SourceIndex {
-            router_id: update.router_id,
-            prefix: update.address,
-            prefix_len: update.slice.plen(),
-        }) else {
+        let Some(source) = self.inner.get_by_key(idx) else {
             return true;
         };
 
         // Otherwise, check against the best feasibility ever seen.
-        let incoming_feasibility = Feasibility::new(update.slice.seqno(), update.slice.metric());
+        let incoming_feasibility = Feasibility::new(seqno, metric);
         incoming_feasibility < source.feasibility
     }
 }

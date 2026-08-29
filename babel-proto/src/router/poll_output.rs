@@ -152,7 +152,7 @@ where
         // interface contributes its multicast Hello timer on every path that reaches the
         // end of the loop. The check after the loop rejects it if that ever stops holding.
         let mut next_poll = Duration::MAX;
-        for interface in self.iface_table.iter_mut(poll_only) {
+        for interface in self.iface_table.iter_mut_filter(poll_only) {
             /// Macro for writer error handling.
             macro_rules! ok_or_try_send {
                 ($result:expr) => {

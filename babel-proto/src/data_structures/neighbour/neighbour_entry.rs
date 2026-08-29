@@ -263,12 +263,15 @@ impl<A: AddressExt> Neighbour<A> {
     // | __ |/ _ \| .` | |) | |__| _|   | || __ | |_| |
     // |_||_/_/ \_\_|\_|___/|____|___| |___|_||_|\___/
 
+    /// Handles an incoming IHU from this neighbour.
+    ///
+    /// Returns `true` if the route selection procedure needs to be run.
     pub(crate) fn handle_ihu(
         &mut self,
         now: Instant,
         ihu: IhuSlice<'_>,
         hold_time: DurationMultiplier,
-    ) -> Result<(), NeighbourError<A>> {
+    ) -> Result<bool, NeighbourError<A>> {
         let rx_cost = ihu.rx_cost();
         let interval = ihu.interval();
 
@@ -276,9 +279,11 @@ impl<A: AddressExt> Neighbour<A> {
 
         self.ihu_hold_timer = Timer::from_duration(now, timer_dur * hold_time)?;
 
+        let run_selection = self.tx_cost != rx_cost.into();
+
         self.tx_cost = rx_cost.into();
 
-        Ok(())
+        Ok(run_selection)
     }
 
     //  _____   ____  _      _         ____  _    _ _______ _____  _    _ _______

@@ -19,8 +19,12 @@ default = ["std", "log"]
 # default = ["defmt"]
 
 [dependencies]
+# Used for a single exponential smoothing function. Can likely be removed with some effort.
+libm = "0.2.16"
+# Logging
 defmt = { version = "1", optional = true }
 log = { version = "0.4", optional = true, default-features = false }
+# Error generation
 thiserror = { version = "2.0.19", default-features = false }
 
 [dev-dependencies]

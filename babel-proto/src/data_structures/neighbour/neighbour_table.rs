@@ -143,13 +143,15 @@ where
     /// `address` is the sender's address. The IHU's own Address field names its *destination*
     /// rather than its sender, so it plays no part in identifying the neighbour; the caller uses
     /// it to decide whether the IHU was meant for us at all.
+    ///
+    /// Returns `true` if the route selection procedure needs to be run.
     pub fn handle_ihu(
         &mut self,
         now: Instant,
         address: Address<A>,
         interface: &Interface<A>,
         ihu: IhuSlice<'_>,
-    ) -> Result<(), NeighbourError<A>> {
+    ) -> Result<bool, NeighbourError<A>> {
         let neighbour = self.get_or_insert_default(now, address, interface)?;
         b_debug!(
             "[RECV] IHU - iface: {:?}, addr: {:?} - {:?}",
@@ -157,7 +159,6 @@ where
             address,
             ihu
         );
-        neighbour.handle_ihu(now, ihu, interface.ihu_hold_time_multiple)?;
-        Ok(())
+        neighbour.handle_ihu(now, ihu, interface.ihu_hold_time_multiple)
     }
 }
