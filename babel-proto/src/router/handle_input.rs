@@ -28,6 +28,8 @@ where
     ) -> Result<(), BabelError<A>> {
         b_trace!("{:?}", input);
 
+        // Update all time based state.
+        let (mut run_selection, _) = self.poll_tick(now)?;
         // Have to copy the interface here to avoid indexing the interface table for every TLV in
         // the loop below.
         let Some(interface) = self.iface_table.inner.get_by_key(&input.iface).copied() else {
@@ -59,7 +61,6 @@ where
         // in poll_output)
         // * After updating a neighbour's tx_cost (which does not necesarrily mean upon IHU receipt)
         // * After the route table is updated
-        let mut run_selection = false;
 
         for tlv in TlvReader::new(packet.body()) {
             b_trace!("{:?}", tlv);
@@ -243,7 +244,7 @@ where
     /// and [Appendix A.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection)
     ///
     /// Returns `true` if the selection process triggered an update.
-    pub(crate) fn select_routes(&mut self) -> bool {
+    pub(super) fn select_routes(&mut self) -> bool {
         let mut send_update = false;
         // A shared borrow of one field while `route_table` is borrowed mutably below.
         let source_table = &self.source_table;
@@ -261,38 +262,40 @@ where
             // unfeasible has no claim on the destination at all.
             let incumbent = previous.filter(|route| is_eligible(source_table, route));
 
-            // The best route on offer, hard rules applied. Ties break on the route index so that
-            // the winner does not depend on where the entries happen to sit in the table.
-            let challenger = destination_group
-                .iter()
-                .filter(|route| is_eligible(source_table, route))
-                .min_by_key(|route| (route.computed_metric, route.key()))
-                .copied();
-
-            // Appendix A.3's hysteresis. The comparison is against the *incumbent* rather than
-            // against whichever entry the scan reached first: the smoothed metric only says
-            // something about whether it is worth moving away from the route already in use, so
-            // measuring it against an arbitrary scan position both makes the outcome depend on
-            // route table ordering and lets a worse route take a destination it never held.
-            let winner = match (incumbent, challenger) {
-                // A still-eligible incumbent keeps the destination unless the best route on offer
-                // beats it on the real metric *and* on the smoothed one. Requiring both is what
-                // stops a route whose metric is briefly flapping from taking over.
-                (Some(incumbent), Some(challenger)) => Some(
-                    if challenger.computed_metric < incumbent.computed_metric
-                        && challenger.smoothed_metric < incumbent.smoothed_metric
-                    {
-                        challenger
-                    } else {
-                        incumbent
-                    },
+            let winner = match incumbent {
+                // A still-eligible incumbent keeps the destination unless some route beats it on
+                // the real metric *and* on the smoothed one. Requiring both is what stops a route
+                // whose metric is briefly flapping from taking over.
+                Some(incumbent) => Some(
+                    destination_group
+                        .iter()
+                        // A set of potential winners must be eligible
+                        .filter(|route| is_eligible(source_table, route))
+                        // A set of potential winners must have a computed and smoothed metric
+                        // better than the incombent. If there are any items in the iterator at
+                        // this point, they are better than the incumbent.
+                        .filter(|route| {
+                            route.computed_metric < incumbent.computed_metric
+                                && route.smoothed_metric < incumbent.smoothed_metric
+                        })
+                        // Take the route that is the minimum of the routes better than the
+                        // incumbent. Breaking ties on the route index.
+                        .min_by_key(|route| (route.computed_metric, route.key()))
+                        .copied()
+                        // If none of these conditions are met, then the incumbent wins.
+                        .unwrap_or(incumbent),
                 ),
-                // Nothing to defend the destination, so the best route takes it outright. This is
-                // also the path a destination whose selected route was just retracted takes.
-                (None, challenger) => challenger,
-                // An eligible incumbent is itself a candidate, so this cannot happen. Keeping it
-                // rather than dropping the selection is the harmless reading either way.
-                (Some(incumbent), None) => Some(incumbent),
+                // Nothing to defend the destination, so the best route takes it outright, with the
+                // smoothed metric ignored entirely. This is also the path a destination whose
+                // selected route was just retracted takes.
+                //
+                // Ties break on the route index so that the winner does not depend on where the
+                // entries happen to sit in the table.
+                None => destination_group
+                    .iter()
+                    .filter(|route| is_eligible(source_table, route))
+                    .min_by_key(|route| (route.computed_metric, route.key()))
+                    .copied(),
             };
 
             // Deselect everything, then switch the winner back on. Doing it in that order means a
@@ -308,8 +311,7 @@ where
                     .selected = true;
             }
 
-            // Section 3.7.2 wants an update sent when the selected route changes, which is a
-            // different question from whether this run had a candidate at all.
+            // Section 3.7.2 wants an update sent when the selected route changes.
             send_update |= winner.map(|w| w.key()) != previous.map(|p| p.key());
         }
         send_update
@@ -376,6 +378,7 @@ mod test {
     const NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
     const NEIGHBOUR_1_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
     const NEIGHBOUR_2_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
+    const NEIGHBOUR_3_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 4);
 
     fn router(name: &'static str) -> BabelRouter<'static> {
         BabelRouter::new(BabelRouterConfig::new(
@@ -656,13 +659,13 @@ mod test {
             },
         };
         r.route_table
-            .iter_mut_entries()
+            .iter_mut()
             .find(|route| route.key() == idx)
             .map(|route| *route)
     }
 
     fn route_count(r: &mut BabelRouter<'static>) -> usize {
-        r.route_table.iter_mut_entries().count()
+        r.route_table.iter_mut().count()
     }
 
     /// Brings a neighbour to the state an Update needs to yield a finite route metric: enough
@@ -2053,24 +2056,49 @@ mod test {
         );
     }
 
-    /// The point of the smoothed metric is that it lags the real one. A single update one time
-    /// constant later must move it part of the way, not all of it.
+    /// The point of the smoothed metric is that it lags the real one. The first sample taken a
+    /// whole time constant after the metric moved must close part of the gap, not all of it.
+    ///
+    /// The degradation is put in the same packet as the advertisement it replaces so that the step
+    /// being measured is the one *after* the change. A metric change never moves ms(R) on the step
+    /// it arrives on — that step belongs to the metric that preceded it (see
+    /// [`Route::update_cost`]) — and the neighbour's IHU hold time is shorter than two time
+    /// constants, so there is no room to spend one on the change and another on the sample.
     #[test]
     fn a_later_update_pulls_the_smoothed_metric_towards_the_new_one() {
         let mut r = router("node_1");
         let t0 = Instant::from_secs(0);
         let iface = smoothing_setup(&mut r, t0);
 
+        // The route is born at 100 and immediately degrades to 300, so ms(R) starts at the route's
+        // own metric of 120 while the real metric is already 320.
         send_updates(
             &mut r,
             t0,
             iface,
             NEIGHBOUR_1_ADDR,
             ORIGIN_1,
-            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+            &[
+                UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100),
+                UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 300),
+            ],
         );
 
-        // One time constant later the same neighbour advertises a much worse metric.
+        let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+            .expect("the update should have created a route");
+        assert_eq!(
+            route.computed_metric,
+            Metric::from_raw(300 + LINK_COST),
+            "the computed metric follows the update immediately"
+        );
+        assert_eq!(
+            route.smoothed_metric,
+            Metric::from_raw(100 + LINK_COST),
+            "but no time has passed, so the smoothed metric is still the one it was born with"
+        );
+
+        // One time constant later the neighbour repeats the metric it is already advertising.
+        // Nothing about the route has changed, so this exists only to take a sample.
         let t1 = t0 + SMOOTHING_TAU;
         send_updates(
             &mut r,
@@ -2087,7 +2115,7 @@ mod test {
         assert_eq!(
             route.computed_metric,
             Metric::from_raw(300 + LINK_COST),
-            "the computed metric follows the update immediately"
+            "the computed metric is unchanged by a repeat of the same advertisement"
         );
         // round(120 + (320 - 120) * 0.6321) == 246
         assert_eq!(
@@ -2097,7 +2125,7 @@ mod test {
         );
         assert_eq!(
             route.smoothed_metric_time, t1,
-            "the step is measured from the last update, so the stamp has to advance"
+            "the step is measured from the last sample, so the stamp has to advance"
         );
     }
 
@@ -2402,11 +2430,7 @@ mod test {
 
         // Drive the selected route to infinity behind selection's back, the way an expiry sweep
         // would, so the next run has a real change to report.
-        for route in r
-            .route_table
-            .iter_mut_entries()
-            .filter(|route| route.selected)
-        {
+        for route in r.route_table.iter_mut().filter(|route| route.selected) {
             route.computed_metric = Metric::INFINITY;
         }
 
@@ -2433,6 +2457,13 @@ mod test {
     ///
     /// Neighbour 1 has the *worse* real metric and the *better* smoothed one, and it also sorts
     /// first in the route table, so it is the entry a scan over the group reaches first.
+    ///
+    /// Neighbour 1's fall is put in the same packet as the advertisement it replaces, and the
+    /// update at `t1` only repeats it. A metric change never moves ms(R) on the step it arrives on
+    /// — that step belongs to the metric that preceded it (see [`Route::update_cost`]) — so the
+    /// fall needs a later sample to reach the smoothed metric, and the neighbours' IHU hold time
+    /// leaves no room to spend a whole time constant on each. Neighbour 2 needs no such sample: its
+    /// metric has never moved, so no amount of smoothing shifts it off 270.
     fn diverged_metrics(r: &mut BabelRouter<'static>, iface: InterfaceHandle, t0: Instant) {
         send_updates(
             r,
@@ -2440,7 +2471,10 @@ mod test {
             iface,
             NEIGHBOUR_1_ADDR,
             ORIGIN_1,
-            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+            &[
+                UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100),
+                UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 300),
+            ],
         );
         let t1 = t0 + SMOOTHING_TAU;
         send_updates(
@@ -2484,7 +2518,7 @@ mod test {
             iface,
             addr: neighbour.into(),
         };
-        for route in r.route_table.iter_mut_entries() {
+        for route in r.route_table.iter_mut() {
             route.selected = *route.neigbour() == idx;
         }
     }
@@ -2506,7 +2540,7 @@ mod test {
 
         // Clear the selection the updates left behind. This is the state a destination is in when
         // every route towards it has just come back from having been retracted.
-        for route in r.route_table.iter_mut_entries() {
+        for route in r.route_table.iter_mut() {
             route.selected = false;
         }
 
@@ -2611,6 +2645,125 @@ mod test {
         assert!(
             is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
             "the destination moves to the only route still eligible for it"
+        );
+    }
+
+    /// Appendix A.3's `m(R') < m(R) && ms(R') < ms(R)` is a condition every candidate answers for
+    /// itself, not a description of which single candidate to ask. Testing only the lowest-metric
+    /// route lets a route that fails the smoothed half stand in front of one that passes both, and
+    /// holds the destination on a route worse than either.
+    ///
+    /// It takes three routes to show this. With two, the lowest-metric route is the only one that
+    /// could pass at all: passing requires beating the incumbent's metric, and if some route does
+    /// that then either it is the minimum or the minimum is the incumbent itself.
+    ///
+    /// * neighbour 1 (incumbent) — 120, smoothed 120: steady, and the route to beat;
+    /// * neighbour 2 — 90, smoothed 175: the lowest metric on offer, but it only just fell there
+    ///   from 320, so the smoothed metric has not accepted it yet;
+    /// * neighbour 3 — 115, smoothed 115: worse than neighbour 2 but better than the incumbent on
+    ///   both measures, which is exactly what A.3 asks to be switched to.
+    #[test]
+    fn a_challenger_failing_on_the_smoothed_metric_does_not_shadow_one_that_passes() {
+        let mut r = router("node_1");
+        let t0 = Instant::from_secs(0);
+        let iface = smoothing_setup(&mut r, t0);
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_2_ADDR);
+        established_neighbour(&mut r, t0, iface, NEIGHBOUR_3_ADDR);
+
+        // Neighbour 1 holds steady at 100. Neighbour 2 is born at 300 and falls to 70 in the same
+        // packet, so its smoothed metric starts a long way above where its real metric ends up.
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+        send_updates(
+            &mut r,
+            t0,
+            iface,
+            NEIGHBOUR_2_ADDR,
+            ORIGIN_1,
+            &[
+                UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 300),
+                UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 70),
+            ],
+        );
+
+        // One time constant on, both repeat what they are already advertising so that the fall
+        // reaches neighbour 2's smoothed metric, and neighbour 3 turns up with no history at all.
+        let t1 = t0 + SMOOTHING_TAU;
+        send_updates(
+            &mut r,
+            t1,
+            iface,
+            NEIGHBOUR_1_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100)],
+        );
+        send_updates(
+            &mut r,
+            t1,
+            iface,
+            NEIGHBOUR_2_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 70)],
+        );
+        send_updates(
+            &mut r,
+            t1,
+            iface,
+            NEIGHBOUR_3_ADDR,
+            ORIGIN_1,
+            &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 95)],
+        );
+
+        // Guard the premise. If the smoothing arithmetic moves, this should fail here rather than
+        // quietly turn into a test of something else.
+        let n1 = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN).expect("n1 route");
+        let n2 = route_for(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN).expect("n2 route");
+        let n3 = route_for(&mut r, iface, NEIGHBOUR_3_ADDR, PREFIX_A, PLEN).expect("n3 route");
+        assert_eq!(
+            (n1.computed_metric, n1.smoothed_metric),
+            (Metric::from_raw(120), Metric::from_raw(120)),
+            "the incumbent is steady"
+        );
+        // round(320 + (90 - 320) * 0.6321) == 175
+        assert_eq!(
+            (n2.computed_metric, n2.smoothed_metric),
+            (Metric::from_raw(90), Metric::from_raw(175)),
+            "the lowest metric on offer, with a smoothed metric that has not caught up"
+        );
+        assert_eq!(
+            (n3.computed_metric, n3.smoothed_metric),
+            (Metric::from_raw(115), Metric::from_raw(115)),
+            "a brand new route is its own history"
+        );
+
+        force_selected(&mut r, iface, NEIGHBOUR_1_ADDR);
+
+        assert!(
+            r.select_routes(),
+            "the destination moves off the incumbent, which is what triggers an update"
+        );
+        assert!(
+            is_selected(&mut r, iface, NEIGHBOUR_3_ADDR, PREFIX_A, PLEN),
+            "neighbour 3 beats the incumbent on both measures, so it takes the destination"
+        );
+        assert!(
+            !is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
+            "the lowest metric still loses on the smoothed one, so it is refused as before"
+        );
+        assert!(
+            !is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+            "and the incumbent does not keep a destination two routes are better for"
+        );
+
+        assert!(
+            !r.select_routes(),
+            "and once reported the state is stable again"
         );
     }
 }

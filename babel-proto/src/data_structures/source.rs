@@ -1,12 +1,9 @@
-use core::ops::Deref;
-
+use crate::data_types::RouterId;
 use crate::data_types::address::Address;
 use crate::data_types::seqno::SeqNo;
-use crate::data_types::{RouterId, seqno};
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::metric::distance::Feasibility;
-use crate::packet::parser::ResolvedUpdate;
 use crate::utils::ManagedSlice;
 use crate::utils::storage::{InternallyKeyed, ManagedSliceExt};
 

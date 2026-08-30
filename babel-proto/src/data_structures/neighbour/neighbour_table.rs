@@ -101,7 +101,7 @@ where
         &mut self,
         iface: InterfaceHandle,
     ) -> impl Iterator<Item = &mut Neighbour<A>> {
-        self.iter_mut().filter(move |n| n.iface == iface)
+        self.iter_mut().filter(move |n| n.interface() == &iface)
     }
 
     //  _    _          _   _ _____  _      ______

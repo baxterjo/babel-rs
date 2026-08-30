@@ -52,8 +52,16 @@ where
         }
     }
 
-    pub(crate) fn iter_mut_entries(&mut self) -> impl Iterator<Item = &mut Route<A>> {
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<A>> {
         self.inner.iter_mut().filter_map(|e| e.as_mut())
+    }
+
+    pub(crate) fn iter_mut_slots(&mut self) -> impl Iterator<Item = &mut Option<Route<A>>> {
+        self.inner.iter_mut()
+    }
+
+    pub(crate) fn flush(&mut self) {
+        self.inner.flush();
     }
 
     /// Route aquisition as defined in section
@@ -187,10 +195,7 @@ where
     /// route's expiry timer only when the advertised metric is finite, so a retracted route runs
     /// out the hold time it already had and is flushed when that timer fires.
     pub(crate) fn handle_blanket_retraction(&mut self, neighbour: &Neighbour<A>) {
-        for route in self
-            .iter_mut_entries()
-            .filter(|r| *r.neigbour() == neighbour.key())
-        {
+        for route in self.iter_mut().filter(|r| *r.neigbour() == neighbour.key()) {
             route.advertised_metric = Metric::INFINITY;
             route.computed_metric = Metric::INFINITY;
         }
@@ -231,10 +236,6 @@ where
         for route in self.iter_mut().filter(|r| r.neigbour() == &neighbour.key()) {
             route.update_cost(now, interface, neighbour, &smoothing_mul);
         }
-    }
-
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<A>> {
-        self.inner.iter_mut().filter_map(|r| r.as_mut())
     }
 
     /// Groups the routes in the table by the destination (prefix, plen) they lead to.
