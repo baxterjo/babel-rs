@@ -353,7 +353,6 @@ fn ihu_is_addressed_to_us<A: AddressExt>(
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
-    use alloc::vec;
     use alloc::vec::Vec;
     use core::net::Ipv6Addr;
 
@@ -365,10 +364,13 @@ mod test {
     use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Interval, RouterId};
     use crate::extension::NoExtension;
-    use crate::metric::{Metric, TxCost};
+    use crate::metric::{Metric, RxCost, TxCost};
+    use crate::output::DatagramSend;
     use crate::packet::packet_header::PacketHeader;
     use crate::packet::tlv::hello_slice::HelloFlags;
-    use crate::packet::tlv::{NextHopSlice, RouterIdSlice, TypedTlv};
+    use crate::packet::tlv::update_slice::UpdateFlags;
+    use crate::packet::writer::ready::Ready;
+    use crate::packet::writer::{PacketWriter, PacketWriterStep};
     use crate::router::config::{BabelRouterConfig, DEFAULT_ROUTE_EXPIRY_TIME};
     use crate::utils::{Duration, InternallyKeyed};
 
@@ -390,28 +392,108 @@ mod test {
         InterfaceHandle::try_from(name).expect("bad interface handle")
     }
 
-    /// Wraps a TLV body in a Babel packet header.
-    fn packet(body: &[u8]) -> Vec<u8> {
-        let mut out = vec![PacketHeader::MAGIC_NUMBER, PacketHeader::VERSION_NUMBER];
-        out.extend_from_slice(&(body.len() as u16).to_be_bytes());
-        out.extend_from_slice(body);
-        out
-    }
+    /// Builds a packet with the same writer the router emits packets through, so what arrives at
+    /// [`BabelRouter::handle_input`] is framed the way a real Babel node would have framed it
+    /// rather than by a second, test-only encoder that can drift from it.
+    struct PacketBuilder(PacketWriterStep<'static, Ready>);
 
-    fn hello_tlv(seqno: u16, interval_centis: u16) -> [u8; 8] {
-        let flags = HelloFlags::new_multicast().to_wire();
-        let seqno = seqno.to_be_bytes();
-        let interval = interval_centis.to_be_bytes();
-        [
-            HelloSlice::TYPE_ID,
-            HelloSlice::MIN_LEN as u8,
-            flags[0],
-            flags[1],
-            seqno[0],
-            seqno[1],
-            interval[0],
-            interval[1],
-        ]
+    impl PacketBuilder {
+        fn new() -> Self {
+            Self(
+                PacketWriter::new_packet(
+                    PacketHeader::MAGIC_NUMBER,
+                    PacketHeader::VERSION_NUMBER,
+                    Vec::new(),
+                )
+                .expect("packet writer should start"),
+            )
+        }
+
+        fn hello(self, seqno: u16, interval_centis: u16) -> Self {
+            Self(
+                self.0
+                    .write_hello(
+                        HelloFlags::new_multicast(),
+                        SeqNo(seqno),
+                        Duration::from_centis(interval_centis.into()).into(),
+                    )
+                    .expect("hello should write")
+                    .finish_tlv()
+                    .expect("hello should finish"),
+            )
+        }
+
+        /// An IHU carrying a full 16-octet IPv6 destination address (AE 2).
+        fn ihu(self, rx_cost: u16, interval_centis: u16, address: Ipv6Addr) -> Self {
+            self.ihu_inner(2, rx_cost, interval_centis, &address.octets())
+        }
+
+        /// An IHU with the wildcard encoding (AE 0), which omits the address entirely.
+        fn wildcard_ihu(self, rx_cost: u16, interval_centis: u16) -> Self {
+            self.ihu_inner(0, rx_cost, interval_centis, &[])
+        }
+
+        fn ihu_inner(self, ae: u8, rx_cost: u16, interval_centis: u16, address: &[u8]) -> Self {
+            Self(
+                self.0
+                    .write_ihu(
+                        ae,
+                        RxCost::from_raw(rx_cost),
+                        Duration::from_centis(interval_centis.into()).into(),
+                        address,
+                    )
+                    .expect("ihu should write")
+                    .finish_tlv()
+                    .expect("ihu should finish"),
+            )
+        }
+
+        /// `RouterId::from` rather than `RouterId::new`, so these tests can still send the
+        /// all-zeroes and all-ones ids the constructor rejects.
+        fn router_id(self, id: [u8; 8]) -> Self {
+            Self(
+                self.0
+                    .write_router_id(RouterId::from(&id))
+                    .expect("router id should write")
+                    .finish_tlv()
+                    .expect("router id should finish"),
+            )
+        }
+
+        fn next_hop(self, ae: u8, address: &[u8]) -> Self {
+            Self(
+                self.0
+                    .write_next_hop(ae, address)
+                    .expect("next hop should write")
+                    .finish_tlv()
+                    .expect("next hop should finish"),
+            )
+        }
+
+        fn update(self, update: &UpdateTlv) -> Self {
+            Self(
+                self.0
+                    .write_update(
+                        update.ae,
+                        UpdateFlags::from(update.flags),
+                        update.plen,
+                        update.omitted,
+                        Duration::from_centis(update.interval_centis.into()).into(),
+                        SeqNo(update.seqno),
+                        Metric::from_raw(update.metric),
+                        &update.prefix,
+                    )
+                    .expect("update should write")
+                    .finish_tlv()
+                    .expect("update should finish"),
+            )
+        }
+
+        fn build(self) -> Vec<u8> {
+            let datagram: DatagramSend<'_> =
+                self.0.finish_packet().expect("packet should finish").into();
+            datagram.into()
+        }
     }
 
     fn receive<'a>(
@@ -426,33 +508,6 @@ mod test {
             destination,
             contents,
         }
-    }
-
-    /// An IHU with the wildcard encoding (AE=0), which omits the address entirely.
-    fn wildcard_ihu_tlv(rx_cost: u16, interval_centis: u16) -> Vec<u8> {
-        let mut out = vec![
-            IhuSlice::TYPE_ID,
-            IhuSlice::MIN_LEN as u8,
-            0, // AE = wildcard
-            0, // Reserved
-        ];
-        out.extend_from_slice(&rx_cost.to_be_bytes());
-        out.extend_from_slice(&interval_centis.to_be_bytes());
-        out
-    }
-
-    /// An IHU carrying a full 16-byte IPv6 destination address (AE=2).
-    fn ihu_tlv(rx_cost: u16, interval_centis: u16, address: Ipv6Addr) -> Vec<u8> {
-        let mut out = vec![
-            IhuSlice::TYPE_ID,
-            (IhuSlice::MIN_LEN + 16) as u8,
-            2, // AE = Ipv6
-            0, // Reserved
-        ];
-        out.extend_from_slice(&rx_cost.to_be_bytes());
-        out.extend_from_slice(&interval_centis.to_be_bytes());
-        out.extend_from_slice(&address.octets());
-        out
     }
 
     fn tx_cost(r: &BabelRouter<'static>, iface: InterfaceHandle, addr: Ipv6Addr) -> TxCost {
@@ -574,44 +629,6 @@ mod test {
             self.interval_centis = centis;
             self
         }
-
-        fn to_wire(&self) -> Vec<u8> {
-            let mut out = vec![
-                UpdateSlice::TYPE_ID,
-                (UpdateSlice::MIN_LEN + self.prefix.len()) as u8,
-                self.ae,
-                self.flags,
-                self.plen,
-                self.omitted,
-            ];
-            out.extend_from_slice(&self.interval_centis.to_be_bytes());
-            out.extend_from_slice(&self.seqno.to_be_bytes());
-            out.extend_from_slice(&self.metric.to_be_bytes());
-            out.extend_from_slice(&self.prefix);
-            out
-        }
-    }
-
-    fn router_id_tlv(id: [u8; 8]) -> Vec<u8> {
-        let mut out = vec![
-            RouterIdSlice::TYPE_ID,
-            RouterIdSlice::MIN_LEN as u8,
-            0, // Reserved
-            0, // Reserved
-        ];
-        out.extend_from_slice(&id);
-        out
-    }
-
-    fn next_hop_tlv(ae: u8, address: &[u8]) -> Vec<u8> {
-        let mut out = vec![
-            NextHopSlice::TYPE_ID,
-            (NextHopSlice::MIN_LEN + address.len()) as u8,
-            ae,
-            0, // Reserved
-        ];
-        out.extend_from_slice(address);
-        out
     }
 
     /// The hold time a route advertising `interval_centis` should end up with.
@@ -629,11 +646,11 @@ mod test {
         router_id: [u8; 8],
         updates: &[UpdateTlv],
     ) {
-        let mut body = router_id_tlv(router_id);
+        let mut builder = PacketBuilder::new().router_id(router_id);
         for update in updates {
-            body.extend_from_slice(&update.to_wire());
+            builder = builder.update(update);
         }
-        let pkt = packet(&body);
+        let pkt = builder.build();
 
         r.handle_input(
             now,
@@ -678,7 +695,7 @@ mod test {
         addr: Ipv6Addr,
     ) {
         for seqno in 0..2 {
-            let pkt = packet(&hello_tlv(seqno, 100));
+            let pkt = PacketBuilder::new().hello(seqno, 100).build();
             r.handle_input(
                 now,
                 receive(iface, addr, ReceiveDestination::Multicast, &pkt),
@@ -686,7 +703,7 @@ mod test {
             .expect("hello should be handled");
         }
 
-        let pkt = packet(&ihu_tlv(LINK_COST, 100, NODE_ADDR));
+        let pkt = PacketBuilder::new().ihu(LINK_COST, 100, NODE_ADDR).build();
         r.handle_input(
             now,
             receive(iface, addr, ReceiveDestination::Multicast, &pkt),
@@ -730,7 +747,7 @@ mod test {
         drained_iface(&mut r, t0, "iface_1");
 
         let unknown = iface_handle("nope");
-        let pkt = packet(&hello_tlv(0, 100));
+        let pkt = PacketBuilder::new().hello(0, 100).build();
 
         let err = r
             .handle_input(
@@ -796,7 +813,7 @@ mod test {
         }
 
         // Addressed to us (NODE_ADDR), sent by neighbour 1.
-        let pkt = packet(&ihu_tlv(77, 100, NODE_ADDR));
+        let pkt = PacketBuilder::new().ihu(77, 100, NODE_ADDR).build();
         r.handle_input(
             t0,
             receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Multicast, &pkt),
@@ -828,9 +845,10 @@ mod test {
             .expect("add_neighbour should succeed");
 
         // Neighbour 1 multicasts two IHUs: one for us, one for neighbour 2.
-        let mut body = ihu_tlv(11, 100, NODE_ADDR);
-        body.extend_from_slice(&ihu_tlv(22, 100, NEIGHBOUR_2_ADDR));
-        let pkt = packet(&body);
+        let pkt = PacketBuilder::new()
+            .ihu(11, 100, NODE_ADDR)
+            .ihu(22, 100, NEIGHBOUR_2_ADDR)
+            .build();
 
         r.handle_input(
             t0,
@@ -863,7 +881,7 @@ mod test {
         let t0 = Instant::from_secs(0);
         let iface = drained_iface(&mut r, t0, "iface_1");
 
-        let pkt = packet(&wildcard_ihu_tlv(33, 100));
+        let pkt = PacketBuilder::new().wildcard_ihu(33, 100).build();
         r.handle_input(
             t0,
             receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Unicast, &pkt),
@@ -879,7 +897,7 @@ mod test {
         let t0 = Instant::from_secs(0);
         let iface = drained_iface(&mut r, t0, "iface_1");
 
-        let pkt = packet(&wildcard_ihu_tlv(33, 100));
+        let pkt = PacketBuilder::new().wildcard_ihu(33, 100).build();
         r.handle_input(
             t0,
             receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Multicast, &pkt),
@@ -913,9 +931,10 @@ mod test {
         let iface = drained_iface(&mut r, t0, "iface_1");
 
         // An interval of zero is rejected by the IHU hold timer, so this TLV fails to handle.
-        let mut body = ihu_tlv(50, 0, NODE_ADDR);
-        body.extend_from_slice(&hello_tlv(0, 100));
-        let pkt = packet(&body);
+        let pkt = PacketBuilder::new()
+            .ihu(50, 0, NODE_ADDR)
+            .hello(0, 100)
+            .build();
 
         r.handle_input(
             t0,
@@ -963,7 +982,7 @@ mod test {
         }
 
         // Sent directly to us: the Address field carries our own address, not the sender's.
-        let pkt = packet(&ihu_tlv(42, 100, NODE_ADDR));
+        let pkt = PacketBuilder::new().ihu(42, 100, NODE_ADDR).build();
         r.handle_input(
             t0,
             receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Unicast, &pkt),
@@ -1117,7 +1136,9 @@ mod test {
         established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
 
         // The packet body is the Update alone — no preceding Router-Id TLV.
-        let pkt = packet(&UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).to_wire());
+        let pkt = PacketBuilder::new()
+            .update(&UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100))
+            .build();
         r.handle_input(
             t0,
             receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Multicast, &pkt),
@@ -1138,10 +1159,11 @@ mod test {
         let iface = drained_iface(&mut r, t0, "iface_1");
         established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
 
-        let mut body = router_id_tlv(ORIGIN_1);
-        body.extend_from_slice(&next_hop_tlv(2, &NEXT_HOP.octets()));
-        body.extend_from_slice(&UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).to_wire());
-        let pkt = packet(&body);
+        let pkt = PacketBuilder::new()
+            .router_id(ORIGIN_1)
+            .next_hop(2, &NEXT_HOP.octets())
+            .update(&UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100))
+            .build();
 
         r.handle_input(
             t0,
@@ -1617,7 +1639,9 @@ mod test {
         );
 
         // The packet body is the retraction alone — no Router-Id TLV in front of it.
-        let pkt = packet(&UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE).to_wire());
+        let pkt = PacketBuilder::new()
+            .update(&UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE))
+            .build();
         r.handle_input(
             t0,
             receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Multicast, &pkt),
@@ -1803,7 +1827,9 @@ mod test {
         );
 
         // The packet body is the blanket retraction alone — no Router-Id TLV in front of it.
-        let pkt = packet(&UpdateTlv::blanket_retraction().to_wire());
+        let pkt = PacketBuilder::new()
+            .update(&UpdateTlv::blanket_retraction())
+            .build();
         r.handle_input(
             t0,
             receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Multicast, &pkt),

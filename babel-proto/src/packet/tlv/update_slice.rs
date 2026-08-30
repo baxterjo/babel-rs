@@ -308,6 +308,10 @@ impl UpdateFlags {
     pub(crate) fn is_prefix(&self) -> bool {
         self.0 & 1 << 7 > 0
     }
+
+    pub(crate) fn to_wire(&self) -> [u8; 1] {
+        [self.0]
+    }
 }
 
 impl Debug for UpdateFlags {
