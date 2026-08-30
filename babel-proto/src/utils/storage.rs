@@ -23,7 +23,7 @@ pub(crate) trait InternallyKeyed: Sized {
     /// Sorts the values in the slice by their key.
     ///
     /// The locate method requires a sorted slice.
-    fn my_sort(slice: &mut [Option<Self>]) {
+    fn _my_sort(slice: &mut [Option<Self>]) {
         // This data structure is deduplicated by key, so unstable sort is stable.
         //
         // Unstable sort is called unstable because it does not guarantee the ordering of equal
@@ -63,10 +63,9 @@ where
     ///
     /// Returns None if there is no value for the given key.
     fn get_mut_by_key(&mut self, key: &K) -> Option<&mut V>;
-    /// Retains only the elements specified by the predicate.
-    fn retain<F>(&mut self, f: F)
-    where
-        F: FnMut(&V) -> bool;
+
+    /// Flushes the None values from the slice (if applicable)
+    fn flush(&mut self);
 }
 
 impl<'storage, K, V> ManagedSliceExt<K, V> for ManagedSlice<'storage, Option<V>>
@@ -113,14 +112,14 @@ where
             }
         };
         // Ensure the slice is sorted after modifying it.
-        V::my_sort(&mut self[..]);
+        V::_my_sort(&mut self[..]);
         Ok(old_opt)
     }
 
     fn remove(&mut self, key: &K) -> Option<V> {
         let out = V::locate(&self[..], key).and_then(|idx| self[idx].take());
         // Ensure the slice is sorted after modifying it.
-        V::my_sort(&mut self[..]);
+        V::_my_sort(&mut self[..]);
         out
     }
 
@@ -134,20 +133,12 @@ where
         self.get_mut(idx)?.as_mut()
     }
 
-    fn retain<F>(&mut self, mut f: F)
-    where
-        F: FnMut(&V) -> bool,
-    {
-        for item_opt in self.iter_mut() {
-            let Some(v) = item_opt.as_ref() else {
-                continue;
-            };
-            // If the
-            if !f(v) {
-                *item_opt = None;
-            }
+    fn flush(&mut self) {
+        if let ManagedSlice::Owned(owned) = self {
+            owned.retain(|e| e.is_some());
         }
-        V::my_sort(&mut self[..]);
+        // Ensure the slice is sorted after modifying it.
+        V::_my_sort(&mut self[..]);
     }
 }
 

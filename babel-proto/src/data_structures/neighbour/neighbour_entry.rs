@@ -61,10 +61,16 @@ impl<A: AddressExt> core::fmt::Display for NeighbourIndex<A> {
 pub struct Neighbour<A: AddressExt> {
     // Protocol state as defined by SPEC
     /// the local node's interface over which this neighbour is reachable
-    pub(crate) iface: InterfaceHandle,
+    ///
+    /// This can never be public as it is part of this struct's key. The key cannot be changed
+    /// after the struct is instantiated.
+    iface: InterfaceHandle,
 
     /// the address of the neighbouring interface
-    pub(crate) address: Address<A>,
+    ///
+    /// This can never be public as it is part of this struct's key. The key cannot be changed
+    /// after the struct is instantiated.
+    address: Address<A>,
 
     /// a history of recently received Multicast Hello packets from this neighbour; this
     /// can, for example, be a sequence of n bits, for some small value n, indicating which of the
@@ -153,6 +159,14 @@ impl<A: AddressExt> Neighbour<A> {
                 outbound_ihu_timer: Timer::eager_from_interval(now, config.outbound_ihu_interval)?,
             },
         })
+    }
+
+    pub(crate) fn interface(&self) -> &InterfaceHandle {
+        &self.iface
+    }
+
+    pub(crate) fn address(&self) -> &Address<A> {
+        &self.address
     }
 
     //  _    _          _   _ _____  _      ______
@@ -263,12 +277,15 @@ impl<A: AddressExt> Neighbour<A> {
     // | __ |/ _ \| .` | |) | |__| _|   | || __ | |_| |
     // |_||_/_/ \_\_|\_|___/|____|___| |___|_||_|\___/
 
+    /// Handles an incoming IHU from this neighbour.
+    ///
+    /// Returns `true` if the route selection procedure needs to be run.
     pub(crate) fn handle_ihu(
         &mut self,
         now: Instant,
         ihu: IhuSlice<'_>,
         hold_time: DurationMultiplier,
-    ) -> Result<(), NeighbourError<A>> {
+    ) -> Result<bool, NeighbourError<A>> {
         let rx_cost = ihu.rx_cost();
         let interval = ihu.interval();
 
@@ -276,9 +293,11 @@ impl<A: AddressExt> Neighbour<A> {
 
         self.ihu_hold_timer = Timer::from_duration(now, timer_dur * hold_time)?;
 
+        let run_selection = self.tx_cost != rx_cost.into();
+
         self.tx_cost = rx_cost.into();
 
-        Ok(())
+        Ok(run_selection)
     }
 
     //  _____   ____  _      _         ____  _    _ _______ _____  _    _ _______
@@ -288,6 +307,22 @@ impl<A: AddressExt> Neighbour<A> {
     // | |    | |__| | |____| |____  | |__| | |__| |  | |  | |    | |__| |  | |
     // |_|     \____/|______|______|  \____/ \____/   |_|  |_|     \____/   |_|
 
+    pub(crate) fn poll_tick(&mut self, now: Instant) -> (bool, Option<Duration>) {
+        let (mcast_update, mcast_dur) = self.mcast_hello_info.poll_tick(now);
+        let (ucast_update, ucast_dur) = self.ucast_hello_info.poll_tick(now);
+        // If the IHU expires, set tx_cost to infinity, this requires an update.
+        let expiry_update = if self.ihu_hold_timer.is_finished(now) {
+            self.tx_cost = TxCost::INFINITY;
+            true
+        } else {
+            false
+        };
+
+        (
+            mcast_update || ucast_update || expiry_update,
+            [mcast_dur, ucast_dur].into_iter().flatten().min(),
+        )
+    }
     //  ___  ___  _    _      _   _  ___   _   ___ _____   _  _ ___ _    _    ___
     // | _ \/ _ \| |  | |    | | | |/ __| /_\ / __|_   _| | || | __| |  | |  / _ \
     // |  _/ (_) | |__| |__  | |_| | (__ / _ \\__ \ | |   | __ | _|| |__| |_| (_) |
@@ -466,34 +501,19 @@ impl RxHelloInfo {
         }
     }
 
-    /// `advertised_interval` is the raw Interval from the Hello; the jitter margin is applied here
-    /// so that callers cannot forget it.
-    pub(crate) fn new_from_hello(
-        now: Instant,
-        received_seqno: SeqNo,
-        advertised_interval: Interval,
-    ) -> Result<Self, TimerError> {
-        let mut out = Self {
-            history: BitHistory::default(),
-            // This hello is about to be recorded below, so the next one this neighbour sends is
-            // the one being waited on.
-            expected_seqno: Some(received_seqno + 1),
-            timer: Timer::from_duration(now, *advertised_interval * HELLO_INTERVAL_MULTIPLIER)?,
-        };
-        // Since this is originated from a hello, the history needs at least one recorded hello.
-        out.history.record(true);
-        Ok(out)
-    }
-
-    /// Records a missed hello (if applicable) and returns the time remaining until it fires.
-    fn poll_tick(&mut self, now: Instant) -> Option<Duration> {
+    /// Records a missed hello (if applicable)
+    ///
+    /// Returns a tuple:
+    /// * 0: `true` if the history was modified and cost needs to be recalculated.
+    /// * 1: The duration until the next timer fires (if applicable)
+    fn poll_tick(&mut self, now: Instant) -> (bool, Option<Duration>) {
         // If we have never received a seqno for this rx info, there is nothing to do.
         if self.expected_seqno.is_none() {
-            return None;
+            return (false, None);
         }
         // If this timer has not fired, return the duration it has remaining.
         if let Some(remaining) = self.timer.time_remaining(now) {
-            return Some(remaining);
+            return (false, Some(remaining));
         }
 
         // Appendix A.1: "the local node adds a 0 bit to the corresponding Hello history, and
@@ -504,7 +524,7 @@ impl RxHelloInfo {
         self.expected_seqno.as_mut().map(|seq| *seq = *seq + 1);
 
         self.timer.restart(now);
-        Some(self.timer.duration())
+        (true, Some(self.timer.duration()))
     }
 
     fn record_hello(

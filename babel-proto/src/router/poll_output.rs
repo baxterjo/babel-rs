@@ -3,16 +3,17 @@ use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
+use crate::metric::Metric;
 use crate::output::{Output, Transmit};
 use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
 use crate::utils::destination::DestAddr;
-use crate::utils::{Duration, Instant, ManagedSlice};
+use crate::utils::{Duration, Instant, ManagedSlice, ManagedSliceExt};
 
 impl<'storage, A, P> BabelRouter<'storage, P, A>
 where
     A: AddressExt,
-    P: ParserStateExt,
+    P: ParserStateExt<AddressEncoding = A::Encoding, Address = A>,
 {
     /// Polls output from the router.
     ///
@@ -30,7 +31,7 @@ where
     /// Polls output for the given interface from the router.
     ///
     /// This is a useful optimization if other interfaces are busy. If the returned [`Output`] is
-    /// of the `SetTimer` variant, it is specific to the polled interface.
+    /// of the `SetTimer` variant, is not guaranteed to be specific to the polled interface.
     ///
     /// The returned [`Output`] owns its payload, so it does not borrow from the router and can
     /// outlive this call.
@@ -65,7 +66,7 @@ where
     /// efficiency with packed packets.
     ///
     /// This is a useful optimization if other interfaces are busy. If the returned [`Output`] is
-    /// of the `SetTimer` variant, it is specific to the polled interface.
+    /// of the `SetTimer` variant, it is not guaranteed to be specific to the polled interface.
     pub fn poll_output_for_iface_with_buf<'output, B>(
         &mut self,
         now: Instant,
@@ -96,10 +97,18 @@ where
             poll_only
         );
 
+        // Poll time based state.
+        let (run_selection, next_poll) = self.poll_tick(now)?;
+
+        // Run selection if necessary.
+        if run_selection {
+            self.select_routes();
+        }
+
         let writer = PacketWriter::new_packet(self.magic_number, self.version_number, buf.into())?;
 
         // Poll the body of the packet.
-        let (iface, dest, body) = match self.poll_packet_body(now, poll_only, writer)? {
+        let (iface, dest, body) = match self.poll_packet_body(now, next_poll, poll_only, writer)? {
             // This is the only place where meaningful TLV's can be located, so if the PollEvent
             // returns `Wait` then the router has nothing to do and we can return early.
             PollEvent::Wait(dur) => {
@@ -124,10 +133,58 @@ where
         Ok(output)
     }
 
+    /// Polls and updates all of the time based states.
+    pub(super) fn poll_tick(
+        &mut self,
+        now: Instant,
+    ) -> Result<(bool, Option<Duration>), BabelError<A>> {
+        let mut next_poll = None;
+        let mut run_selection = false;
+
+        // Check for missing hellos from neighbours.
+        for neighbour in self.neighbor_table.iter_mut() {
+            let (update, remaining) = neighbour.poll_tick(now);
+            next_poll = [remaining, next_poll].into_iter().flatten().min();
+            if update {
+                let interface = self
+                    .iface_table
+                    .inner
+                    .get_by_key(neighbour.interface())
+                    .ok_or(BabelError::InterfaceDoesntExist(*neighbour.interface()))?;
+                self.route_table
+                    .update_cost_for_neighbour(now, interface, neighbour);
+                run_selection |= true;
+            }
+        }
+
+        // Check for expired routes.
+        for route_opt in self.route_table.iter_mut_slots() {
+            if let Some(route) = route_opt {
+                if route.expiry.is_finished(now) {
+                    // If the route has expired and the advertised metric is not yet infinity, set
+                    // it to infinity and reset the timer.
+                    if route.advertised_metric != Metric::INFINITY {
+                        route.advertised_metric = Metric::INFINITY;
+                        route.computed_metric = Metric::INFINITY;
+                        route.expiry.restart(now);
+                    } else {
+                        // If the metric was already infinity, flush the route.
+                        *route_opt = None;
+                    }
+                    run_selection |= true;
+                }
+            }
+        }
+        // Flushes and sorts the route table after modifying it.
+        self.route_table.flush();
+        Ok((run_selection, next_poll))
+    }
+
     /// Polls the router for outgoing TLV's in the packet body.
     fn poll_packet_body<'output>(
         &mut self,
         now: Instant,
+        next_poll: Option<Duration>,
         poll_only: Option<InterfaceHandle>,
         mut writer: PacketWriterStep<'output, Ready>,
     ) -> Result<PollEvent<'output, A>, BabelError<A>> {
@@ -151,8 +208,8 @@ where
         // least one interface is registered, a scoped poll names one that exists, and every
         // interface contributes its multicast Hello timer on every path that reaches the
         // end of the loop. The check after the loop rejects it if that ever stops holding.
-        let mut next_poll = Duration::MAX;
-        for interface in self.iface_table.iter_mut(poll_only) {
+        let mut next_poll = next_poll.unwrap_or(Duration::MAX);
+        for interface in self.iface_table.iter_mut_filter(poll_only) {
             /// Macro for writer error handling.
             macro_rules! ok_or_try_send {
                 ($result:expr) => {
@@ -207,12 +264,12 @@ where
                     ));
                     if writer.has_tlvs() {
                         active_dest
-                            .claim(DestAddr::Unicast(neighbour.address))
+                            .claim(DestAddr::Unicast(*neighbour.address()))
                             .expect("Active destination should be free.");
                     }
                 }
 
-                if active_dest.can_send_ihu(&neighbour.address) {
+                if active_dest.can_send_ihu(neighbour.address()) {
                     b_trace!("Polling for IHUs");
                     writer = ok_or_try_send!(neighbour.poll_for_ihu(
                         now,

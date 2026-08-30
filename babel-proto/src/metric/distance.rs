@@ -11,6 +11,7 @@ use core::fmt;
 use core::ops::Add;
 
 use crate::data_types::seqno::SeqNo;
+use crate::utils::Duration;
 
 /// Any distance that is 0xFFFF is considered "infinity"
 pub const INFINITY: u16 = 0xFFFF;
@@ -105,6 +106,31 @@ distance_newtype! {
     /// and the feasibility condition
     /// ([Section 3.5.1](https://datatracker.ietf.org/doc/html/rfc8966#name-the-feasibility-condition)).
     Metric
+}
+
+impl Metric {
+    /// Apply an exponential smoothing algorithm to this metric.
+    pub(crate) fn apply_smoothing(
+        &mut self,
+        other: Metric,
+        step_dur: Duration,
+        time_constant: Duration,
+    ) {
+        if step_dur == Duration::ZERO {
+            // If the time step was zero, then do nothing.
+            return;
+        }
+
+        // Get tau as f64 seconds with a div by zero protection.
+        let tau =
+            core::time::Duration::from(time_constant.max(Duration::from_micros(1))).as_secs_f64();
+        // Get delta_t as f64 seconds.
+        let delta_f64 = core::time::Duration::from(step_dur).as_secs_f64();
+
+        let alpha = 1.0 - libm::exp(-delta_f64 / tau);
+
+        self.0 = libm::round(self.0 as f64 + (other.0 as f64 - self.0 as f64) * alpha) as u16;
+    }
 }
 
 // `Cost` is deliberately *not* built with `distance_newtype!`: unlike
@@ -422,5 +448,180 @@ mod tests {
 
         assert!(!(a < b));
         assert!(!(b < a));
+    }
+
+    // ---- Metric smoothing -------------------------------------------------------------------
+    //
+    // `apply_smoothing` is the exponential smoothing Appendix A.3 asks for as the input to route
+    // selection hysteresis: alpha = 1 - e^(-dt/tau), and the smoothed metric moves `alpha` of the
+    // way towards the metric it is chasing.
+
+    /// One full time constant closes 1 - 1/e of the gap. Pinning the arithmetic keeps a refactor
+    /// from silently changing how fast hysteresis reacts to a metric change.
+    #[test]
+    fn one_time_constant_closes_the_expected_fraction_of_the_gap() {
+        let tau = Duration::from_secs(10);
+        let mut smoothed = Metric::from_raw(0);
+
+        smoothed.apply_smoothing(Metric::from_raw(100), tau, tau);
+
+        // round(0 + (100 - 0) * 0.6321) == 63
+        assert_eq!(smoothed, Metric::from_raw(63));
+    }
+
+    /// A metric that improves has to be smoothed at exactly the rate one that worsens is, or
+    /// hysteresis would bias selection in one direction.
+    #[test]
+    fn smoothing_runs_downwards_at_the_same_rate() {
+        let tau = Duration::from_secs(10);
+        let mut smoothed = Metric::from_raw(100);
+
+        smoothed.apply_smoothing(Metric::from_raw(0), tau, tau);
+
+        // round(100 + (0 - 100) * 0.6321) == 37, the mirror of the 63 above.
+        assert_eq!(smoothed, Metric::from_raw(37));
+    }
+
+    /// Two updates landing on the same `Instant` give a zero-length step. Smoothing over it would
+    /// be a no-op anyway once alpha is computed, but the early return is what keeps the second
+    /// update from being weighted as though time had passed.
+    #[test]
+    fn a_zero_time_step_leaves_the_metric_untouched() {
+        let mut smoothed = Metric::from_raw(50);
+
+        smoothed.apply_smoothing(
+            Metric::from_raw(900),
+            Duration::ZERO,
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(smoothed, Metric::from_raw(50));
+    }
+
+    /// After enough time constants alpha is 1.0 to the last bit of an f64, so nothing of the old
+    /// value survives: a route that goes quiet and comes back is not held to its history.
+    #[test]
+    fn a_long_step_lands_on_the_new_metric() {
+        let mut smoothed = Metric::from_raw(0);
+
+        smoothed.apply_smoothing(
+            Metric::from_raw(1000),
+            Duration::from_secs(40),
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(smoothed, Metric::from_raw(1000));
+    }
+
+    #[test]
+    fn an_unchanged_metric_is_a_fixed_point() {
+        let mut smoothed = Metric::from_raw(250);
+
+        smoothed.apply_smoothing(
+            Metric::from_raw(250),
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(smoothed, Metric::from_raw(250));
+    }
+
+    /// The time constant is derived from hello intervals, so a peer that advertises nothing usable
+    /// can drive it to zero. The floor at 1us is what keeps that from dividing by zero; the
+    /// consequence is that smoothing degenerates into taking the new metric outright.
+    #[test]
+    fn a_zero_time_constant_snaps_to_the_new_metric() {
+        let mut smoothed = Metric::from_raw(10);
+
+        smoothed.apply_smoothing(
+            Metric::from_raw(900),
+            Duration::from_secs(1),
+            Duration::ZERO,
+        );
+
+        assert_eq!(smoothed, Metric::from_raw(900));
+    }
+
+    /// Hysteresis is only meaningful if the smoothed metric approaches the real one from one side.
+    /// An overshoot would make a route look briefly better than it ever was.
+    #[test]
+    fn repeated_steps_approach_the_target_without_overshooting() {
+        let tau = Duration::from_secs(10);
+        let step = Duration::from_secs(2);
+        let target = Metric::from_raw(500);
+
+        let mut smoothed = Metric::from_raw(0);
+        let mut previous = smoothed;
+        for _ in 0..100 {
+            smoothed.apply_smoothing(target, step, tau);
+            assert!(
+                smoothed >= previous,
+                "smoothing towards a larger metric never runs backwards"
+            );
+            assert!(
+                smoothed <= target,
+                "smoothing never passes the metric it is chasing"
+            );
+            previous = smoothed;
+        }
+    }
+
+    /// The smoothed metric is a u16 and every step is rounded, so once `alpha * gap` falls below
+    /// half a unit the value stops moving. It settles a unit or two short of the target rather
+    /// than creeping onto it. Selection only ever compares smoothed metrics against each other, so
+    /// the offset is harmless — but it is worth pinning that this is a fixed point and not a slow
+    /// crawl, because a crawl would keep re-triggering comparisons forever.
+    #[test]
+    fn rounding_settles_just_short_of_the_target() {
+        let tau = Duration::from_secs(10);
+        let step = Duration::from_secs(2);
+        let target = Metric::from_raw(500);
+
+        let mut smoothed = Metric::from_raw(0);
+        for _ in 0..1000 {
+            smoothed.apply_smoothing(target, step, tau);
+        }
+
+        let settled = smoothed;
+        smoothed.apply_smoothing(target, step, tau);
+        assert_eq!(smoothed, settled, "the value has reached a fixed point");
+        assert!(settled < target, "rounding stops it short of the target");
+        assert!(
+            target.raw() - settled.raw() <= 3,
+            "but only just short, was {settled:?}"
+        );
+    }
+
+    /// Sampling much faster than the time constant moves the metric by less than half a unit per
+    /// step, which rounds away entirely. Frequent updates therefore make *no* progress rather than
+    /// slow progress, so the smoothed metric only tracks a change once the steps are comparable to
+    /// the time constant.
+    #[test]
+    fn a_step_far_shorter_than_the_time_constant_makes_no_progress() {
+        let tau = Duration::from_secs(1000);
+        let mut smoothed = Metric::from_raw(100);
+
+        for _ in 0..10 {
+            smoothed.apply_smoothing(Metric::from_raw(110), Duration::from_millis(1), tau);
+        }
+
+        assert_eq!(smoothed, Metric::from_raw(100));
+    }
+
+    /// Chasing infinity walks the smoothed metric through ordinary large-but-finite values, so a
+    /// smoothed metric must never be read as "this route is retracted". That is what route
+    /// selection's infinity check reads `computed_metric` for.
+    #[test]
+    fn smoothing_towards_infinity_passes_through_finite_values() {
+        let tau = Duration::from_secs(10);
+        let mut smoothed = Metric::from_raw(100);
+
+        smoothed.apply_smoothing(Metric::INFINITY, tau, tau);
+
+        assert!(
+            !smoothed.is_infinite(),
+            "a partially smoothed retraction is not itself a retraction"
+        );
+        assert!(smoothed.raw() > 100, "but it does move towards infinity");
     }
 }
