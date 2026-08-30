@@ -122,8 +122,20 @@ where
         address: Address<A>,
         hello: HelloSlice<'_>,
     ) -> Result<(), BabelError<A>> {
+        // Handle the incoming hello
         self.neighbor_table
             .handle_hello(now, interface, address, hello)?;
+
+        // Update the cost for the routes associated with this neighbour.
+        if let Some(neighbour) = self.neighbor_table.inner.get_by_key(&NeighbourIndex {
+            iface: interface.handle,
+            addr: address,
+        }) {
+            // This is behind a `Some` guard even after updating because if the neighbour table is
+            // full the `handle_hello` method can silently succeed.
+            self.route_table
+                .update_cost_for_neighbour(now, interface, &neighbour);
+        }
         Ok(())
     }
 
@@ -143,11 +155,24 @@ where
             return Ok(false);
         }
 
+        let updates = self
+            .neighbor_table
+            .handle_ihu(now, source_addr, interface, ihu)?;
+
+        // Update the cost for the routes associated with this neighbour.
+        if let Some(neighbour) = self.neighbor_table.inner.get_by_key(&NeighbourIndex {
+            iface: interface.handle,
+            addr: source_addr,
+        }) {
+            // This is behind a `Some` guard even after updating because if the neighbour table is
+            // full the `handle_ihu` method can silently succeed.
+            self.route_table
+                .update_cost_for_neighbour(now, interface, &neighbour);
+        }
+
         // The rxcost belongs to whoever sent the packet. Nothing inside a Babel packet names its
         // sender, so the transport's source address is the only thing that identifies them.
-        Ok(self
-            .neighbor_table
-            .handle_ihu(now, source_addr, interface, ihu)?)
+        Ok(updates)
     }
 
     //  _  _   _   _  _ ___  _    ___   _   _ ___ ___   _ _____ ___
@@ -295,7 +320,7 @@ where
 /// infinite metric has been retracted, and an unfeasible one risks a routing loop.
 fn is_eligible<A: AddressExt>(source_table: &SourceTable<'_, A>, route: &Route<A>) -> bool {
     route.computed_metric != Metric::INFINITY
-        && source_table.is_feasible(route.source(), route.computed_metric, route.seqno)
+        && source_table.is_feasible(route.source(), route.advertised_metric, route.seqno)
 }
 
 /// Decides whether an IHU was meant for this node.
@@ -2402,8 +2427,8 @@ mod test {
     /// Puts the two neighbours' routes towards PREFIX_A into the one state where the real metric
     /// and the smoothed metric disagree about which is better:
     ///
-    /// * neighbour 1 at computed 320, smoothed 246 — it used to be the good route and the
-    ///   smoothing has not caught up with how far it has fallen;
+    /// * neighbour 1 at computed 320, smoothed 246 — it used to be the good route and the smoothing
+    ///   has not caught up with how far it has fallen;
     /// * neighbour 2 at computed 270, smoothed 270 — brand new, so it has no history to lag.
     ///
     /// Neighbour 1 has the *worse* real metric and the *better* smoothed one, and it also sorts

@@ -1,4 +1,5 @@
-use crate::data_structures::neighbour::NeighbourIndex;
+use crate::data_structures::interface::Interface;
+use crate::data_structures::neighbour::{self, Neighbour, NeighbourIndex};
 use crate::data_structures::route::RouteError;
 use crate::data_structures::source::SourceIndex;
 use crate::data_types::address::Address;
@@ -134,5 +135,37 @@ impl<A: AddressExt> Route<A> {
 
     pub(crate) fn set_router_id(&mut self, router_id: RouterId) {
         self.source.router_id = router_id;
+    }
+
+    pub(crate) fn update_cost(
+        &mut self,
+        now: Instant,
+        interface: &Interface<A>,
+        neighbour: &Neighbour<A>,
+        smoothing_multiple: &DurationMultiplier,
+    ) {
+        let link_cost = interface.cost_calc.link_cost(
+            interface.cost_calc.rx_cost(
+                neighbour.mcast_hello_info.history,
+                neighbour.ucast_hello_info.history,
+            ),
+            neighbour.tx_cost,
+        );
+        let computed_metric = interface
+            .cost_calc
+            .metric(self.advertised_metric, link_cost);
+        self.computed_metric = computed_metric;
+        let step_dur = now - self.smoothed_metric_time;
+        let time_constant = (interface.hello_timer.duration().max(
+            neighbour
+                .pending
+                .ucast_hello
+                .map(|u| u.timer.duration())
+                .unwrap_or(Duration::ZERO),
+        )) * *smoothing_multiple;
+
+        self.smoothed_metric
+            .apply_smoothing(computed_metric, step_dur, time_constant);
+        self.smoothed_metric_time = now;
     }
 }

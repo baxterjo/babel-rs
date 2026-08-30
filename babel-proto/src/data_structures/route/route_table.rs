@@ -70,16 +70,6 @@ where
         feasible: bool,
         update: ResolvedUpdate<'_, A>,
     ) -> Result<(), RouteError> {
-        // Calculate the link cost to this neighbour
-        let link_cost = interface.cost_calc.link_cost(
-            interface.cost_calc.rx_cost(
-                neighbour.mcast_hello_info.history,
-                neighbour.ucast_hello_info.history,
-            ),
-            neighbour.tx_cost,
-        );
-        // Compute the metric for this route.
-        let computed_metric = interface.cost_calc.metric(update.slice.metric(), link_cost);
         match self.inner.get_mut_by_key(&RouteIndex {
             prefix: update.address,
             prefix_len: update.slice.plen(),
@@ -100,10 +90,22 @@ where
                     // keeping it as a regression backstop.
                     return Ok(());
                 }
+
                 // otherwise, a new entry is created in the route table, indexed by (prefix, plen,
                 // neigh), with source equal to (prefix, plen, router-id), seqno equal to seqno,
                 // and an advertised metric equal to the metric carried by the update.
                 // NOTE: Ignore returned value as we already checked the entry didn't exist above.
+                // Calculate the link cost to this neighbour
+
+                let link_cost = interface.cost_calc.link_cost(
+                    interface.cost_calc.rx_cost(
+                        neighbour.mcast_hello_info.history,
+                        neighbour.ucast_hello_info.history,
+                    ),
+                    neighbour.tx_cost,
+                );
+                let computed_metric = interface.cost_calc.metric(update.slice.metric(), link_cost);
+
                 let _ = self.inner.insert(Route::new(
                     now,
                     SourceIndex {
@@ -143,7 +145,6 @@ where
                 // are updated,
                 route.seqno = update.slice.seqno();
                 route.advertised_metric = update.slice.metric();
-                route.computed_metric = computed_metric;
                 if route.source().router_id != update.router_id {
                     // If the update caused the router-id of the entry to change, an update
                     // (possibly a retraction) MUST be sent in a timely manner as described in
@@ -169,25 +170,8 @@ where
                     route.selected = false;
                 }
 
-                // Apply metric smoothing for hysteresis.
+                route.update_cost(now, interface, neighbour, &self.smoothing_multiple);
 
-                // Take the max between the two hello timers and multiply by the setting in the
-                // route table.
-                let time_constant = (interface.hello_timer.duration().max(
-                    neighbour
-                        .pending
-                        .ucast_hello
-                        .map(|u| u.timer.duration())
-                        .unwrap_or(Duration::ZERO),
-                )) * self.smoothing_multiple;
-                // Get the time step (now - last recorded)
-                let time_step = now - route.smoothed_metric_time;
-                // Apply the smoothing
-                route
-                    .smoothed_metric
-                    .apply_smoothing(computed_metric, time_step, time_constant);
-                // Update the las recorded time.
-                route.smoothed_metric_time = now;
                 // TODO: Triggered updates
             }
         }
@@ -234,6 +218,18 @@ where
         if let Some(route) = self.inner.get_mut_by_key(&idx) {
             route.advertised_metric = Metric::INFINITY;
             route.computed_metric = Metric::INFINITY;
+        }
+    }
+
+    pub(crate) fn update_cost_for_neighbour(
+        &mut self,
+        now: Instant,
+        interface: &Interface<A>,
+        neighbour: &Neighbour<A>,
+    ) {
+        let smoothing_mul = self.smoothing_multiple;
+        for route in self.iter_mut().filter(|r| r.neigbour() == &neighbour.key()) {
+            route.update_cost(now, interface, neighbour, &smoothing_mul);
         }
     }
 
