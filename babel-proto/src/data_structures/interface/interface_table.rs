@@ -2,7 +2,7 @@ use crate::data_structures::interface::{
     Interface, InterfaceConfig, InterfaceError, InterfaceHandle,
 };
 use crate::extension::address::AddressExt;
-use crate::utils::{Instant, ManagedSlice, ManagedSliceExt as _};
+use crate::utils::{Instant, ManagedSlice};
 
 pub struct InterfaceTable<'storage, A: AddressExt> {
     pub(crate) inner: ManagedSlice<'storage, Option<Interface<A>>>,
@@ -17,7 +17,7 @@ impl<A: AddressExt> Default for InterfaceTable<'_, A> {
 
 impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
     /// Create a new interface table with user provided storage.
-    pub fn new_with_storage<T>(table: T) -> Self
+    pub(crate) fn new_with_storage<T>(table: T) -> Self
     where
         T: Into<ManagedSlice<'storage, Option<Interface<A>>>>,
     {
@@ -84,7 +84,7 @@ impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
     }
 
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Interface<A>> {
-        self.inner.iter_mut().filter_map(|v| v.as_mut())
+        self.inner.iter_mut()
     }
 
     pub(crate) fn iter_mut_filter(

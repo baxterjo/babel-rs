@@ -14,7 +14,7 @@ use crate::packet::parser::Parser;
 use crate::packet::tlv::reader::TlvReader;
 use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, UpdateSlice};
 use crate::router::BabelRouter;
-use crate::utils::{Instant, InternallyKeyed, ManagedSliceExt};
+use crate::utils::{Instant, InternallyKeyed};
 
 impl<'storage, A, P> BabelRouter<'storage, P, A>
 where

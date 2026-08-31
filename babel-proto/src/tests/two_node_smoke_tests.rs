@@ -9,7 +9,6 @@ use crate::packet::packet_slice::PacketSlice;
 use crate::router::BabelRouter;
 use crate::router::config::BabelRouterConfig;
 use crate::utils::Instant;
-use crate::utils::storage::ManagedSliceExt;
 
 #[test]
 fn two_nodes_say_hello_and_ihu() {

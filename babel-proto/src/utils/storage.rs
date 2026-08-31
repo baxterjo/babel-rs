@@ -36,44 +36,12 @@ pub(crate) trait InternallyKeyed: Sized {
     }
 }
 
-/// This trait extends the managed slice struct to have some of the methods of a map, all of the
-/// babel tables are indexed by some data stored inside the table entries. That means that if a
-/// regular map was used, there would be a lot of duplicate data taking up memory for no reason.
-pub(crate) trait ManagedSliceExt<K, V>
+impl<'storage, K, V> ManagedSlice<'storage, Option<V>>
 where
-    V: InternallyKeyed<Key = K>,
     K: Ord,
-    Self: Deref<Target = [Option<V>]> + DerefMut<Target = [Option<V>]>,
-{
-    /// Inserts the value into the managed slice by key.
-    ///
-    /// If the slice already contained a value with the same key then this returns the old value at
-    /// that key. If the slice is full and not resizeable then returns Err(V) where V is the element
-    /// that failed to insert.
-    fn insert(&mut self, value: V) -> Result<Option<V>, V>;
-    /// Removes the value from the managed slice by key. And returns it.
-    ///
-    /// Returns None if there was no value for that key.
-    fn remove(&mut self, key: &K) -> Option<V>;
-    /// Get a reference to the value at the given key.
-    ///
-    /// Returns None if there is no value for the given key.
-    fn get_by_key(&self, key: &K) -> Option<&V>;
-    /// Get a mutable reference for the value at the given key.
-    ///
-    /// Returns None if there is no value for the given key.
-    fn get_mut_by_key(&mut self, key: &K) -> Option<&mut V>;
-
-    /// Flushes the None values from the slice (if applicable)
-    fn flush(&mut self);
-}
-
-impl<'storage, K, V> ManagedSliceExt<K, V> for ManagedSlice<'storage, Option<V>>
-where
     V: InternallyKeyed<Key = K> + DebugT,
-    K: Ord,
 {
-    fn insert(&mut self, value: V) -> Result<Option<V>, V> {
+    pub(crate) fn insert(&mut self, value: V) -> Result<Option<V>, V> {
         // Look for an existing matching element in the slice.
         let old_opt = match V::locate(&self[..], &value.key()) {
             Some(idx) => {
@@ -82,30 +50,30 @@ where
                 self[idx].replace(value)
             }
             None => {
-                // If it does not exist, find the first empty slot in the slice.
-                let idx_opt = self.iter().position(|x| x.is_none());
-                match idx_opt {
-                    Some(idx) => {
-                        // If there is space in the slice, insert the value.
-                        self[idx] = Some(value);
-                    }
-                    None => {
-                        match self {
-                            ManagedSlice::Borrowed(_) => {
+                // If it does not exist
+                match self {
+                    ManagedSlice::Borrowed(borrowed) => {
+                        // If the slice is borrowed, find the first empty slot in the slice.
+                        let idx_opt = borrowed.iter().position(|x| x.is_none());
+                        match idx_opt {
+                            Some(idx) => {
+                                // If there is space in the slice, insert the value.
+                                borrowed[idx] = Some(value);
+                            }
+                            None => {
                                 // If the slice is borrowed then it has pre-allocated capacity, so
                                 // we cannot insert.
 
                                 // If it is full, there will be no elements that contain `None`,
                                 // return the value that would have been put in.
-                                //
-                                // TODO: This is a good spot to allow for user defined behavior for
-                                // what to do if a table is full. Likely through a supplied
-                                // closure or type that implements a trait.
                                 return Err(value);
                             }
-                            #[cfg(any(feature = "std", feature = "alloc"))]
-                            ManagedSlice::Owned(o) => o.push(Some(value)),
                         }
+                    }
+                    #[cfg(any(feature = "std", feature = "alloc"))]
+                    ManagedSlice::Owned(owned) => {
+                        // If the slice is owned push the item.
+                        owned.push(Some(value));
                     }
                 }
                 None
@@ -116,24 +84,79 @@ where
         Ok(old_opt)
     }
 
-    fn remove(&mut self, key: &K) -> Option<V> {
+    pub(crate) fn remove(&mut self, key: &K) -> Option<V> {
         let out = V::locate(&self[..], key).and_then(|idx| self[idx].take());
         // Ensure the slice is sorted after modifying it.
         V::_my_sort(&mut self[..]);
         out
     }
 
-    fn get_by_key(&self, key: &K) -> Option<&V> {
+    pub(crate) fn get_by_key(&self, key: &K) -> Option<&V> {
         let idx = V::locate(&self[..], key)?;
         self.get(idx)?.as_ref()
     }
 
-    fn get_mut_by_key(&mut self, key: &K) -> Option<&mut V> {
+    pub(crate) fn get_mut_by_key(&mut self, key: &K) -> Option<&mut V> {
         let idx = V::locate(&self[..], key)?;
         self.get_mut(idx)?.as_mut()
     }
 
-    fn flush(&mut self) {
+    fn iter<'a>(&'a self) -> impl Iterator<Item = &V>
+    where
+        V: 'a,
+    {
+        self.deref().iter().filter_map(|i| i.as_ref())
+    }
+
+    pub(crate) fn iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &mut V>
+    where
+        V: 'a,
+    {
+        self.deref_mut().iter_mut().filter_map(|i| i.as_mut())
+    }
+
+    pub(crate) fn iter_slots<'a>(&'a self) -> impl Iterator<Item = &Option<V>>
+    where
+        V: 'a,
+    {
+        self.deref().iter()
+    }
+
+    pub(crate) fn iter_mut_slots<'a>(&'a mut self) -> impl Iterator<Item = &mut Option<V>>
+    where
+        V: 'a,
+    {
+        self.deref_mut().iter_mut()
+    }
+
+    pub(crate) fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&V) -> bool,
+    {
+        self.retain_mut(|elem| f(elem));
+    }
+
+    pub(crate) fn retain_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&mut V) -> bool,
+    {
+        // This can be naive compared to the std library version because there is no dropping in
+        // place, Instead it changes the slot to None and flushes after iterating.
+        for slot in self.iter_mut_slots() {
+            match slot.as_mut() {
+                Some(item) => {
+                    if !f(item) {
+                        *slot = None;
+                    }
+                }
+                None => {}
+            }
+        }
+
+        self.flush();
+    }
+
+    pub(crate) fn flush(&mut self) {
         if let ManagedSlice::Owned(owned) = self {
             owned.retain(|e| e.is_some());
         }

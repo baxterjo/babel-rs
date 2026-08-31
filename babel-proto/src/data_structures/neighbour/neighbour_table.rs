@@ -4,7 +4,7 @@ use crate::data_structures::neighbour::{NeighbourConfig, NeighbourError};
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
-use crate::utils::{Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt as _};
+use crate::utils::{Instant, InternallyKeyed, ManagedSlice};
 
 pub struct NeighbourTable<'storage, A>
 where
@@ -32,7 +32,7 @@ where
     /// While interfaces are generally well known at compile time, the number of neighbors this
     /// Babel speaker might see is specific to its deployment. So it is important to right size
     /// this number for your specfic deployment.
-    pub fn new_with_storage<T>(table: T) -> Self
+    pub(crate) fn new_with_storage<T>(table: T) -> Self
     where
         T: Into<ManagedSlice<'storage, Option<Neighbour<A>>>>,
     {
@@ -94,7 +94,7 @@ where
     }
 
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Neighbour<A>> {
-        self.inner.iter_mut().filter_map(|v| v.as_mut())
+        self.inner.iter_mut()
     }
 
     pub(crate) fn neighbours_mut_for_iface(

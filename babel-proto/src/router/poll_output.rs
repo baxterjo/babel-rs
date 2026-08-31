@@ -8,7 +8,7 @@ use crate::output::{Output, Transmit};
 use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
 use crate::utils::destination::DestAddr;
-use crate::utils::{Duration, Instant, ManagedSlice, ManagedSliceExt};
+use crate::utils::{Duration, Instant, ManagedSlice};
 
 impl<'storage, A, P> BabelRouter<'storage, P, A>
 where
@@ -25,7 +25,7 @@ where
         now: Instant,
     ) -> Result<Output<'output, A>, BabelError<A>> {
         let buf = alloc::vec::Vec::new();
-        self.poll_output_with_buf(now, buf)
+        self.poll_output_inner(now, None, buf)
     }
 
     /// Polls output for the given interface from the router.
@@ -49,14 +49,11 @@ where
     ///
     /// Ideally the size of this buffer is equal to the MTU of your platform to ensure network
     /// efficiency with packed packets.
-    pub fn poll_output_with_buf<'output, B>(
+    pub fn poll_output_with_buf<'output>(
         &mut self,
         now: Instant,
-        buf: B,
-    ) -> Result<Output<'output, A>, BabelError<A>>
-    where
-        B: Into<ManagedSlice<'output, u8>>,
-    {
+        buf: &'output mut [u8],
+    ) -> Result<Output<'output, A>, BabelError<A>> {
         self.poll_output_inner(now, None, buf)
     }
 
@@ -67,15 +64,12 @@ where
     ///
     /// This is a useful optimization if other interfaces are busy. If the returned [`Output`] is
     /// of the `SetTimer` variant, it is not guaranteed to be specific to the polled interface.
-    pub fn poll_output_for_iface_with_buf<'output, B>(
+    pub fn poll_output_for_iface_with_buf<'output>(
         &mut self,
         now: Instant,
         iface: InterfaceHandle,
-        buf: B,
-    ) -> Result<Output<'output, A>, BabelError<A>>
-    where
-        B: Into<ManagedSlice<'output, u8>>,
-    {
+        buf: &'output mut [u8],
+    ) -> Result<Output<'output, A>, BabelError<A>> {
         self.poll_output_inner(now, Some(iface), buf)
     }
 
@@ -326,7 +320,6 @@ mod test {
     use crate::packet::packet_slice::PacketSlice;
     use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, TypedTlv};
     use crate::router::config::BabelRouterConfig;
-    use crate::utils::storage::ManagedSliceExt;
 
     // Long enough that it never fires again during a test unless a test means it to, but small
     // enough that the IHU interval derived from it (3x, below) still fits the 16-bit Interval

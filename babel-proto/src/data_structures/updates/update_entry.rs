@@ -1,53 +1,8 @@
-use thiserror::Error;
-
 use crate::data_structures::neighbour::NeighbourIndex;
 use crate::data_structures::route::RouteIndex;
+use crate::data_structures::updates::{UpdateError, UpdateIndex};
 use crate::extension::address::AddressExt;
-use crate::utils::{
-    Duration, Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt, Timer, TimerError,
-};
-
-#[derive(Debug, Error)]
-pub enum UpdateError {
-    #[error(transparent)]
-    Timer(#[from] TimerError),
-    #[error("Triggered update table is full")]
-    UpdateTableFull,
-}
-
-/// Table for storing the state of triggered updates.
-pub(crate) struct TriggeredUpdateTable<'storage, A: AddressExt> {
-    inner: ManagedSlice<'storage, Option<Update<A>>>,
-}
-
-impl<'storage, A: AddressExt> TriggeredUpdateTable<'storage, A> {
-    pub(crate) fn new_with_storage<T>(storage: T) -> Self
-    where
-        T: Into<ManagedSlice<'storage, Option<Update<A>>>>,
-    {
-        Self {
-            inner: storage.into(),
-        }
-    }
-
-    /// Adds an update destined to a neibour.
-    ///
-    /// Duplicate updates will silently overwrite old ones. This is by design, a freshly triggered
-    /// route udpate **SHOULD** supercede a stale one.
-    pub(crate) fn add_update(&mut self, update: Update<A>) -> Result<(), UpdateError> {
-        self.inner
-            .insert(update)
-            .map_err(|_| UpdateError::UpdateTableFull)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub(crate) struct UpdateIndex<A: AddressExt> {
-    route: RouteIndex<A>,
-    neighbour: NeighbourIndex<A>,
-}
+use crate::utils::{Duration, Instant, InternallyKeyed, Timer};
 
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

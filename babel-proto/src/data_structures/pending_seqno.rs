@@ -29,7 +29,7 @@ where
     /// While interfaces are generally well known at compile time, the number of [`SeqnoRequest`]s
     /// this Babel speaker might see is specific to its deployment. So it is important to right size
     /// this number for your specfic deployment.
-    pub fn new_with_storage<T>(table: T) -> Self
+    pub(crate) fn new_with_storage<T>(table: T) -> Self
     where
         T: Into<ManagedSlice<'storage, Option<SeqnoRequest<A>>>>,
     {

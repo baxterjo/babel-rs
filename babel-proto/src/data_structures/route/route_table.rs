@@ -7,9 +7,7 @@ use crate::data_types::address::Address;
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::packet::parser::ResolvedUpdate;
-use crate::utils::{
-    Duration, DurationMultiplier, Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt, Timer,
-};
+use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, ManagedSlice, Timer};
 
 pub const DEFAULT_SMOOTHING_MULTIPLE: DurationMultiplier = DurationMultiplier::new(3, 1);
 
@@ -53,11 +51,11 @@ where
     }
 
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<A>> {
-        self.inner.iter_mut().filter_map(|e| e.as_mut())
+        self.inner.iter_mut()
     }
 
     pub(crate) fn iter_mut_slots(&mut self) -> impl Iterator<Item = &mut Option<Route<A>>> {
-        self.inner.iter_mut()
+        self.inner.iter_mut_slots()
     }
 
     pub(crate) fn flush(&mut self) {
@@ -240,9 +238,10 @@ where
 
     /// Groups the routes in the table by the destination (prefix, plen) they lead to.
     //  `chunk_by` produces "runs" of elements. So this only works because one of the main
-    //  predicates of `ManagedSliceExt` is that it is always sorted. The key for he items in this
-    // particular `ManagedSliceExt` is a struct that consists of `(prefix, prefix_len, neighbour)`.
-    // Sorting by a key is also sorting by a subset of that key, so this grouping works.
+    //  predicates of `ManagedSlice<'storage, Option<V>>` is that it is always sorted. The key for
+    // the items in this particular `ManagedSlice` is a struct that consists of `(prefix,
+    // prefix_len, neighbour)`. Sorting by a key is also sorting by a subset of that key, so
+    // this grouping works.
     pub(crate) fn destination_groups_mut(
         &mut self,
     ) -> impl Iterator<Item = DestinationGroup<'_, A>> {

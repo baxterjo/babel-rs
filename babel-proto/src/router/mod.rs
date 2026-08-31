@@ -8,14 +8,14 @@ use crate::data_structures::neighbour::{Neighbour, NeighbourConfig, NeighbourTab
 use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
 use crate::data_structures::route::{Route, RouteTable};
 use crate::data_structures::source::{Source, SourceTable};
+use crate::data_structures::updates::{Update, UpdateTable};
 use crate::data_types::{Address, RouterId};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
 use crate::router::config::BabelRouterConfig;
-use crate::utils::triggered_updates::{TriggeredUpdateTable, Update};
-use crate::utils::{Instant, ManagedSlice, ManagedSliceExt};
+use crate::utils::{Instant, ManagedSlice};
 
 pub mod config;
 pub mod handle_input;
@@ -43,7 +43,7 @@ where
 
     pub(crate) source_table: SourceTable<'storage, A>,
 
-    pub(crate) update_table: TriggeredUpdateTable<'storage, A>,
+    pub(crate) update_table: UpdateTable<'storage, A>,
 
     // Extension markers
     _state_ext_marker: PhantomData<P>,
@@ -112,7 +112,7 @@ where
             pending_seqno: PendingSeqnoRequestTable::new_with_storage(pending_seqno_table),
             route_table: RouteTable::new_with_storage(route_table, config.route_expiry_multiplier),
             source_table: SourceTable::new_with_storage(source_table),
-            update_table: TriggeredUpdateTable::new_with_storage(update_table),
+            update_table: UpdateTable::new_with_storage(update_table),
             _state_ext_marker: PhantomData,
             _addr_ext_marker: PhantomData,
         }

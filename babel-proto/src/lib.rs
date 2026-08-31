@@ -6,8 +6,8 @@ use crate::data_structures::neighbour::Neighbour;
 use crate::data_structures::pending_seqno::SeqnoRequest;
 use crate::data_structures::route::Route;
 use crate::data_structures::source::Source;
+use crate::data_structures::updates::Update;
 use crate::extension::address::AddressExt;
-use crate::utils::triggered_updates::Update;
 
 //#[cfg(not(any(test, feature = "alloc")))]
 #[cfg(feature = "alloc")]
@@ -55,6 +55,13 @@ pub trait MaybeDefmt {}
 impl<T> MaybeDefmt for T {}
 
 /// A memory pool for the different storage strucutres in Babel.
+///
+/// Consts:
+/// * `I`: Maximum number of interfaces
+/// * `N`: Maximum number of neighbours
+/// * `R`: Maximum number of routes
+/// * `S`: Maximum number of sources
+/// * `PS`: Maximum number of pending seqno requests.
 pub struct BabelMemoryPool<
     A: AddressExt,
     const I: usize,
@@ -68,6 +75,7 @@ pub struct BabelMemoryPool<
     route_table: [Option<Route<A>>; R],
     source_table: [Option<Source<A>>; S],
     pending_seqno_table: [Option<SeqnoRequest<A>>; PS],
+    /// The maximum possible number of updates is the maximum routes * maximum neighbours.
     update_table: [[Option<Update<A>>; N]; R],
 }
 

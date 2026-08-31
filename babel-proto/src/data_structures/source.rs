@@ -5,7 +5,7 @@ use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::metric::distance::Feasibility;
 use crate::utils::ManagedSlice;
-use crate::utils::storage::{InternallyKeyed, ManagedSliceExt};
+use crate::utils::storage::InternallyKeyed;
 
 pub struct SourceTable<'storage, A>
 where
@@ -30,7 +30,7 @@ where
     /// While interfaces are generally well known at compile time, the number of sources this
     /// Babel speaker might see is specific to its deployment. So it is important to right size
     /// this number for your specfic deployment or do what you can to enable the alloc feature.
-    pub fn new_with_storage<T>(table: T) -> Self
+    pub(crate) fn new_with_storage<T>(table: T) -> Self
     where
         T: Into<ManagedSlice<'storage, Option<Source<A>>>>,
     {
