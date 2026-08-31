@@ -17,9 +17,9 @@ pub(crate) struct Update<A: AddressExt> {
     //
     pub(crate) _ack: Option<u16>,
     /// Timer for resending the update.
-    pub(crate) retry_timer: Timer,
+    pub(crate) send_timer: Timer,
     /// Counter for resending the update.
-    pub(crate) retry_count: u8,
+    pub(crate) send_count: u8,
 }
 
 impl<A: AddressExt> InternallyKeyed for Update<A> {
@@ -33,24 +33,24 @@ impl<A: AddressExt> InternallyKeyed for Update<A> {
 }
 
 impl<A: AddressExt> Update<A> {
-    fn new(
+    pub(crate) fn new(
         now: Instant,
         route: RouteIndex<A>,
         neighbour: NeighbourIndex<A>,
         mcast: bool,
         _ack: bool,
         retry_interval: Duration,
-        retry_count: u8,
+        send_count: u8,
     ) -> Result<Self, UpdateError> {
         // Retry count cannot be more than 5
-        let retry_count = retry_count.min(5);
+        let send_count = send_count.min(5);
         Ok(Self {
             route,
             neighbour,
             mcast,
             _ack: None,
-            retry_timer: Timer::eager_from_duration(now, retry_interval)?,
-            retry_count,
+            send_timer: Timer::eager_from_duration(now, retry_interval)?,
+            send_count,
         })
     }
 

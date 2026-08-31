@@ -6,6 +6,15 @@ use crate::metric::{KOutOfJ, LinkCostCalculator};
 use crate::utils::time::DurationSpec;
 use crate::utils::{Duration, DurationMultiplier};
 
+/// Default interval between unicast retries of an update that has not been acknowledged.
+///
+/// Matches the retransmission interval recommended in
+/// [Appendix B.](https://datatracker.ietf.org/doc/html/rfc8966#section-appendix.b-4.10)
+pub const DEFAULT_UPDATE_RETRY_INTERVAL: Interval = Interval::from_duration(Duration::from_secs(2));
+
+/// Default number of times an unacknowledged unicast update is retried before being given up on.
+pub const DEFAULT_WIRED_UPDATE_RETRY_LIMIT: u8 = 2;
+
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct InterfaceConfig<A: AddressExt> {
@@ -17,6 +26,10 @@ pub struct InterfaceConfig<A: AddressExt> {
     pub(crate) ihu_hold_time: DurationMultiplier,
     #[cfg_attr(feature = "defmt", defmt(Debug2Format))]
     pub(crate) cost_calc: &'static dyn LinkCostCalculator,
+    pub(crate) prefer_ucast: bool,
+    pub(crate) update_retry_interval: Interval,
+    pub(crate) update_retry_limit: u8,
+    pub(crate) request_acks: bool,
 }
 
 impl<A: AddressExt> InterfaceConfig<A> {
@@ -39,7 +52,31 @@ impl<A: AddressExt> InterfaceConfig<A> {
             update_interval_spec: DurationSpec::UPDATE_SPEC,
             ihu_hold_time: DEFAULT_HOLD_TIME_MULTIPLIER,
             cost_calc: &COST_CALC,
+            prefer_ucast: false,
+            update_retry_interval: DEFAULT_UPDATE_RETRY_INTERVAL,
+            update_retry_limit: DEFAULT_WIRED_UPDATE_RETRY_LIMIT,
+            request_acks: false,
         }
+    }
+
+    /// The handle used to reference this interface for debugging and packet routing.
+    pub fn id(&self) -> InterfaceHandle {
+        self.id
+    }
+
+    /// The address that this node can be reached on through this interface.
+    pub fn address(&self) -> Address<A> {
+        self.address
+    }
+
+    /// Sets the address that this node can be reached on through this interface.
+    pub fn set_address(&mut self, address: Address<A>) {
+        self.address = address;
+    }
+
+    /// The multicast hello interval for this interface.
+    pub fn mcast_hello_interval(&self) -> Interval {
+        self.mcast_hello_interval
     }
 
     /// Sets the multicast hello interval for this interface.
@@ -47,6 +84,11 @@ impl<A: AddressExt> InterfaceConfig<A> {
     /// The given interval will be clamped to `1 <= duration <= u16::MAX centiseconds`
     pub fn set_mcast_hello_interval(&mut self, interval: Interval) {
         self.mcast_hello_interval = interval.max(Duration::from_centis(1).into());
+    }
+
+    /// The unicast hello interval for this interface, or `None` if only mcast hellos are sent.
+    pub fn ucast_hello_interval(&self) -> Option<Interval> {
+        self.ucast_hello_interval
     }
 
     /// Sets the unicast hello interval for this interface.
@@ -58,14 +100,38 @@ impl<A: AddressExt> InterfaceConfig<A> {
         self.ucast_hello_interval = Some(interval.max(Duration::from_centis(1).into()));
     }
 
+    /// Stops unicast hellos from being sent on this interface, returning it to the default of
+    /// sending only mcast hellos.
+    pub fn clear_ucast_hello_interval(&mut self) {
+        self.ucast_hello_interval = None;
+    }
+
+    /// The cost calculator used to derive link costs for neighbours on this interface.
+    pub fn cost_calculator(&self) -> &'static dyn LinkCostCalculator {
+        self.cost_calc
+    }
+
     /// Sets the cost calculator of this interface to a user provided struct.
     pub fn set_cost_calculator(&mut self, calculator: &'static dyn LinkCostCalculator) {
         self.cost_calc = calculator;
     }
 
+    /// The duration spec for update time.
+    pub fn update_duration_spec(&self) -> DurationSpec {
+        self.update_interval_spec
+    }
+
     /// Sets the duration spec for update time
     pub fn set_update_duration_spec(&mut self, spec: DurationSpec) {
         self.update_interval_spec = spec;
+    }
+
+    /// The IHU hold time multiple for neighbours heard on this interface.
+    ///
+    /// When receiving an IHU from a neighbour on this interface, the interval advertised in the IHU
+    /// TLV is multiplied by this value to create an IHU hold timer.
+    pub fn ihu_hold_time_multiple(&self) -> DurationMultiplier {
+        self.ihu_hold_time
     }
 
     /// Set the IHU hold time multiple for neighbours heard on this interface.
@@ -74,5 +140,57 @@ impl<A: AddressExt> InterfaceConfig<A> {
     /// TLV is multiplied by this value to create an IHU hold timer.
     pub fn set_ihu_hold_time_multiple(&mut self, mul: DurationMultiplier) {
         self.ihu_hold_time = mul;
+    }
+
+    /// Whether updates on this interface are sent to each neighbour by unicast rather than to the
+    /// interface by multicast.
+    pub fn prefer_ucast(&self) -> bool {
+        self.prefer_ucast
+    }
+
+    /// Sets whether updates on this interface are sent to each neighbour by unicast rather than to
+    /// the interface by multicast.
+    ///
+    /// This defaults to `false`, as most Babel speakers should prefer multicast updates.
+    pub fn set_prefer_ucast(&mut self, prefer_ucast: bool) {
+        self.prefer_ucast = prefer_ucast;
+    }
+
+    /// The interval between retries of an unacknowledged unicast update on this interface.
+    pub fn ucast_retry_interval(&self) -> Interval {
+        self.update_retry_interval
+    }
+
+    /// Sets the interval between retries of an unacknowledged unicast update on this interface.
+    ///
+    /// The given interval will be clamped to `1 <= duration <= u16::MAX centiseconds`
+    pub fn set_ucast_retry_interval(&mut self, interval: Interval) {
+        self.update_retry_interval = interval.max(Duration::from_centis(1).into());
+    }
+
+    /// The number of times an unacknowledged unicast update is retried before being given up on.
+    pub fn ucast_retry_limit(&self) -> u8 {
+        self.update_retry_limit
+    }
+
+    /// Sets the number of times an unacknowledged unicast update is retried before being given up
+    /// on.
+    ///
+    /// A limit of `0` disables retries; the update is sent once regardless of acknowledgement.
+    pub fn set_ucast_retry_limit(&mut self, limit: u8) {
+        self.update_retry_limit = limit.min(5);
+    }
+
+    /// Whether unicast updates sent on this interface carry an Acknowledgment Request TLV.
+    pub fn request_acks(&self) -> bool {
+        self.request_acks
+    }
+
+    /// Sets whether unicast updates sent on this interface carry an Acknowledgment Request TLV.
+    ///
+    /// Acknowledgments only apply to unicast traffic, so this has no effect while
+    /// [`Self::prefer_ucast`] is `false`.
+    pub fn set_request_acks(&mut self, request_acks: bool) {
+        self.request_acks = request_acks;
     }
 }

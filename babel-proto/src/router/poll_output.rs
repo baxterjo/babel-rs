@@ -1,5 +1,6 @@
 use super::BabelRouter;
 use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
+use crate::data_structures::updates::Update;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -8,7 +9,7 @@ use crate::output::{Output, Transmit};
 use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
 use crate::utils::destination::DestAddr;
-use crate::utils::{Duration, Instant, ManagedSlice};
+use crate::utils::{Duration, Instant, InternallyKeyed, ManagedSlice};
 
 impl<'storage, A, P> BabelRouter<'storage, P, A>
 where
@@ -177,13 +178,26 @@ where
         });
 
         // Check for periodic updates
-        //if let Some(remaining) = self.update_timer.time_remaining(now) {
-        //    next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
-        //} else {
-        //    for route in self.route_table.iter() {
-        //        for neighbour in self.neighbor_table
-        //    }
-        //}
+        if let Some(remaining) = self.update_timer.time_remaining(now) {
+            next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+        } else {
+            for route in self.route_table.iter() {
+                for interface in self.iface_table.iter() {
+                    for neighbour in self.neighbor_table.neighbours_for_iface(interface.handle()) {
+                        self.update_table.add_update(Update::new(
+                            now,
+                            route.key(),
+                            neighbour.key(),
+                            !interface.prefer_ucast,
+                            interface.request_acks,
+                            interface.update_retry_interval.into(),
+                            1,
+                        )?)?;
+                    }
+                }
+            }
+            self.update_timer.restart(now);
+        }
 
         Ok((run_selection, next_poll))
     }
@@ -260,7 +274,7 @@ where
 
             for neighbour in self
                 .neighbor_table
-                .neighbours_mut_for_iface(*interface.handle())
+                .neighbours_mut_for_iface(interface.handle())
             {
                 // If the active destination is free, poll for ucast hellos.
                 if active_dest.is_free() {

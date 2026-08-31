@@ -44,6 +44,13 @@ pub struct Interface<A: AddressExt> {
     /// Link cost calculator
     #[cfg_attr(feature = "defmt", defmt(Debug2Format))]
     pub(crate) cost_calc: &'static dyn LinkCostCalculator,
+
+    pub(crate) prefer_ucast: bool,
+
+    pub(crate) request_acks: bool,
+
+    pub(crate) update_retry_limit: u8,
+    pub(crate) update_retry_interval: Interval,
 }
 
 impl<A: AddressExt> InternallyKeyed for Interface<A> {
@@ -70,6 +77,10 @@ impl<A: AddressExt> Interface<A> {
             )?,
             ihu_hold_time_multiple: config.ihu_hold_time,
             cost_calc: config.cost_calc,
+            prefer_ucast: config.prefer_ucast,
+            request_acks: config.request_acks,
+            update_retry_limit: config.update_retry_limit,
+            update_retry_interval: config.update_retry_interval,
         })
     }
 

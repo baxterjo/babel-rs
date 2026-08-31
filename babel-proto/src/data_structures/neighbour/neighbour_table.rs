@@ -45,6 +45,19 @@ where
     pub(crate) fn get_mut(&mut self, index: &NeighbourIndex<A>) -> Option<&mut Neighbour<A>> {
         self.inner.get_mut_by_key(index)
     }
+    pub(crate) fn neighbours_for_iface(
+        &self,
+        iface: &InterfaceHandle,
+    ) -> impl Iterator<Item = &Neighbour<A>> {
+        self.iter().filter(move |n| n.interface() == iface)
+    }
+
+    pub(crate) fn neighbours_mut_for_iface(
+        &mut self,
+        iface: &InterfaceHandle,
+    ) -> impl Iterator<Item = &mut Neighbour<A>> {
+        self.iter_mut().filter(move |n| n.interface() == iface)
+    }
 
     fn get_or_insert_default(
         &mut self,
@@ -93,13 +106,6 @@ where
 
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Neighbour<A>> {
         self.inner.iter_mut()
-    }
-
-    pub(crate) fn neighbours_mut_for_iface(
-        &mut self,
-        iface: InterfaceHandle,
-    ) -> impl Iterator<Item = &mut Neighbour<A>> {
-        self.iter_mut().filter(move |n| n.interface() == &iface)
     }
 
     //  _    _          _   _ _____  _      ______

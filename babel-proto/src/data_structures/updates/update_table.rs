@@ -19,14 +19,11 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
     }
 
     /// Adds an update destined to a neibour.
-    ///
-    /// Duplicate updates will silently overwrite old ones. This is by design, a freshly triggered
-    /// route udpate **SHOULD** supercede a stale one.
     pub(crate) fn add_update(&mut self, update: Update<A>) -> Result<(), UpdateError> {
         if let Some(existing_update) = self.inner.get_by_key(&update.key())
-            && existing_update.retry_count > update.retry_count
+            && existing_update.send_count > update.send_count
         {
-            // If the exising retry count is higher than the incoming retry count then we can
+            // If the exising send count is higher than the incoming send count then we can
             // assume a higher priority update is in progress.
             return Ok(());
         } else {
