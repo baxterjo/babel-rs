@@ -49,7 +49,7 @@ impl<A: AddressExt> Update<A> {
             neighbour,
             mcast,
             _ack: None,
-            retry_timer: Timer::from_duration(now, retry_interval)?,
+            retry_timer: Timer::eager_from_duration(now, retry_interval)?,
             retry_count,
         })
     }

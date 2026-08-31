@@ -5,20 +5,13 @@ use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::metric::distance::Feasibility;
 use crate::utils::ManagedSlice;
-use crate::utils::storage::InternallyKeyed;
+use crate::utils::storage::{InternallyKeyed, Table};
 
 pub struct SourceTable<'storage, A>
 where
     A: AddressExt,
 {
-    pub(crate) inner: ManagedSlice<'storage, Option<Source<A>>>,
-}
-
-#[cfg(any(feature = "std", feature = "alloc"))]
-impl<A: AddressExt> Default for SourceTable<'_, A> {
-    fn default() -> Self {
-        Self::new()
-    }
+    pub(crate) inner: Table<'storage, SourceIndex<A>, Source<A>>,
 }
 
 impl<'storage, A> SourceTable<'storage, A>
@@ -30,20 +23,12 @@ where
     /// While interfaces are generally well known at compile time, the number of sources this
     /// Babel speaker might see is specific to its deployment. So it is important to right size
     /// this number for your specfic deployment or do what you can to enable the alloc feature.
-    pub(crate) fn new_with_storage<T>(table: T) -> Self
+    pub(crate) fn new_with_storage<T>(storage: T) -> Self
     where
         T: Into<ManagedSlice<'storage, Option<Source<A>>>>,
     {
         Self {
-            inner: table.into(),
-        }
-    }
-
-    /// Create a new source table.
-    #[cfg(any(feature = "std", feature = "alloc"))]
-    pub fn new() -> Self {
-        Self {
-            inner: ManagedSlice::Owned(Default::default()),
+            inner: Table::new(storage),
         }
     }
 }

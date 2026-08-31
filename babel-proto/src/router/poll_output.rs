@@ -152,25 +152,39 @@ where
         }
 
         // Check for expired routes.
-        for route_opt in self.route_table.iter_mut_slots() {
-            if let Some(route) = route_opt {
-                if route.expiry.is_finished(now) {
-                    // If the route has expired and the advertised metric is not yet infinity, set
-                    // it to infinity and reset the timer.
-                    if route.advertised_metric != Metric::INFINITY {
-                        route.advertised_metric = Metric::INFINITY;
-                        route.computed_metric = Metric::INFINITY;
-                        route.expiry.restart(now);
-                    } else {
-                        // If the metric was already infinity, flush the route.
-                        *route_opt = None;
-                    }
-                    run_selection |= true;
+        self.route_table.retain_mut(|route| {
+            if let Some(remaining) = route.expiry.time_remaining(now) {
+                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+                true
+            } else {
+                let out: bool;
+                // If the route has expired and the advertised metric is not yet infinity, set
+                // it to infinity and reset the timer.
+                if route.advertised_metric != Metric::INFINITY {
+                    route.advertised_metric = Metric::INFINITY;
+                    route.computed_metric = Metric::INFINITY;
+                    route.expiry.restart(now);
+                    out = true;
+                } else {
+                    // If the metric was already infinity and the timer expires (again) then the
+                    // route is removed.
+                    out = false;
                 }
+                // In either case, the selection process must be run when the timer expires.
+                run_selection |= true;
+                out
             }
-        }
-        // Flushes and sorts the route table after modifying it.
-        self.route_table.flush();
+        });
+
+        // Check for periodic updates
+        //if let Some(remaining) = self.update_timer.time_remaining(now) {
+        //    next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+        //} else {
+        //    for route in self.route_table.iter() {
+        //        for neighbour in self.neighbor_table
+        //    }
+        //}
+
         Ok((run_selection, next_poll))
     }
 
@@ -220,7 +234,7 @@ where
                                 PacketWriterError::BufferTooSmall { need, remaining }
                             );
                             return Ok(PollEvent::Transmit {
-                                iface: interface.handle,
+                                iface: *interface.handle(),
                                 dest: active_dest,
                                 body: writer,
                             });
@@ -246,7 +260,7 @@ where
 
             for neighbour in self
                 .neighbor_table
-                .neighbours_mut_for_iface(interface.handle)
+                .neighbours_mut_for_iface(*interface.handle())
             {
                 // If the active destination is free, poll for ucast hellos.
                 if active_dest.is_free() {
@@ -278,7 +292,7 @@ where
             // its time to send.
             if writer.has_tlvs() {
                 return Ok(PollEvent::Transmit {
-                    iface: interface.handle,
+                    iface: *interface.handle(),
                     dest: active_dest,
                     body: writer,
                 });
@@ -347,10 +361,16 @@ mod test {
     const NEIGHBOUR_1_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
     const NEIGHBOUR_2_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
 
+    /// Builds a router born at the same instant every test measures from.
+    ///
+    /// `Instant::now` is `std` only, and it would put the router's birth decades ahead of the `t0`
+    /// every test below starts from.
     fn router(name: &'static str) -> BabelRouter<'static> {
-        BabelRouter::new(BabelRouterConfig::new(
-            RouterId::try_from(name).expect("bad router id"),
-        ))
+        BabelRouter::new(
+            Instant::from_secs(0),
+            BabelRouterConfig::new(RouterId::try_from(name).expect("bad router id")),
+        )
+        .expect("bad router")
     }
 
     fn iface_handle(name: &str) -> InterfaceHandle {
@@ -464,8 +484,7 @@ mod test {
     ) -> &'r mut Neighbour<NoExtension> {
         router
             .neighbor_table
-            .inner
-            .get_mut_by_key(&NeighbourIndex {
+            .get_mut(&NeighbourIndex {
                 iface,
                 addr: address.into(),
             })

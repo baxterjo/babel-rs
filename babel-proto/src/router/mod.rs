@@ -15,7 +15,7 @@ use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
 use crate::router::config::BabelRouterConfig;
-use crate::utils::{Instant, ManagedSlice};
+use crate::utils::{Instant, ManagedSlice, Timer};
 
 pub mod config;
 pub mod handle_input;
@@ -45,6 +45,8 @@ where
 
     pub(crate) update_table: UpdateTable<'storage, A>,
 
+    pub(crate) update_timer: Timer,
+
     // Extension markers
     _state_ext_marker: PhantomData<P>,
     _addr_ext_marker: PhantomData<A>,
@@ -57,9 +59,10 @@ where
 {
     /// Create a new Babel Router from config.
     #[cfg(any(feature = "std", feature = "alloc"))]
-    pub fn new(config: BabelRouterConfig) -> Self {
+    pub fn new(now: Instant, config: BabelRouterConfig) -> Result<Self, BabelError<A>> {
         use alloc::vec::Vec;
         Self::new_with_storage_inner(
+            now,
             config,
             Vec::new(),
             Vec::new(),
@@ -72,10 +75,12 @@ where
 
     /// Create a new Babel Router with user provided, statically sized storage.
     pub fn new_with_storage(
+        now: Instant,
         config: BabelRouterConfig,
         storage: BorrowedMemoryPool<'storage, A>,
-    ) -> Self {
+    ) -> Result<Self, BabelError<A>> {
         Self::new_with_storage_inner(
+            now,
             config,
             storage.interface_table,
             storage.neighbour_table,
@@ -87,6 +92,7 @@ where
     }
 
     fn new_with_storage_inner<IF, N, PS, R, S, U>(
+        now: Instant,
         config: BabelRouterConfig,
         interface_table: IF,
         neighbour_table: N,
@@ -94,7 +100,7 @@ where
         route_table: R,
         source_table: S,
         update_table: U,
-    ) -> Self
+    ) -> Result<Self, BabelError<A>>
     where
         IF: Into<ManagedSlice<'storage, Option<Interface<A>>>>,
         N: Into<ManagedSlice<'storage, Option<Neighbour<A>>>>,
@@ -103,7 +109,7 @@ where
         S: Into<ManagedSlice<'storage, Option<Source<A>>>>,
         U: Into<ManagedSlice<'storage, Option<Update<A>>>>,
     {
-        Self {
+        Ok(Self {
             id: config.id,
             magic_number: config.magic_number,
             version_number: config.version,
@@ -113,9 +119,10 @@ where
             route_table: RouteTable::new_with_storage(route_table, config.route_expiry_multiplier),
             source_table: SourceTable::new_with_storage(source_table),
             update_table: UpdateTable::new_with_storage(update_table),
+            update_timer: Timer::from_interval(now, config.update_interval)?,
             _state_ext_marker: PhantomData,
             _addr_ext_marker: PhantomData,
-        }
+        })
     }
 
     /// Register a new interface with the router.

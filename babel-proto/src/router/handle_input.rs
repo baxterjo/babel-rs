@@ -128,8 +128,8 @@ where
             .handle_hello(now, interface, address, hello)?;
 
         // Update the cost for the routes associated with this neighbour.
-        if let Some(neighbour) = self.neighbor_table.inner.get_by_key(&NeighbourIndex {
-            iface: interface.handle,
+        if let Some(neighbour) = self.neighbor_table.get(&NeighbourIndex {
+            iface: *interface.handle(),
             addr: address,
         }) {
             // This is behind a `Some` guard even after updating because if the neighbour table is
@@ -161,8 +161,8 @@ where
             .handle_ihu(now, source_addr, interface, ihu)?;
 
         // Update the cost for the routes associated with this neighbour.
-        if let Some(neighbour) = self.neighbor_table.inner.get_by_key(&NeighbourIndex {
-            iface: interface.handle,
+        if let Some(neighbour) = self.neighbor_table.get(&NeighbourIndex {
+            iface: *interface.handle(),
             addr: source_addr,
         }) {
             // This is behind a `Some` guard even after updating because if the neighbour table is
@@ -190,13 +190,12 @@ where
         update: UpdateSlice<'_>,
     ) -> Result<(), BabelError<A>> {
         let idx = NeighbourIndex {
-            iface: interface.handle,
+            iface: *interface.handle(),
             addr: *source_addr,
         };
         let neighbour = self
             .neighbor_table
-            .inner
-            .get_by_key(&idx)
+            .get(&idx)
             .ok_or(BabelError::TlvFromUnknownNeighbour("update_tlv", idx))?;
 
         if update.is_blanket_retraction() {
@@ -382,10 +381,16 @@ mod test {
     const NEIGHBOUR_2_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
     const NEIGHBOUR_3_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 4);
 
+    /// Builds a router born at the same instant every test measures from.
+    ///
+    /// `Instant::now` is `std` only, and it would put the router's birth decades ahead of the `t0`
+    /// every test below starts from.
     fn router(name: &'static str) -> BabelRouter<'static> {
-        BabelRouter::new(BabelRouterConfig::new(
-            RouterId::try_from(name).expect("bad router id"),
-        ))
+        BabelRouter::new(
+            Instant::from_secs(0),
+            BabelRouterConfig::new(RouterId::try_from(name).expect("bad router id")),
+        )
+        .expect("bad router")
     }
 
     fn iface_handle(name: &str) -> InterfaceHandle {
@@ -512,8 +517,7 @@ mod test {
 
     fn tx_cost(r: &BabelRouter<'static>, iface: InterfaceHandle, addr: Ipv6Addr) -> TxCost {
         r.neighbor_table
-            .inner
-            .get_by_key(&NeighbourIndex {
+            .get(&NeighbourIndex {
                 iface,
                 addr: addr.into(),
             })
@@ -764,8 +768,7 @@ mod test {
         assert!(matches!(err, BabelError::InterfaceDoesntExist(h) if h == unknown));
         assert!(
             r.neighbor_table
-                .inner
-                .get_by_key(&NeighbourIndex {
+                .get(&NeighbourIndex {
                     iface: unknown,
                     addr: NEIGHBOUR_1_ADDR.into()
                 })
@@ -863,8 +866,7 @@ mod test {
         );
         assert!(
             r.neighbor_table
-                .inner
-                .get_by_key(&NeighbourIndex {
+                .get(&NeighbourIndex {
                     iface,
                     addr: NEIGHBOUR_2_ADDR.into()
                 })
@@ -906,8 +908,7 @@ mod test {
 
         assert!(
             r.neighbor_table
-                .inner
-                .get_by_key(&NeighbourIndex {
+                .get(&NeighbourIndex {
                     iface,
                     addr: NEIGHBOUR_1_ADDR.into()
                 })
@@ -944,8 +945,7 @@ mod test {
 
         let neighbour = r
             .neighbor_table
-            .inner
-            .get_by_key(&NeighbourIndex {
+            .get(&NeighbourIndex {
                 iface,
                 addr: NEIGHBOUR_1_ADDR.into(),
             })

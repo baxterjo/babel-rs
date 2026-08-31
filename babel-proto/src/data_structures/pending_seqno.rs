@@ -51,6 +51,8 @@ where
 /// and to which no reply has been received yet. This table is indexed by triples of the form
 /// (prefix, plen, router-id) (see [`SeqnoRequestIndex`]), and every entry in this table contains
 /// the following data:
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SeqnoRequest<A: AddressExt> {
     /// 3.2.7-2.1: the prefix [...] being requested
     prefix: Address<A>,

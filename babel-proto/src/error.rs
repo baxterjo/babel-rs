@@ -10,6 +10,7 @@ use crate::packet::error::len_error::LenError;
 use crate::packet::error::tlv_err::TlvError;
 use crate::packet::parser::ParserError;
 use crate::packet::writer::PacketWriterError;
+use crate::utils::TimerError;
 
 #[derive(Debug, Error)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -55,4 +56,6 @@ where
     Address(#[from] AddressError<A>),
     #[error(transparent)]
     Parser(#[from] ParserError<A>),
+    #[error(transparent)]
+    Timer(#[from] TimerError),
 }

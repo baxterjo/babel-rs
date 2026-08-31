@@ -15,7 +15,7 @@ pub struct Interface<A: AddressExt> {
     // Spec values
     /// User defined interface ID. Used to correlate the router tracked interface with user defined
     /// interfaces.
-    pub(crate) handle: InterfaceHandle,
+    handle: InterfaceHandle,
 
     /// The address this node can be reached at on this iterface.
     pub(crate) address: Address<A>,
@@ -71,6 +71,10 @@ impl<A: AddressExt> Interface<A> {
             ihu_hold_time_multiple: config.ihu_hold_time,
             cost_calc: config.cost_calc,
         })
+    }
+
+    pub(crate) fn handle(&self) -> &InterfaceHandle {
+        &self.handle
     }
 
     /// Polls this interface for an mcast hello.

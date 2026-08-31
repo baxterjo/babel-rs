@@ -7,6 +7,7 @@ use crate::data_types::address::Address;
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::packet::parser::ResolvedUpdate;
+use crate::utils::storage::Table;
 use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, ManagedSlice, Timer};
 
 pub const DEFAULT_SMOOTHING_MULTIPLE: DurationMultiplier = DurationMultiplier::new(3, 1);
@@ -19,7 +20,7 @@ pub struct RouteTable<'storage, A: AddressExt> {
     /// This should never be made public in any way as the insert/remove functions guarantee:
     /// * The table contents are unique by key
     /// * The table is sorted after any addition / removal of the keys.
-    inner: ManagedSlice<'storage, Option<Route<A>>>,
+    inner: Table<'storage, RouteIndex<A>, Route<A>>,
 
     pub(crate) route_expiry_time: DurationMultiplier,
     /// Multiple of the hello timer of a given route that should be used to generate the time
@@ -39,12 +40,12 @@ where
     /// While interfaces are generally well known at compile time, the number of routes this
     /// Babel speaker might see is specific to its deployment. So it is important to right size
     /// this number for your specfic deployment or do what you can to enable the alloc feature.
-    pub(crate) fn new_with_storage<T>(table: T, route_expiry: DurationMultiplier) -> Self
+    pub(crate) fn new_with_storage<T>(storage: T, route_expiry: DurationMultiplier) -> Self
     where
         T: Into<ManagedSlice<'storage, Option<Route<A>>>>,
     {
         Self {
-            inner: table.into(),
+            inner: Table::new(storage),
             route_expiry_time: route_expiry,
             smoothing_multiple: DEFAULT_SMOOTHING_MULTIPLE,
         }
@@ -56,6 +57,17 @@ where
 
     pub(crate) fn iter_mut_slots(&mut self) -> impl Iterator<Item = &mut Option<Route<A>>> {
         self.inner.iter_mut_slots()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Route<A>> {
+        self.inner.iter()
+    }
+
+    pub(crate) fn retain_mut<F>(&mut self, f: F)
+    where
+        F: FnMut(&mut Route<A>) -> bool,
+    {
+        self.inner.retain_mut(f);
     }
 
     pub(crate) fn flush(&mut self) {

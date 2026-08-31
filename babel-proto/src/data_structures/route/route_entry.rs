@@ -8,7 +8,7 @@ use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::utils::storage::InternallyKeyed;
-use crate::utils::{Duration, DurationMultiplier, Instant, ManagedSlice, Timer};
+use crate::utils::{Duration, DurationMultiplier, Instant, Timer};
 /// Route entry as defined in
 /// [Section 3.2.6](https://datatracker.ietf.org/doc/html/rfc8966#name-the-route-table)
 ///

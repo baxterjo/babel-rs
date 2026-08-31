@@ -78,7 +78,7 @@ impl<A: AddressExt> NeighbourConfig<A> {
 
     pub fn interface_default(address: Address<A>, interface: &Interface<A>) -> Self {
         Self {
-            iface: interface.handle,
+            iface: *interface.handle(),
             address,
             // This is set by incoming IHU TLVs, so there is no interface default start at a
             // sensible defualt.
