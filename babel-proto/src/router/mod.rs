@@ -1,5 +1,6 @@
 use core::marker::PhantomData;
 
+use crate::BorrowedMemoryPool;
 use crate::data_structures::interface::{
     Interface, InterfaceConfig, InterfaceHandle, InterfaceTable,
 };
@@ -13,6 +14,7 @@ use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
 use crate::router::config::BabelRouterConfig;
+use crate::utils::triggered_updates::{TriggeredUpdateTable, Update};
 use crate::utils::{Instant, ManagedSlice, ManagedSliceExt};
 
 pub mod config;
@@ -41,6 +43,8 @@ where
 
     pub(crate) source_table: SourceTable<'storage, A>,
 
+    pub(crate) update_table: TriggeredUpdateTable<'storage, A>,
+
     // Extension markers
     _state_ext_marker: PhantomData<P>,
     _addr_ext_marker: PhantomData<A>,
@@ -51,20 +55,45 @@ where
     A: AddressExt,
     P: ParserStateExt,
 {
-    /// Create a new Babel Router with user provided storage.
-    ///
-    /// Arguments:
-    /// `id`: The router ID of this router. This should be globally unique within your routing
-    /// domain. `iface_storage`: User provided storage that will be used internally.
-    /// `neighbour_storage`: User provided storage that will be used internally.
-    /// `pending_seqno_storage`: User provided storage that will be used internally.
-    pub fn new_with_storage<IF, N, PS, R, S>(
+    /// Create a new Babel Router from config.
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    pub fn new(config: BabelRouterConfig) -> Self {
+        use alloc::vec::Vec;
+        Self::new_with_storage_inner(
+            config,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    /// Create a new Babel Router with user provided, statically sized storage.
+    pub fn new_with_storage(
         config: BabelRouterConfig,
-        iface_storage: IF,
-        neighbour_storage: N,
-        pending_seqno_storage: PS,
-        route_table_storage: R,
-        source_table_storage: S,
+        storage: BorrowedMemoryPool<'storage, A>,
+    ) -> Self {
+        Self::new_with_storage_inner(
+            config,
+            storage.interface_table,
+            storage.neighbour_table,
+            storage.pending_seqno_table,
+            storage.route_table,
+            storage.source_table,
+            storage.update_table,
+        )
+    }
+
+    fn new_with_storage_inner<IF, N, PS, R, S, U>(
+        config: BabelRouterConfig,
+        interface_table: IF,
+        neighbour_table: N,
+        pending_seqno_table: PS,
+        route_table: R,
+        source_table: S,
+        update_table: U,
     ) -> Self
     where
         IF: Into<ManagedSlice<'storage, Option<Interface<A>>>>,
@@ -72,40 +101,21 @@ where
         PS: Into<ManagedSlice<'storage, Option<SeqnoRequest<A>>>>,
         R: Into<ManagedSlice<'storage, Option<Route<A>>>>,
         S: Into<ManagedSlice<'storage, Option<Source<A>>>>,
+        U: Into<ManagedSlice<'storage, Option<Update<A>>>>,
     {
         Self {
             id: config.id,
             magic_number: config.magic_number,
             version_number: config.version,
-            iface_table: InterfaceTable::new_with_storage(iface_storage),
-            neighbor_table: NeighbourTable::new_with_storage(neighbour_storage),
-            pending_seqno: PendingSeqnoRequestTable::new_with_storage(pending_seqno_storage),
-            route_table: RouteTable::new_with_storage(
-                route_table_storage,
-                config.route_expiry_multiplier,
-            ),
-            source_table: SourceTable::new_with_storage(source_table_storage),
+            iface_table: InterfaceTable::new_with_storage(interface_table),
+            neighbor_table: NeighbourTable::new_with_storage(neighbour_table),
+            pending_seqno: PendingSeqnoRequestTable::new_with_storage(pending_seqno_table),
+            route_table: RouteTable::new_with_storage(route_table, config.route_expiry_multiplier),
+            source_table: SourceTable::new_with_storage(source_table),
+            update_table: TriggeredUpdateTable::new_with_storage(update_table),
             _state_ext_marker: PhantomData,
             _addr_ext_marker: PhantomData,
         }
-    }
-
-    /// Create a new Babel Router.
-    ///
-    /// Arguments:
-    /// `id`: The router ID of this router. This should be globally unique within your routing
-    /// domain.
-    #[cfg(any(feature = "std", feature = "alloc"))]
-    pub fn new(config: BabelRouterConfig) -> Self {
-        use alloc::vec::Vec;
-        Self::new_with_storage(
-            config,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
     }
 
     /// Register a new interface with the router.

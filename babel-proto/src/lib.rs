@@ -1,6 +1,14 @@
 #![cfg_attr(not(any(feature = "std")), no_std)]
 //#![cfg_attr(not(any(test, feature = "std")), no_std)]
 
+use crate::data_structures::interface::Interface;
+use crate::data_structures::neighbour::Neighbour;
+use crate::data_structures::pending_seqno::SeqnoRequest;
+use crate::data_structures::route::Route;
+use crate::data_structures::source::Source;
+use crate::extension::address::AddressExt;
+use crate::utils::triggered_updates::Update;
+
 //#[cfg(not(any(test, feature = "alloc")))]
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -45,3 +53,64 @@ impl<T: defmt::Format> MaybeDefmt for T {}
 pub trait MaybeDefmt {}
 #[cfg(not(feature = "defmt"))]
 impl<T> MaybeDefmt for T {}
+
+/// A memory pool for the different storage strucutres in Babel.
+pub struct BabelMemoryPool<
+    A: AddressExt,
+    const I: usize,
+    const N: usize,
+    const R: usize,
+    const S: usize,
+    const PS: usize,
+> {
+    interface_table: [Option<Interface<A>>; I],
+    neighbour_table: [Option<Neighbour<A>>; N],
+    route_table: [Option<Route<A>>; R],
+    source_table: [Option<Source<A>>; S],
+    pending_seqno_table: [Option<SeqnoRequest<A>>; PS],
+    update_table: [[Option<Update<A>>; N]; R],
+}
+
+pub struct BorrowedMemoryPool<'storage, A: AddressExt> {
+    pub(crate) interface_table: &'storage mut [Option<Interface<A>>],
+    pub(crate) neighbour_table: &'storage mut [Option<Neighbour<A>>],
+    pub(crate) route_table: &'storage mut [Option<Route<A>>],
+    pub(crate) source_table: &'storage mut [Option<Source<A>>],
+    pub(crate) pending_seqno_table: &'storage mut [Option<SeqnoRequest<A>>],
+    pub(crate) update_table: &'storage mut [Option<Update<A>>],
+}
+
+impl<
+    'storage,
+    A: AddressExt,
+    const I: usize,
+    const N: usize,
+    const R: usize,
+    const S: usize,
+    const PS: usize,
+> BabelMemoryPool<A, I, N, R, S, PS>
+where
+    Self: 'storage,
+{
+    pub const fn new() -> Self {
+        Self {
+            interface_table: [const { None }; I],
+            neighbour_table: [const { None }; N],
+            route_table: [const { None }; R],
+            source_table: [const { None }; S],
+            pending_seqno_table: [const { None }; PS],
+            update_table: [[const { None }; N]; R],
+        }
+    }
+
+    pub fn borrowed(&'storage mut self) -> BorrowedMemoryPool<'storage, A> {
+        BorrowedMemoryPool {
+            interface_table: &mut self.interface_table,
+            neighbour_table: &mut self.neighbour_table,
+            route_table: &mut self.route_table,
+            source_table: &mut self.source_table,
+            pending_seqno_table: &mut self.pending_seqno_table,
+            update_table: self.update_table.as_flattened_mut(),
+        }
+    }
+}

@@ -8,7 +8,7 @@ use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::utils::storage::InternallyKeyed;
-use crate::utils::{Duration, DurationMultiplier, Instant, Timer};
+use crate::utils::{Duration, DurationMultiplier, Instant, ManagedSlice, Timer};
 /// Route entry as defined in
 /// [Section 3.2.6](https://datatracker.ietf.org/doc/html/rfc8966#name-the-route-table)
 ///
@@ -56,9 +56,6 @@ pub struct Route<A: AddressExt> {
     /// timer. It is initialised and reset as specified in Section
     /// [3.5.3](https://datatracker.ietf.org/doc/html/rfc8966#route-acquisition)
     pub(crate) expiry: Timer,
-    // Additional state
-    // TODO: Triggered updates defined in section 3.7.2
-    //pub(crate) triggered_update: bool,
 }
 /// Route index as defined in
 /// [Section 3.2.6](https://datatracker.ietf.org/doc/html/rfc8966#name-the-route-table)
