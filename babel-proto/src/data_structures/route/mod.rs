@@ -13,6 +13,7 @@ pub use route_table::RouteTable;
 use crate::utils::TimerError;
 
 #[derive(Debug, Error)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum RouteError {
     #[error(transparent)]
     Timer(#[from] TimerError),

@@ -51,7 +51,7 @@ where
         defmt::write!(
             f,
             "Parser{{ default_router_id: {}, default_v4_addr: {}, default_v6_addr: {}, extension: {}}}",
-            self.default_router_id,
+            self.router_id,
             self.default_v4_addr.map(|addr| addr.octets()),
             self.default_v6_addr.map(|addr| addr.octets()),
             self.extension
@@ -274,6 +274,7 @@ pub struct ResolvedUpdate<'a, A: AddressExt> {
 }
 
 #[derive(Debug, Error)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ParserError<A: AddressExt> {
     #[error(transparent)]
     Encoding(#[from] AddressEncodingError<A::Encoding>),

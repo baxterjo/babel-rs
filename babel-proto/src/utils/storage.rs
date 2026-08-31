@@ -157,6 +157,7 @@ where
     }
 
     pub(crate) fn flush(&mut self) {
+        #[cfg(any(feature = "std", feature = "alloc"))]
         if let ManagedSlice::Owned(owned) = self {
             owned.retain(|e| e.is_some());
         }
