@@ -10,14 +10,13 @@ pub(crate) use update_entry::Update;
 #[doc(inline)]
 pub(crate) use update_table::UpdateTable;
 
-use crate::data_structures::interface::InterfaceHandle;
 use crate::data_structures::neighbour::NeighbourIndex;
 use crate::data_structures::route::RouteIndex;
-use crate::data_types::{Address, RouterId};
 use crate::extension::address::AddressExt;
 use crate::utils::TimerError;
 
 #[derive(Debug, Error)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum UpdateError {
     #[error(transparent)]
     Timer(#[from] TimerError),

@@ -199,6 +199,7 @@ where
                 now,
                 interface,
                 &self.route_table,
+                &mut self.source_table,
                 self.update_timer.interval(),
                 &mut active_dest,
                 &mut next_poll,

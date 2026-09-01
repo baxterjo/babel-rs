@@ -1,4 +1,7 @@
-use crate::data_structures::interface::{DEFAULT_MULTICAST_HELLO_INTERVAL, InterfaceHandle};
+use crate::data_structures::interface::interface_entry::MAX_OTHER_ADDRESSES;
+use crate::data_structures::interface::{
+    DEFAULT_MULTICAST_HELLO_INTERVAL, InterfaceError, InterfaceHandle,
+};
 use crate::data_structures::neighbour::DEFAULT_HOLD_TIME_MULTIPLIER;
 use crate::data_types::{Address, Interval};
 use crate::extension::address::AddressExt;
@@ -20,6 +23,7 @@ pub const DEFAULT_WIRED_UPDATE_RETRY_LIMIT: u8 = 2;
 pub struct InterfaceConfig<A: AddressExt> {
     pub(crate) id: InterfaceHandle,
     pub(crate) address: Address<A>,
+    pub(crate) other_addresses: [Option<Address<A>>; MAX_OTHER_ADDRESSES],
     pub(crate) mcast_hello_interval: Interval,
     pub(crate) ucast_hello_interval: Option<Interval>,
     pub(crate) update_interval_spec: DurationSpec,
@@ -47,6 +51,7 @@ impl<A: AddressExt> InterfaceConfig<A> {
         Self {
             id,
             address,
+            other_addresses: [const { None }; MAX_OTHER_ADDRESSES],
             mcast_hello_interval: DEFAULT_MULTICAST_HELLO_INTERVAL.into(),
             ucast_hello_interval: None,
             update_interval_spec: DurationSpec::UPDATE_SPEC,
@@ -72,6 +77,43 @@ impl<A: AddressExt> InterfaceConfig<A> {
     /// Sets the address that this node can be reached on through this interface.
     pub fn set_address(&mut self, address: Address<A>) {
         self.address = address;
+    }
+
+    /// Adds an address in another address family that this interface can be reached at.
+    ///
+    /// Babel traffic is never sent from these; they exist so that routes in a family other than
+    /// [`Self::address`]'s can be advertised on this interface. A packet seeds the receiver's next
+    /// hop for its own family only
+    /// ([Section 4.5](https://datatracker.ietf.org/doc/html/rfc8966#name-parser-state-and-encoding-o)),
+    /// so a route in any other family needs an explicit Next-Hop TLV, rendered from the address
+    /// added here. Without one, routes in that family cannot be advertised on this interface.
+    ///
+    /// Only the first address per family is meaningful, so adding a second in a family this
+    /// interface already covers — including [`Self::address`]'s own — is rejected rather than
+    /// silently ignored.
+    pub fn add_other_address(&mut self, address: Address<A>) -> Result<(), InterfaceError> {
+        let family = address.encoding().address_family();
+        let covered = core::iter::once(&self.address)
+            .chain(self.other_addresses.iter().flatten())
+            .any(|existing| existing.encoding().address_family() == family);
+        if covered {
+            return Err(InterfaceError::DuplicateAddressFamily);
+        }
+
+        let slot = self
+            .other_addresses
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(InterfaceError::TooManyOtherAddresses {
+                max: MAX_OTHER_ADDRESSES,
+            })?;
+        *slot = Some(address);
+        Ok(())
+    }
+
+    /// The addresses in other families this interface can be reached at, in insertion order.
+    pub fn other_addresses(&self) -> impl Iterator<Item = &Address<A>> {
+        self.other_addresses.iter().flatten()
     }
 
     /// The multicast hello interval for this interface.

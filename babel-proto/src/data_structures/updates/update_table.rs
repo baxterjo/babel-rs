@@ -1,5 +1,6 @@
 use crate::data_structures::interface::{Interface, InterfaceHandle};
 use crate::data_structures::route::{Route, RouteIndex, RouteTable};
+use crate::data_structures::source::SourceTable;
 use crate::data_structures::updates::{Update, UpdateError, UpdateIndex};
 use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
@@ -47,34 +48,12 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
 
     /// Walks the updates in the table one router-id at a time, handing out each group with the
     /// table still mutably borrowed, so the write pass can advance an update's state in place.
-    ///
-    /// A packet carries the router-id once, in a Router-Id TLV that every Update behind it
-    /// inherits ([Section 4.6.7](https://datatracker.ietf.org/doc/html/rfc8966#name-router-id)),
-    /// so writing updates in these groups is what keeps the number of Router-Id TLVs down to one
-    /// per distinct router-id rather than one per update.
-    ///
-    /// Unlike [`RouteTable::destination_groups_mut`], this cannot be a `chunk_by`: the table is
-    /// sorted by [`UpdateIndex`], and the router-id is not part of that key — it lives on the
-    /// route table entry the update points at — so the updates sharing a router-id are scattered
-    /// through the table instead of sitting in one contiguous run. `chunk_by_mut` hands out
-    /// disjoint sub-slices, and a scattered group is not a sub-slice of anything.
-    ///
-    /// Writes the Update TLVs owed on `interface` into `writer`, advancing each update's send
-    /// state as its TLV lands.
-    ///
-    /// This lives on the table rather than on `BabelRouter` because the caller is part-way through
-    /// iterating `self.iface_table` mutably: a `&mut self` method on the router would be a second
-    /// borrow of the whole thing, while `self.update_table.poll_for_updates(..)` borrows one field
-    /// and takes the rest — the route table, the interface, the update interval — as arguments the
-    /// compiler can see are disjoint from it.
-    ///
-    /// `P` is only needed for the [`Parser`] tracking per-packet compression state, so it appears
-    /// nowhere in the signature and callers must name it: `poll_for_updates::<P>(..)`.
     pub(crate) fn poll_for_updates<'output, P>(
         &mut self,
         now: Instant,
         interface: &Interface<A>,
         routes: &RouteTable<'_, A>,
+        _sources: &mut SourceTable<'_, A>,
         update_interval: Interval,
         active_dest: &mut DestAddr<A>,
         next_poll: &mut Duration,
@@ -86,7 +65,7 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
     where
         P: ParserStateExt<AddressEncoding = A::Encoding, Address = A>,
     {
-        // Start a cursor over self that yeilds groups of router ids.
+        // Start a cursor over self that yields groups of router ids.
         let mut router_id_groups = self.router_id_groups_mut(interface.handle(), routes);
         // Start the parser for the packet with the initial next hop equal to the address of the
         // interface this packet will be sent on.
@@ -111,23 +90,84 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                     continue;
                 }
 
-                // If the update has already been written to the packet, can be sent via multicast,
-                // AND is already destined for multicast, then decrement the update send count and
-                // restart the timer.
+                // If the update CAN be sent to multicast, is already DESTINED for multicast, AND
+                // has already been written to the packet:
+                //
+                // THEN
                 //
                 // The TLV already in the packet reaches this neighbour too, so this update is
-                // satisfied without writing anything more — hence the `continue`, which is also
-                // what keeps the decrement below from running a second time on it.
-                if active_dest.is_multicast()
+                // satisfied without writing anything more. So decrement the update send count and
+                // restart the timer.
+                if update.mcast
+                    && active_dest.is_multicast()
                     && sent_update.is_some_and(|idx| idx == route.key())
-                    && update.mcast
                 {
-                    update.send_count -= 1;
+                    update.send_count = update.send_count.saturating_sub(1);
                     update.send_timer.restart(now);
                     continue;
                 }
 
                 // A this point we know an update TLV needs to be sent.
+
+                // Update the source table
+
+                // Try to claim the active destination before doing anything.
+
+                let new_dest = if update.mcast {
+                    DestAddr::Multicast
+                } else {
+                    DestAddr::Unicast(update.neighbour().addr)
+                };
+                if let Err(err) = active_dest.claim(new_dest) {
+                    b_debug!("Active Dest Error in poll_for_uddate - {}", err);
+                    continue;
+                };
+
+                // Check to see if the parser has a next_hop for this address family, a hit means
+                // the route's family is already covered and its Update TLV can simply inherit it. A
+                // miss means we have to state one, and we can only state an address we actually
+                // have.
+                if parser
+                    .get_next_hop(&route.source().prefix.encoding())
+                    .is_none()
+                {
+                    // A wildcard prefix belongs to no address family, so nothing can route it, and
+                    // no address in the route's family means the receiver would have nothing to
+                    // forward through. babeld bails the same way: `if(!ifp->ipv4) ... return;`.
+                    let next_hop_opt = route
+                        .source()
+                        .prefix
+                        .encoding()
+                        .address_family()
+                        .and_then(|family| interface.address_for_family(&family).copied());
+
+                    let Some(next_hop) = next_hop_opt else {
+                        // If this interface does not have an address of the same family as route's
+                        // address, then it cannot advertise the route as it does not support that
+                        // route's address family.
+                        //
+                        // i.e.: If the interface is Ipv6 only and the route is for Ipv4, then this
+                        // router has no way of forwarding on this interface, so we don't advertise
+                        // the route.
+                        update.send_count = 0;
+                        continue;
+                    };
+                    // State the next hop this route's family is missing, resolved above.
+                    b_debug!(
+                        "[SEND] NextHop - iface: {:?}, dest: {:?} - next_hop: {:?}",
+                        interface,
+                        active_dest,
+                        next_hop
+                    );
+
+                    writer = writer
+                        .write_next_hop(next_hop.encoding().into(), next_hop.as_wire())?
+                        .finish_tlv()?;
+                    // Mirror the TLV into our copy of the receiver's state. Without this the
+                    // same Next-Hop TLV is re-emitted ahead of every
+                    // update in the family.
+                    parser.set_next_hop(next_hop);
+                }
 
                 // If the packet's router-id context is not this route's, write a router-id TLV.
                 // A fresh packet has no context at all, so the first update in one always gets a
@@ -143,42 +183,9 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                         active_dest,
                         router_id
                     );
+
                     writer = writer.write_router_id(router_id)?.finish_tlv()?;
                     parser.set_router_id(router_id);
-
-                    if active_dest.is_free() {
-                        if update.mcast {
-                            active_dest
-                                .claim(DestAddr::Multicast)
-                                .expect("Just checked if it was free")
-                        } else {
-                            active_dest
-                                .claim(DestAddr::Unicast(update.neighbour().addr))
-                                .expect("Just checked if free")
-                        }
-                    }
-                }
-
-                // If the address family for the route does not match the sending interface's
-                // address family
-                // AND
-                //   the parser does not have the next hop state for the route's address family
-                //   OR
-                //   the parser has the next hop state and it does not match the sending interface's
-                //   address
-                if route.source().prefix.encoding().address_family()
-                    != interface.address.encoding().address_family()
-                    && parser
-                        .get_next_hop(&route.source().prefix.encoding())
-                        .is_none_or(|val| val != interface.address)
-                {
-                    // A next hop TLV must be sent
-                    writer = writer
-                        .write_next_hop(
-                            interface.address.encoding().into(),
-                            interface.address.as_wire(),
-                        )?
-                        .finish_tlv()?;
                 }
 
                 // TODO: Address compression. To keep things simple I am going to bikeshed outgoing
@@ -201,13 +208,15 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                     .finish_tlv()?;
 
                 sent_update = Some(route.key());
-                update.send_count -= 1;
+                update.send_count = update.send_count.saturating_sub(1);
                 update.send_timer.restart(now);
             }
         }
 
-        // Purge the updates that are finished sending.
-        self.inner.retain(|u| u.send_count != 0);
+        // Purge the updates that are finished sending, plus the ones there is no longer anything
+        // to send.
+        self.inner
+            .retain(|u| u.send_count != 0 && routes.get_by_key(u.route()).is_some());
         Ok(writer)
     }
 
@@ -264,12 +273,12 @@ impl<'updates, 'routes, A: AddressExt> RouterIdGroups<'_, 'updates, 'routes, A> 
             .filter(|u| &u.neighbour().iface == self.interface)
             // Fetch the router id for the given route.
             .filter_map(|update| router_id_of(routes, update))
-            // Filter all router ID's greater than the last
+            // Filter all router ID's greater than the last or all if last is None
             .filter(|id| last.is_none_or(|last| *id > last))
             // Take the minimum router ID of the remainder
             .min()?;
 
-        // This ratchets up the minimum.
+        // Ratchet up the minimum.
         self.last = Some(router_id);
         Some(RouterIdGroup {
             router_id,
@@ -860,10 +869,12 @@ mod test {
     /// 3. This route's TLV is already in the packet and both may go multicast → do not repeat it.
     /// 4. The packet's Router-Id context does not match this route's → emit a Router-Id TLV, and
     ///    claim the destination if it is still free.
-    /// 5. The route is in a different address family than the interface → emit a Next-Hop TLV.
+    /// 5. The route is in a different address family than the interface → emit a Next-Hop TLV, or
+    ///    drop the update outright if the interface has no address in that family to name.
     /// 6. The write succeeded → decrement `send_count` and restart the timer; on `BufferTooSmall`
     ///    leave both untouched so the update is still owed.
-    /// 7. After the pass, updates that have been sent their full count are purged.
+    /// 7. After the pass, updates that have been sent their full count — or dropped by 5, or whose
+    ///    route has left the route table — are purged.
     mod poll_updates {
         use super::*;
         use crate::data_structures::interface::InterfaceConfig;
@@ -884,14 +895,31 @@ mod test {
         /// that leaves this untouched asked to be woken no sooner than it already was.
         const NEVER: Duration = Duration::from_secs(9999);
 
-        /// The interface's own address, and so the next hop the parser starts out holding.
+        /// The interface's own address — link-local, as every Babel source address must be — and
+        /// so the next hop the parser starts out holding for the IPv6 family.
         const IFACE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
 
-        /// An IPv4 prefix, for the one branch that turns on the route and the interface sitting in
-        /// different address families.
+        /// The interface's on-link IPv4 address. A v6-sourced packet leaves the receiver's v4 next
+        /// hop empty, so this is the only thing a v4 route can be advertised through.
+        const IFACE_V4_ADDR: core::net::Ipv4Addr = core::net::Ipv4Addr::new(192, 0, 2, 1);
+
+        /// An IPv4 prefix, for the branch that turns on the route and the interface's primary
+        /// address sitting in different address families.
         const DEST_V4: core::net::Ipv4Addr = core::net::Ipv4Addr::new(10, 0, 0, 0);
 
+        /// A dual-stack interface: link-local IPv6 to speak Babel over, plus an on-link IPv4
+        /// address so IPv4 routes can be given a next hop.
         fn interface(name: &str) -> Interface<NoExtension> {
+            let mut config = InterfaceConfig::new_wired(iface_handle(name), IFACE_ADDR.into());
+            config
+                .add_other_address(IFACE_V4_ADDR.into())
+                .expect("v4 is a fresh family");
+            Interface::new(t0(), config).expect("bad interface config")
+        }
+
+        /// [`interface`], with no IPv4 address — an IPv6-only link, which cannot advertise IPv4
+        /// routes at all.
+        fn v6_only_interface(name: &str) -> Interface<NoExtension> {
             Interface::new(
                 t0(),
                 InterfaceConfig::new_wired(iface_handle(name), IFACE_ADDR.into()),
@@ -925,6 +953,13 @@ mod test {
 
         fn empty_updates() -> UpdateTable<'static, NoExtension> {
             UpdateTable::new_with_storage(Vec::new())
+        }
+
+        /// A placeholder for the source table the write pass takes but does not yet read. Once the
+        /// pass starts updating feasibility distances as it advertises, these tests will seed it
+        /// and assert on what it holds afterwards.
+        fn empty_sources() -> SourceTable<'static, NoExtension> {
+            SourceTable::new_with_storage(Vec::new())
         }
 
         /// What one `poll_for_updates` call produced.
@@ -981,6 +1016,7 @@ mod test {
                     now,
                     iface,
                     routes,
+                    &mut empty_sources(),
                     UPDATE_INTERVAL,
                     &mut dest,
                     &mut next_poll,
@@ -1013,10 +1049,7 @@ mod test {
         }
 
         /// The `(send_count, timer is pending)` of every update left in the table, in table order.
-        fn send_state(
-            updates: &UpdateTable<'_, NoExtension>,
-            now: Instant,
-        ) -> Vec<(u8, bool)> {
+        fn send_state(updates: &UpdateTable<'_, NoExtension>, now: Instant) -> Vec<(u8, bool)> {
             updates
                 .inner
                 .iter()
@@ -1042,8 +1075,10 @@ mod test {
             assert_eq!(out.next_poll, NEVER, "nothing asked for a wake-up");
         }
 
-        /// An update whose route has been flushed has no router-id, so it opens no group. It is
-        /// also never purged, because the pass never reaches it — it just sits there inert.
+        /// An update whose route has been flushed has no router-id, so it opens no group and the
+        /// write pass never reaches it. There is nothing left to render its TLV from and nothing
+        /// that will ever advance its send state, so the purge takes it instead — otherwise it
+        /// would hold a table slot for the life of the router.
         #[test]
         fn an_update_whose_route_is_gone_writes_nothing() {
             let routes = empty_routes();
@@ -1058,10 +1093,9 @@ mod test {
             let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
 
             assert!(out.tlv_types().is_empty());
-            assert_eq!(
-                send_state(&updates, t0()),
-                alloc::vec![(1, false)],
-                "the orphan is untouched, not purged"
+            assert!(
+                send_state(&updates, t0()).is_empty(),
+                "the orphan is purged, not left inert"
             );
         }
 
@@ -1385,6 +1419,120 @@ mod test {
                 ],
                 "the next hop has to be stated before the update that relies on it"
             );
+
+            let next_hop = match out.nth_tlv(1) {
+                Tlv::NextHop(tlv) => tlv,
+                other => panic!("should be a next hop, got {other:?}"),
+            };
+            assert_eq!(
+                next_hop.ae(),
+                1,
+                "the next hop must be in the route's family, not the interface's primary one"
+            );
+            assert_eq!(
+                next_hop.next_hop(4).expect("should have a 4 byte address"),
+                Address::<NoExtension>::from(IFACE_V4_ADDR).as_wire(),
+                "and it must be the interface's own on-link v4 address"
+            );
+        }
+
+        /// The counterpart: an IPv6-only link has no address to offer as an IPv4 next hop, so the
+        /// receiver would have nothing to forward through. The route is simply not advertisable
+        /// here — babeld bails the same way with `if(!ifp->ipv4) ... return;`.
+        ///
+        /// Emitting the Update anyway, or preceding it with a Next-Hop TLV naming our *IPv6*
+        /// address, would both be worse than silence: the first is unusable, the second is a
+        /// well-formed TLV that sets the wrong family's state.
+        ///
+        /// It is also *dropped*, not deferred. The link cannot grow an IPv4 address on its own, so
+        /// an update left pending here is one no later poll could ever send either — it would sit
+        /// in the table forever, holding a slot and being re-examined by every poll.
+        #[test]
+        fn a_route_in_a_family_the_interface_cannot_name_is_not_advertised() {
+            let mut routes = empty_routes();
+            let mut updates = empty_updates();
+
+            let route = route_with(DEST_V4, 24, "rtr-a", neighbour(NEIGHBOUR_1));
+            routes.insert(route).expect("owned storage grows");
+            updates
+                .add_update(update(&route, NEIGHBOUR_1))
+                .expect("owned storage grows");
+
+            let out = poll(&mut updates, &routes, &v6_only_interface(IFACE_1), t0());
+
+            assert!(
+                out.tlv_types().is_empty(),
+                "nothing should go out, got {:?}",
+                out.tlv_types()
+            );
+            assert!(
+                send_state(&updates, t0()).is_empty(),
+                "an update this link can never send is purged, not left pending"
+            );
+        }
+
+        /// The drop is scoped to the update that could not be advertised, and to nothing else. The
+        /// same route owed on a dual-stack link is a separate table entry, and the poll that gives
+        /// up on the v6-only link must leave it alone for the poll of its own interface to send.
+        #[test]
+        fn a_route_dropped_on_one_interface_is_still_owed_on_another() {
+            let mut routes = empty_routes();
+            let mut updates = empty_updates();
+
+            let route = route_with(DEST_V4, 24, "rtr-a", neighbour(NEIGHBOUR_1));
+            routes.insert(route).expect("owned storage grows");
+            for send_to in [nbr(IFACE_1, NEIGHBOUR_1), nbr(IFACE_2, NEIGHBOUR_1)] {
+                updates
+                    .add_update(update_to(&route, send_to))
+                    .expect("owned storage grows");
+            }
+
+            // IFACE_1 has no IPv4 address, so its update is dropped.
+            let out = poll(&mut updates, &routes, &v6_only_interface(IFACE_1), t0());
+            assert!(out.tlv_types().is_empty());
+            assert_eq!(
+                send_state(&updates, t0()),
+                alloc::vec![(1, false)],
+                "only the v6-only link's update was purged"
+            );
+
+            // IFACE_2 is dual stack, so the survivor still goes out — with the Next-Hop TLV that
+            // names the v4 address the other link did not have.
+            let out = poll(&mut updates, &routes, &interface(IFACE_2), t0());
+            assert_eq!(
+                out.tlv_types(),
+                alloc::vec![
+                    RouterIdSlice::TYPE_ID,
+                    NextHopSlice::TYPE_ID,
+                    UpdateSlice::TYPE_ID
+                ]
+            );
+            assert!(
+                send_state(&updates, t0()).is_empty(),
+                "and is purged for having been sent its full count"
+            );
+        }
+
+        /// An IPv6 route needs no Next-Hop TLV even on a dual-stack interface: the packet's own
+        /// source address already seeds the receiver's IPv6 next hop.
+        #[test]
+        fn a_dual_stack_interface_still_states_no_next_hop_for_ipv6_routes() {
+            let mut routes = empty_routes();
+            let mut updates = empty_updates();
+
+            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
+            routes.insert(route).expect("owned storage grows");
+            updates
+                .add_update(update(&route, NEIGHBOUR_1))
+                .expect("owned storage grows");
+
+            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+
+            assert_eq!(
+                out.tlv_types(),
+                alloc::vec![RouterIdSlice::TYPE_ID, UpdateSlice::TYPE_ID],
+                "having a v4 address must not make v6 routes state a next hop"
+            );
         }
 
         /// A Next-Hop TLV sets parser state that every following Update TLV inherits, so a second
@@ -1394,8 +1542,10 @@ mod test {
             let mut routes = empty_routes();
             let mut updates = empty_updates();
 
-            for (prefix, plen) in [(core::net::Ipv4Addr::new(10, 0, 0, 0), 24u8),
-                                   (core::net::Ipv4Addr::new(10, 0, 1, 0), 24)] {
+            for (prefix, plen) in [
+                (core::net::Ipv4Addr::new(10, 0, 0, 0), 24u8),
+                (core::net::Ipv4Addr::new(10, 0, 1, 0), 24),
+            ] {
                 let route = route_with(prefix, plen, "rtr-a", neighbour(NEIGHBOUR_1));
                 routes.insert(route).expect("owned storage grows");
                 updates
@@ -1411,7 +1561,8 @@ mod test {
                 .filter(|t| **t == NextHopSlice::TYPE_ID)
                 .count();
             assert_eq!(
-                next_hops, 1,
+                next_hops,
+                1,
                 "both updates share one next hop, got TLVs {:?}",
                 out.tlv_types()
             );
@@ -1566,6 +1717,7 @@ mod test {
                     t0(),
                     &interface(IFACE_1),
                     &routes,
+                    &mut empty_sources(),
                     UPDATE_INTERVAL,
                     &mut dest,
                     &mut next_poll,

@@ -11,6 +11,7 @@ use crate::packet::tlv::tlv_slice::TlvSlice;
 /// Next Hop TLV as defined in
 /// [Section 4.6.8](https://datatracker.ietf.org/doc/html/rfc8966#name-next-hop)
 ///
+/// ## Spec
 /// A Next Hop TLV establishes a next-hop address for a given address family (IPv4 or IPv6) that is
 /// implied in subsequent Update TLVs, as described in Section 4.5. This TLV sets up the next hop
 /// for subsequent Update TLVs even if it is otherwise ignored due to an unknown mandatory sub-TLV.
@@ -29,6 +30,14 @@ use crate::packet::tlv::tlv_slice::TlvSlice;
 /// family, the next-hop address is taken to be the source address of the packet.
 ///
 /// Next Hop TLVs with an unknown value for the AE field MUST be silently ignored.
+/// ## Additional Notes
+/// The only use for a next hop TLV is when a neighbour is advertising a route needs to say
+/// "I (your neighbour) can forward to this address, but not by using the same address that this TLV
+/// is coming from, use my other address instead."
+///
+/// Remember that neighbours are unique by (interface, address) so in the instance an update is
+/// resolved by taking this next hop, it will resolve to the same interface but at a different
+/// address.
 pub struct NextHopSlice<'a> {
     slice: &'a [u8],
 }

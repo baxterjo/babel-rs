@@ -7,7 +7,7 @@ use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::output::TransmitDestination;
 
-#[derive(Debug, PartialEq, Eq, Default)]
+#[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum DestAddr<A: AddressExt> {
     #[default]
@@ -31,9 +31,12 @@ impl<A: AddressExt> DestAddr<A> {
         *self == Self::None
     }
 
-    pub(crate) fn claim(&mut self, new: Self) -> Result<(), DestinationError> {
+    /// Claims the destination with a new one.
+    ///
+    /// Returns Ok(()) if the new destination is the same.
+    pub(crate) fn claim(&mut self, new: Self) -> Result<(), DestinationError<A>> {
         if *self != Self::None && *self != new {
-            return Err(DestinationError::AlreadyClaimed);
+            return Err(DestinationError::AlreadyClaimed { cur: *self, new });
         }
         *self = new;
         Ok(())
@@ -57,7 +60,7 @@ impl<A: AddressExt> DestAddr<A> {
 }
 
 impl<A: AddressExt> TryInto<TransmitDestination<A>> for DestAddr<A> {
-    type Error = DestinationError;
+    type Error = DestinationError<A>;
     fn try_into(self) -> Result<TransmitDestination<A>, Self::Error> {
         let out = match self {
             Self::Unicast(addr) => TransmitDestination::Unicast(addr),
@@ -72,23 +75,13 @@ impl<A: AddressExt> TryInto<TransmitDestination<A>> for DestAddr<A> {
 
 #[derive(Debug, Error)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub(crate) enum DestinationError {
-    #[error("Destination has already been claimed.")]
-    AlreadyClaimed,
-    #[error("Cannot create a destination from nothing")]
+pub(crate) enum DestinationError<A: AddressExt> {
+    #[error(
+        "Destination has already been claimed - current: {:?}, new: {:?}",
+        cur,
+        new
+    )]
+    AlreadyClaimed { cur: DestAddr<A>, new: DestAddr<A> },
+    #[error("Cannot create a transmit destination from nothing")]
     NoDestinationSet,
-}
-
-pub(crate) trait Claim {
-    fn claim(&mut self, new: InterfaceHandle) -> Result<(), DestinationError>;
-}
-
-impl Claim for Option<InterfaceHandle> {
-    fn claim(&mut self, new: InterfaceHandle) -> Result<(), DestinationError> {
-        if self.is_some() && *self != Some(new) {
-            return Err(DestinationError::AlreadyClaimed);
-        }
-        *self = Some(new);
-        Ok(())
-    }
 }

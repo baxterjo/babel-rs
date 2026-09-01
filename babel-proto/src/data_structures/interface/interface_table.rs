@@ -35,16 +35,16 @@ impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
         }
 
         let interface = Interface::new(now, config)?;
-        let handle = interface.handle();
+        let handle = *interface.handle();
 
         // Insert into the interface table
         match self.inner.insert(interface) {
             Ok(v) if v.is_some() => {
                 // This should be unreachable.
                 b_debug!("Duplicate interface registered");
-                Err(InterfaceError::DuplicateInterfaceId(*handle))
+                Err(InterfaceError::DuplicateInterfaceId(handle))
             }
-            Ok(_) => Ok(*handle),
+            Ok(_) => Ok(handle),
             Err(_err) => {
                 b_debug!("Interface table is full");
                 Err(InterfaceError::Full)
