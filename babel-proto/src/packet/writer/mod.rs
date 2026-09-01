@@ -731,7 +731,8 @@ mod test {
             &[],
             "There should be no packet trailer."
         );
-        // 12 octets of Router-Id, 8 of Next Hop and 16 of Update, each including its 2 octet header.
+        // 12 octets of Router-Id, 8 of Next Hop and 16 of Update, each including its 2 octet
+        // header.
         assert_eq!(packet_slice.body_length(), 36, "Incorrect body length");
 
         let address_len = AddressEncoding::<NoExtension>::Ipv4.address_len();

@@ -80,4 +80,12 @@ impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
         self.iter_mut()
             .filter(move |iface| poll_only.is_none_or(|p| &p == iface.handle()))
     }
+
+    pub(crate) fn iter_filter(
+        &self,
+        poll_only: Option<InterfaceHandle>,
+    ) -> impl Iterator<Item = &Interface<A>> {
+        self.iter()
+            .filter(move |iface| poll_only.is_none_or(|p| &p == iface.handle()))
+    }
 }

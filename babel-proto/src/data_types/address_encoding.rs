@@ -33,6 +33,14 @@ where
     Extension(E),
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum AddressFamily<E: AddressEncodingExt> {
+    Ipv4,
+    Ipv6,
+    Extension(E::AddressFamily),
+}
+
 impl<E> TryFrom<u8> for AddressEncoding<E>
 where
     E: AddressEncodingExt,
@@ -58,28 +66,18 @@ where
     }
 }
 
-impl<E> TryInto<u8> for AddressEncoding<E>
+impl<E> Into<u8> for AddressEncoding<E>
 where
     E: AddressEncodingExt,
 {
-    type Error = AddressEncodingError<E>;
-
-    fn try_into(self) -> Result<u8, Self::Error> {
-        let value = match self {
+    fn into(self) -> u8 {
+        match self {
             Self::WildCard => 0,
             Self::Ipv4 => 1,
             Self::Ipv6 => 2,
             Self::LocalIpv6 => 3,
-            Self::Extension(e) => {
-                let ext_value = e.as_value();
-                if ext_value <= 3 || ext_value == 255 {
-                    return Err(AddressEncodingError::NiceTry);
-                }
-                ext_value
-            }
-        };
-
-        Ok(value)
+            Self::Extension(e) => e.as_value().value(),
+        }
     }
 }
 
@@ -131,6 +129,15 @@ impl<E: AddressEncodingExt> AddressEncoding<E> {
             AddressEncoding::WildCard | AddressEncoding::LocalIpv6 => false,
             AddressEncoding::Ipv4 | AddressEncoding::Ipv6 => true,
             AddressEncoding::Extension(e) => e.can_compress(),
+        }
+    }
+
+    pub fn address_family(&self) -> Option<AddressFamily<E>> {
+        match self {
+            AddressEncoding::WildCard => None,
+            AddressEncoding::Ipv4 => Some(AddressFamily::Ipv4),
+            AddressEncoding::Ipv6 | AddressEncoding::LocalIpv6 => Some(AddressFamily::Ipv6),
+            AddressEncoding::Extension(e) => Some(AddressFamily::Extension(e.address_family())),
         }
     }
 }

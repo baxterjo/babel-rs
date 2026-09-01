@@ -54,11 +54,11 @@ impl<A: AddressExt> Update<A> {
         })
     }
 
-    fn route(&self) -> &RouteIndex<A> {
+    pub(crate) fn route(&self) -> &RouteIndex<A> {
         &self.route
     }
 
-    fn neighbour(&self) -> &NeighbourIndex<A> {
+    pub(crate) fn neighbour(&self) -> &NeighbourIndex<A> {
         &self.neighbour
     }
 }

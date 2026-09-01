@@ -63,9 +63,15 @@ pub struct SourceIndex<A: AddressExt> {
 #[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Source<A: AddressExt> {
+    /// the prefix (prefix, plen), where plen is the prefix length in bits, that this entry applies
+    /// to
     prefix: Address<A>,
+    /// the prefix (prefix, plen), where plen is the prefix length in bits, that this entry applies
+    /// to
     prefix_len: u8,
+    /// the router-id of a router originating this prefix
     router_id: RouterId,
+    // a pair (seqno, metric), this source's feasibility distance.
     feasibility: Feasibility,
 }
 

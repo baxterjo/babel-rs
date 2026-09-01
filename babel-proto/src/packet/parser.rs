@@ -70,6 +70,14 @@ where
         out
     }
 
+    pub(crate) fn router_id(&self) -> Option<&RouterId> {
+        self.router_id.as_ref()
+    }
+
+    pub(crate) fn set_router_id(&mut self, router_id: RouterId) {
+        self.router_id = Some(router_id);
+    }
+
     pub(crate) fn handle_router_id_tlv(&mut self, router_id: RouterIdSlice<'_>) {
         self.router_id = Some(router_id.router_id().into())
     }
@@ -262,6 +270,19 @@ where
 
         Ok(Address::from_bytes(ae, &out[..addr_len])?)
     }
+
+    pub(crate) fn compress_address<'a>(&mut self, address: &'a Address<A>) -> UpdateArgs<'a> {
+        // Match on address family
+        // If default address for family is none, or different than
+        todo!()
+    }
+}
+
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub(crate) struct UpdateArgs<'a> {
+    pub(crate) address: &'a [u8],
+    pub(crate) omitted: u8,
 }
 
 #[derive(Debug)]

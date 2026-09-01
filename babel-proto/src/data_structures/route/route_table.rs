@@ -63,6 +63,21 @@ where
         self.inner.iter()
     }
 
+    /// The route an index names, if it is still in the table.
+    pub(crate) fn get_by_key(&self, key: &RouteIndex<A>) -> Option<&Route<A>> {
+        self.inner.get_by_key(key)
+    }
+
+    /// Test-only door into the table's storage.
+    ///
+    /// Production code only ever gains a route through [`Self::aquire_route`], which needs an
+    /// interface, a neighbour and a parsed update to build one. Tests in other modules need a
+    /// table with known contents without staging all of that.
+    #[cfg(test)]
+    pub(crate) fn insert(&mut self, route: Route<A>) -> Result<Option<Route<A>>, Route<A>> {
+        self.inner.insert(route)
+    }
+
     pub(crate) fn retain_mut<F>(&mut self, f: F)
     where
         F: FnMut(&mut Route<A>) -> bool,

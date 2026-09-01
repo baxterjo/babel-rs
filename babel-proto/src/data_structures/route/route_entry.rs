@@ -21,7 +21,7 @@ pub struct Route<A: AddressExt> {
     // Spec Info
     /// the source (prefix, plen, router-id) that originated this route
     ///
-    /// Should not be made public as it prefix & prefix_len cannot change
+    /// Should not be made public as its prefix & prefix_len cannot change
     source: SourceIndex<A>,
 
     /// the neighbour (an entry in the neighbour table) that advertised this route
