@@ -7,6 +7,7 @@ use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
+use crate::metric::distance::Feasibility;
 use crate::utils::storage::InternallyKeyed;
 use crate::utils::{Duration, DurationMultiplier, Instant, Timer};
 /// Route entry as defined in
@@ -132,6 +133,10 @@ impl<A: AddressExt> Route<A> {
 
     pub(crate) fn set_router_id(&mut self, router_id: RouterId) {
         self.source.router_id = router_id;
+    }
+
+    pub(crate) fn feasibility(&self) -> Feasibility {
+        Feasibility::new(self.seqno, self.computed_metric)
     }
 
     /// Recomputes this route's metric from the neighbour's current link cost and updates the

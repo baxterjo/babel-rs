@@ -330,8 +330,8 @@ where
             // next_poll and skip.
             next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
         } else {
-            // Otherwise queue an update for every route on to every neighbour.
-            for route in self.route_table.iter() {
+            // Otherwise queue an update for every selected route to every neighbour.
+            for route in self.route_table.iter().filter(|r| r.selected) {
                 for interface in self.iface_table.iter() {
                     for neighbour in self.neighbor_table.neighbours_for_iface(interface.handle()) {
                         self.update_table.add_update(Update::new(

@@ -53,7 +53,7 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         now: Instant,
         interface: &Interface<A>,
         routes: &RouteTable<'_, A>,
-        _sources: &mut SourceTable<'_, A>,
+        sources: &mut SourceTable<'_, A>,
         update_interval: Interval,
         active_dest: &mut DestAddr<A>,
         next_poll: &mut Duration,
@@ -110,6 +110,10 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                 // A this point we know an update TLV needs to be sent.
 
                 // Update the source table
+                if let Err(err) = sources.perform_maintenance(now, route) {
+                    b_debug!("Source Err: {}", err);
+                    continue;
+                };
 
                 // Try to claim the active destination before doing anything.
 
@@ -119,7 +123,7 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                     DestAddr::Unicast(update.neighbour().addr)
                 };
                 if let Err(err) = active_dest.claim(new_dest) {
-                    b_debug!("Active Dest Error in poll_for_uddate - {}", err);
+                    b_debug!("Active Dest Error in poll_for_update - {}", err);
                     continue;
                 };
 
