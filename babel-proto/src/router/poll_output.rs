@@ -352,6 +352,16 @@ where
             next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
         }
 
+        // Poll and purge expired sources.
+        self.source_table.inner.retain(|s| {
+            if let Some(remaining) = s.gc_timer.time_remaining(now) {
+                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+                true
+            } else {
+                false
+            }
+        });
+
         Ok((run_selection, next_poll))
     }
 }
