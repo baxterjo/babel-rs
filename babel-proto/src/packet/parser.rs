@@ -51,7 +51,7 @@ where
         defmt::write!(
             f,
             "Parser{{ default_router_id: {}, default_v4_addr: {}, default_v6_addr: {}, extension: {}}}",
-            self.default_router_id,
+            self.router_id,
             self.default_v4_addr.map(|addr| addr.octets()),
             self.default_v6_addr.map(|addr| addr.octets()),
             self.extension
@@ -68,6 +68,14 @@ where
         let mut out = Self::default();
         out.set_next_hop(next_hop);
         out
+    }
+
+    pub(crate) fn router_id(&self) -> Option<&RouterId> {
+        self.router_id.as_ref()
+    }
+
+    pub(crate) fn set_router_id(&mut self, router_id: RouterId) {
+        self.router_id = Some(router_id);
     }
 
     pub(crate) fn handle_router_id_tlv(&mut self, router_id: RouterIdSlice<'_>) {
@@ -262,6 +270,19 @@ where
 
         Ok(Address::from_bytes(ae, &out[..addr_len])?)
     }
+
+    pub(crate) fn compress_address<'a>(&mut self, address: &'a Address<A>) -> UpdateArgs<'a> {
+        // Match on address family
+        // If default address for family is none, or different than
+        todo!()
+    }
+}
+
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub(crate) struct UpdateArgs<'a> {
+    pub(crate) address: &'a [u8],
+    pub(crate) omitted: u8,
 }
 
 #[derive(Debug)]
@@ -274,6 +295,7 @@ pub struct ResolvedUpdate<'a, A: AddressExt> {
 }
 
 #[derive(Debug, Error)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ParserError<A: AddressExt> {
     #[error(transparent)]
     Encoding(#[from] AddressEncodingError<A::Encoding>),

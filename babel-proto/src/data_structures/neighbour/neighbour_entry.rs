@@ -169,6 +169,17 @@ impl<A: AddressExt> Neighbour<A> {
         &self.address
     }
 
+    pub(crate) fn can_send_ucast_hello(&self, dest: &DestAddr<A>) -> bool {
+        self.pending.ucast_hello.is_some()
+            && (dest.is_free() || dest.unicast_addr().is_some_and(|a| a == self.address()))
+    }
+
+    pub(crate) fn can_send_ihu(&self, dest: &DestAddr<A>) -> bool {
+        dest.is_free()
+            || dest.is_multicast()
+            || dest.unicast_addr().is_some_and(|a| a == self.address())
+    }
+
     //  _    _          _   _ _____  _      ______
     // | |  | |   /\   | \ | |  __ \| |    |  ____|
     // | |__| |  /  \  |  \| | |  | | |    | |__
@@ -332,21 +343,32 @@ impl<A: AddressExt> Neighbour<A> {
         &mut self,
         now: Instant,
         next_poll: &mut Duration,
+        active_dest: &mut DestAddr<A>,
         mut writer: PacketWriterStep<'output, Ready>,
     ) -> Result<
         PacketWriterStep<'output, Ready>,
         (PacketWriterError, PacketWriterStep<'output, Ready>),
     > {
+        // If the timer is not done, update next poll and return writer unchanged.
+        if let Some(remaining) = self
+            .pending
+            .ucast_hello
+            .map(|u| u.timer.time_remaining(now))
+            .flatten()
+        {
+            *next_poll = remaining.min(*next_poll);
+            return Ok(writer);
+        }
+
+        if !self.can_send_ucast_hello(active_dest) {
+            return Ok(writer);
+        }
+
+        let address = *self.address();
         // Check if this neighbour wants to send ucast hellos. If not, return the writer unchanged.
         let Some(ucast_hello) = &mut self.pending.ucast_hello else {
             return Ok(writer);
         };
-
-        // If the timer is not done, update next poll and return writer unchanged.
-        if let Some(remaining) = ucast_hello.timer.time_remaining(now) {
-            *next_poll = remaining.min(*next_poll);
-            return Ok(writer);
-        }
 
         let flags = HelloFlags::new_unicast();
         let seqno = ucast_hello.seqno;
@@ -360,6 +382,13 @@ impl<A: AddressExt> Neighbour<A> {
             seqno,
             duration.as_centis()
         );
+
+        // Try to claim the destination BEFORE writing the packet.
+        if let Err(err) = active_dest.claim(DestAddr::Unicast(address)) {
+            b_debug!("Err: {}", err);
+            return Ok(writer);
+        }
+
         writer = writer
             .write_hello(flags, seqno, duration.into())?
             .finish_tlv()?;
@@ -393,12 +422,8 @@ impl<A: AddressExt> Neighbour<A> {
             return Ok(writer);
         }
 
-        // If the active address has been claimed and it is not destined for this neighbour, return
-        // the writer unchanged.
-        if active_dest
-            .unicast_addr()
-            .is_some_and(|addr| *addr != self.address)
-        {
+        // If we can't send an IHU to this neighbour, then return.
+        if !self.can_send_ihu(active_dest) {
             return Ok(writer);
         }
 
@@ -610,29 +635,48 @@ pub(crate) struct TxHelloInfo {
 mod test {
     use super::*;
     use crate::extension::NoExtension;
-    use crate::packet::tlv::TypedTlv;
+    use crate::packet::packet_header::PacketHeader;
+    use crate::packet::packet_slice::PacketSlice;
+    use crate::packet::tlv::Tlv;
     use crate::packet::tlv::hello_slice::HelloFlags;
-    use crate::packet::tlv::tlv_slice::TlvSlice;
+    use crate::packet::writer::PacketWriter;
 
-    fn hello_tlv(unicast: bool, seqno: u16, interval_centis: u16) -> [u8; 8] {
-        let flags = HelloFlags::new(unicast).to_wire();
-        let seqno = seqno.to_be_bytes();
-        let interval = interval_centis.to_be_bytes();
-        [
-            HelloSlice::TYPE_ID,
-            HelloSlice::MIN_LEN as u8,
-            flags[0],
-            flags[1],
-            seqno[0],
-            seqno[1],
-            interval[0],
-            interval[1],
-        ]
+    /// A packet carrying a single Hello TLV, encoded by the real packet writer so these tests and
+    /// the router agree on the wire form rather than each keeping their own idea of it.
+    ///
+    /// 4 octets of packet header plus a Hello TLV, which is 2 octets of TLV header and the 6 the
+    /// body always occupies.
+    fn hello_packet(unicast: bool, seqno: u16, interval_centis: u16) -> [u8; 12] {
+        let mut buf = [0u8; 12];
+
+        // The finished writer borrows `buf`, so it has to be dropped at the end of this statement
+        // before the buffer can be read back.
+        PacketWriter::new_packet(
+            PacketHeader::MAGIC_NUMBER,
+            PacketHeader::VERSION_NUMBER,
+            buf.as_mut_slice(),
+        )
+        .expect("packet writer should start")
+        .write_hello(
+            HelloFlags::new(unicast),
+            SeqNo(seqno),
+            Duration::from_centis(interval_centis.into()).into(),
+        )
+        .expect("hello should write")
+        .finish_tlv()
+        .expect("hello should finish")
+        .finish_packet()
+        .expect("packet should finish");
+
+        buf
     }
 
     fn hello(bytes: &[u8]) -> HelloSlice<'_> {
-        HelloSlice::from_untyped(TlvSlice::from_slice(bytes).expect("tlv should parse"))
-            .expect("hello should parse")
+        let packet = PacketSlice::from_slice(bytes).expect("packet should parse");
+        let Some(Tlv::Hello(hello)) = packet.body_reader().next() else {
+            panic!("packet should carry a hello");
+        };
+        hello
     }
 
     fn neighbour(now: Instant) -> Neighbour<NoExtension> {
@@ -663,7 +707,7 @@ mod test {
             "nothing has been heard from this neighbour yet"
         );
 
-        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 0, 100)));
 
         assert_eq!(mcast_history(&n).read(), 0b1);
     }
@@ -674,7 +718,7 @@ mod test {
         let mut n = neighbour(now);
 
         for seqno in 0..8 {
-            n.handle_hello(now, hello(&hello_tlv(false, seqno, 100)));
+            n.handle_hello(now, hello(&hello_packet(false, seqno, 100)));
         }
 
         assert_eq!(
@@ -691,9 +735,9 @@ mod test {
         let now = Instant::from_secs(0);
         let mut n = neighbour(now);
 
-        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 0, 100)));
         // Seqnos 1, 2 and 3 never arrived.
-        n.handle_hello(now, hello(&hello_tlv(false, 4, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 4, 100)));
 
         assert_eq!(
             mcast_history(&n).read(),
@@ -710,13 +754,13 @@ mod test {
         let now = Instant::from_secs(0);
         let mut n = neighbour(now);
 
-        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
-        n.handle_hello(now, hello(&hello_tlv(false, 4, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 0, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 4, 100)));
         assert_eq!(mcast_history(&n).count(), 2, "three hellos were missed");
 
         // Sixteen clean hellos are enough to shift every zero back out of the window.
         for seqno in 5..21 {
-            n.handle_hello(now, hello(&hello_tlv(false, seqno, 100)));
+            n.handle_hello(now, hello(&hello_packet(false, seqno, 100)));
         }
 
         assert_eq!(
@@ -739,7 +783,7 @@ mod test {
         let mut n = neighbour(now);
 
         for seqno in 0..3 {
-            n.handle_hello(now, hello(&hello_tlv(false, seqno, 100)));
+            n.handle_hello(now, hello(&hello_packet(false, seqno, 100)));
         }
         assert_eq!(mcast_history(&n).read(), 0b111, "no hellos were missed");
         assert_eq!(
@@ -750,7 +794,7 @@ mod test {
         );
 
         // Two behind: the last two entries are undone, then this hello is appended.
-        n.handle_hello(now, hello(&hello_tlv(false, 1, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 1, 100)));
         assert_eq!(
             mcast_history(&n).read(),
             0b11,
@@ -763,7 +807,7 @@ mod test {
         );
 
         // Resynchronised, so the sender's next hello is in order and costs nothing.
-        n.handle_hello(now, hello(&hello_tlv(false, 2, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 2, 100)));
         assert_eq!(mcast_history(&n).read(), 0b111);
         assert_eq!(
             n.mcast_hello_info
@@ -778,10 +822,10 @@ mod test {
         let now = Instant::from_secs(0);
         let mut n = neighbour(now);
 
-        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
-        n.handle_hello(now, hello(&hello_tlv(true, 0, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 0, 100)));
+        n.handle_hello(now, hello(&hello_packet(true, 0, 100)));
         // A gap on the multicast side only.
-        n.handle_hello(now, hello(&hello_tlv(false, 4, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 4, 100)));
 
         assert_eq!(
             mcast_history(&n).read(),
@@ -802,7 +846,7 @@ mod test {
         let now = Instant::from_secs(0);
         let mut n = neighbour(now);
 
-        n.handle_hello(now, hello(&hello_tlv(true, 0, 100)));
+        n.handle_hello(now, hello(&hello_packet(true, 0, 100)));
 
         assert_eq!(mcast_history(&n).read(), 0);
         assert_eq!(n.ucast_hello_info.history.read(), 0b1);
@@ -817,7 +861,7 @@ mod test {
         let mut n = neighbour(now);
 
         // Resynchronise onto a seqno just below the wrap.
-        n.handle_hello(now, hello(&hello_tlv(false, 65_533, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 65_533, 100)));
         assert_eq!(mcast_history(&n).read(), 0b1);
         assert_eq!(
             n.mcast_hello_info
@@ -827,7 +871,7 @@ mod test {
         );
 
         // 65534 and 65535 were lost; 0 arrives on the other side of the wrap.
-        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 0, 100)));
 
         assert_eq!(
             mcast_history(&n).read(),
@@ -848,9 +892,9 @@ mod test {
         let now = Instant::from_secs(0);
         let mut n = neighbour(now);
 
-        n.handle_hello(now, hello(&hello_tlv(false, 65_534, 100)));
-        n.handle_hello(now, hello(&hello_tlv(false, 65_535, 100)));
-        n.handle_hello(now, hello(&hello_tlv(false, 0, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 65_534, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 65_535, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 0, 100)));
         assert_eq!(mcast_history(&n).read(), 0b111);
         assert_eq!(
             n.mcast_hello_info
@@ -860,7 +904,7 @@ mod test {
         );
 
         // Two behind, back across the wrap.
-        n.handle_hello(now, hello(&hello_tlv(false, 65_535, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 65_535, 100)));
 
         assert_eq!(mcast_history(&n).read(), 0b11, "two entries undone");
         assert_eq!(
@@ -891,13 +935,13 @@ mod test {
 
         // Set up hello histories for mcast and ucast
         for seqno in 0..4 {
-            n.handle_hello(now, hello(&hello_tlv(false, seqno, 100)));
-            n.handle_hello(now, hello(&hello_tlv(true, seqno, 100)));
+            n.handle_hello(now, hello(&hello_packet(false, seqno, 100)));
+            n.handle_hello(now, hello(&hello_packet(true, seqno, 100)));
         }
         assert_eq!(mcast_history(&n).read(), 0b1111);
 
         // Well past the 16-hello window the history can represent.
-        n.handle_hello(now, hello(&hello_tlv(false, 25, 100)));
+        n.handle_hello(now, hello(&hello_packet(false, 25, 100)));
 
         assert_eq!(
             mcast_history(&n).read(),
@@ -914,7 +958,7 @@ mod test {
             n.ucast_hello_info.expected_seqno.is_none(),
             "When one history is flushed, the other should be reset to default"
         );
-        n.handle_hello(now, hello(&hello_tlv(true, 25, 100)));
+        n.handle_hello(now, hello(&hello_packet(true, 25, 100)));
         assert_eq!(
             n.mcast_hello_info
                 .expected_seqno

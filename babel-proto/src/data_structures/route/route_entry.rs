@@ -7,6 +7,7 @@ use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
+use crate::metric::distance::Feasibility;
 use crate::utils::storage::InternallyKeyed;
 use crate::utils::{Duration, DurationMultiplier, Instant, Timer};
 /// Route entry as defined in
@@ -21,7 +22,7 @@ pub struct Route<A: AddressExt> {
     // Spec Info
     /// the source (prefix, plen, router-id) that originated this route
     ///
-    /// Should not be made public as it prefix & prefix_len cannot change
+    /// Should not be made public as its prefix & prefix_len cannot change
     source: SourceIndex<A>,
 
     /// the neighbour (an entry in the neighbour table) that advertised this route
@@ -56,9 +57,6 @@ pub struct Route<A: AddressExt> {
     /// timer. It is initialised and reset as specified in Section
     /// [3.5.3](https://datatracker.ietf.org/doc/html/rfc8966#route-acquisition)
     pub(crate) expiry: Timer,
-    // Additional state
-    // TODO: Triggered updates defined in section 3.7.2
-    //pub(crate) triggered_update: bool,
 }
 /// Route index as defined in
 /// [Section 3.2.6](https://datatracker.ietf.org/doc/html/rfc8966#name-the-route-table)
@@ -135,6 +133,10 @@ impl<A: AddressExt> Route<A> {
 
     pub(crate) fn set_router_id(&mut self, router_id: RouterId) {
         self.source.router_id = router_id;
+    }
+
+    pub(crate) fn feasibility(&self) -> Feasibility {
+        Feasibility::new(self.seqno, self.computed_metric)
     }
 
     /// Recomputes this route's metric from the neighbour's current link cost and updates the

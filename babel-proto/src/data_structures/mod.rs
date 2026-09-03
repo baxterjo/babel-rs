@@ -14,3 +14,6 @@ pub mod route;
 
 /// Implementation of the table of pending sequence requests as described in [3.2.7](https://datatracker.ietf.org/doc/html/rfc8966#name-the-table-of-pending-seqno-)
 pub mod pending_seqno;
+
+/// Table containing pending updates.
+pub mod updates;

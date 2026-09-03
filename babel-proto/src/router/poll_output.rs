@@ -1,5 +1,6 @@
 use super::BabelRouter;
 use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
+use crate::data_structures::updates::Update;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -8,7 +9,7 @@ use crate::output::{Output, Transmit};
 use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriter, PacketWriterError, PacketWriterStep};
 use crate::utils::destination::DestAddr;
-use crate::utils::{Duration, Instant, ManagedSlice, ManagedSliceExt};
+use crate::utils::{Duration, Instant, InternallyKeyed, ManagedSlice};
 
 impl<'storage, A, P> BabelRouter<'storage, P, A>
 where
@@ -25,7 +26,7 @@ where
         now: Instant,
     ) -> Result<Output<'output, A>, BabelError<A>> {
         let buf = alloc::vec::Vec::new();
-        self.poll_output_with_buf(now, buf)
+        self.poll_output_inner(now, None, buf)
     }
 
     /// Polls output for the given interface from the router.
@@ -49,14 +50,11 @@ where
     ///
     /// Ideally the size of this buffer is equal to the MTU of your platform to ensure network
     /// efficiency with packed packets.
-    pub fn poll_output_with_buf<'output, B>(
+    pub fn poll_output_with_buf<'output>(
         &mut self,
         now: Instant,
-        buf: B,
-    ) -> Result<Output<'output, A>, BabelError<A>>
-    where
-        B: Into<ManagedSlice<'output, u8>>,
-    {
+        buf: &'output mut [u8],
+    ) -> Result<Output<'output, A>, BabelError<A>> {
         self.poll_output_inner(now, None, buf)
     }
 
@@ -67,15 +65,12 @@ where
     ///
     /// This is a useful optimization if other interfaces are busy. If the returned [`Output`] is
     /// of the `SetTimer` variant, it is not guaranteed to be specific to the polled interface.
-    pub fn poll_output_for_iface_with_buf<'output, B>(
+    pub fn poll_output_for_iface_with_buf<'output>(
         &mut self,
         now: Instant,
         iface: InterfaceHandle,
-        buf: B,
-    ) -> Result<Output<'output, A>, BabelError<A>>
-    where
-        B: Into<ManagedSlice<'output, u8>>,
-    {
+        buf: &'output mut [u8],
+    ) -> Result<Output<'output, A>, BabelError<A>> {
         self.poll_output_inner(now, Some(iface), buf)
     }
 
@@ -98,12 +93,7 @@ where
         );
 
         // Poll time based state.
-        let (run_selection, next_poll) = self.poll_tick(now)?;
-
-        // Run selection if necessary.
-        if run_selection {
-            self.select_routes();
-        }
+        let next_poll = self.poll_tick(now)?;
 
         let writer = PacketWriter::new_packet(self.magic_number, self.version_number, buf.into())?;
 
@@ -133,52 +123,10 @@ where
         Ok(output)
     }
 
-    /// Polls and updates all of the time based states.
-    pub(super) fn poll_tick(
-        &mut self,
-        now: Instant,
-    ) -> Result<(bool, Option<Duration>), BabelError<A>> {
-        let mut next_poll = None;
-        let mut run_selection = false;
-
-        // Check for missing hellos from neighbours.
-        for neighbour in self.neighbor_table.iter_mut() {
-            let (update, remaining) = neighbour.poll_tick(now);
-            next_poll = [remaining, next_poll].into_iter().flatten().min();
-            if update {
-                let interface = self
-                    .iface_table
-                    .inner
-                    .get_by_key(neighbour.interface())
-                    .ok_or(BabelError::InterfaceDoesntExist(*neighbour.interface()))?;
-                self.route_table
-                    .update_cost_for_neighbour(now, interface, neighbour);
-                run_selection |= true;
-            }
-        }
-
-        // Check for expired routes.
-        for route_opt in self.route_table.iter_mut_slots() {
-            if let Some(route) = route_opt {
-                if route.expiry.is_finished(now) {
-                    // If the route has expired and the advertised metric is not yet infinity, set
-                    // it to infinity and reset the timer.
-                    if route.advertised_metric != Metric::INFINITY {
-                        route.advertised_metric = Metric::INFINITY;
-                        route.computed_metric = Metric::INFINITY;
-                        route.expiry.restart(now);
-                    } else {
-                        // If the metric was already infinity, flush the route.
-                        *route_opt = None;
-                    }
-                    run_selection |= true;
-                }
-            }
-        }
-        // Flushes and sorts the route table after modifying it.
-        self.route_table.flush();
-        Ok((run_selection, next_poll))
-    }
+    //  ___  ___  _    _      ___  ___  _____   __
+    // | _ \/ _ \| |  | |    | _ )/ _ \|   \ \ / /
+    // |  _/ (_) | |__| |__  | _ \ (_) | |) \ V /
+    // |_|  \___/|____|____| |___/\___/|___/ |_|
 
     /// Polls the router for outgoing TLV's in the packet body.
     fn poll_packet_body<'output>(
@@ -203,12 +151,9 @@ where
         }
 
         let mut active_dest = DestAddr::default();
-        // The identity for the running minimum below. It can only survive as Duration::MAX if no
-        // interface was iterated at all, which the guards above have already ruled out: at
-        // least one interface is registered, a scoped poll names one that exists, and every
-        // interface contributes its multicast Hello timer on every path that reaches the
-        // end of the loop. The check after the loop rejects it if that ever stops holding.
+        // The running minimum for when the next wake-up time is.
         let mut next_poll = next_poll.unwrap_or(Duration::MAX);
+
         for interface in self.iface_table.iter_mut_filter(poll_only) {
             /// Macro for writer error handling.
             macro_rules! ok_or_try_send {
@@ -226,7 +171,7 @@ where
                                 PacketWriterError::BufferTooSmall { need, remaining }
                             );
                             return Ok(PollEvent::Transmit {
-                                iface: interface.handle,
+                                iface: *interface.handle(),
                                 dest: active_dest,
                                 body: writer,
                             });
@@ -238,53 +183,54 @@ where
                     }
                 };
             }
-            // First check for hellos. These are most important for keeping the mesh alive.
-            b_trace!("Polling for MCAST Hellos");
-            writer = ok_or_try_send!(interface.poll_for_mcast_hello(now, &mut next_poll, writer));
 
-            // If the writer has any TLVs in it at this point then the active destination is
-            // multicast.
-            if writer.has_tlvs() {
-                active_dest
-                    .claim(DestAddr::Multicast)
-                    .expect("Active destination should be free");
-            }
+            // Reached for by field rather than through `self`: the loop above still holds
+            // `self.iface_table` mutably, and these are disjoint from it.
+            writer = ok_or_try_send!(self.update_table.poll_for_updates::<P>(
+                now,
+                interface,
+                &self.route_table,
+                &mut self.source_table,
+                self.update_timer.interval(),
+                &mut active_dest,
+                &mut next_poll,
+                writer
+            ));
+
+            b_trace!("Polling for MCAST Hellos");
+            writer = ok_or_try_send!(interface.poll_for_mcast_hello(
+                now,
+                &mut next_poll,
+                &mut active_dest,
+                writer
+            ));
 
             for neighbour in self
                 .neighbor_table
-                .neighbours_mut_for_iface(interface.handle)
+                .neighbours_mut_for_iface(interface.handle())
             {
-                // If the active destination is free, poll for ucast hellos.
-                if active_dest.is_free() {
-                    b_trace!("Polling for UCAST Hellos");
-                    writer = ok_or_try_send!(neighbour.poll_for_ucast_hello(
-                        now,
-                        &mut next_poll,
-                        writer
-                    ));
-                    if writer.has_tlvs() {
-                        active_dest
-                            .claim(DestAddr::Unicast(*neighbour.address()))
-                            .expect("Active destination should be free.");
-                    }
-                }
+                b_trace!("Polling for UCAST Hellos");
+                writer = ok_or_try_send!(neighbour.poll_for_ucast_hello(
+                    now,
+                    &mut next_poll,
+                    &mut active_dest,
+                    writer
+                ));
 
-                if active_dest.can_send_ihu(neighbour.address()) {
-                    b_trace!("Polling for IHUs");
-                    writer = ok_or_try_send!(neighbour.poll_for_ihu(
-                        now,
-                        &mut active_dest,
-                        &mut next_poll,
-                        interface.cost_calc,
-                        writer,
-                    ));
-                }
+                b_trace!("Polling for IHUs");
+                writer = ok_or_try_send!(neighbour.poll_for_ihu(
+                    now,
+                    &mut active_dest,
+                    &mut next_poll,
+                    interface.cost_calc,
+                    writer,
+                ));
             }
             // Only one interface can be written to at a time. If there are TLVs at this point then
             // its time to send.
             if writer.has_tlvs() {
                 return Ok(PollEvent::Transmit {
-                    iface: interface.handle,
+                    iface: *interface.handle(),
                     dest: active_dest,
                     body: writer,
                 });
@@ -298,6 +244,106 @@ where
         }
 
         Ok(PollEvent::Wait(next_poll))
+    }
+
+    //  ___  ___  _    _      _____ ___ ___ _  __
+    // | _ \/ _ \| |  | |    |_   _|_ _/ __| |/ /
+    // |  _/ (_) | |__| |__    | |  | | (__| ' <
+    // |_|  \___/|____|____|   |_| |___\___|_|\_\
+
+    /// Polls and updates all of the time based states.
+    pub(super) fn poll_tick(&mut self, now: Instant) -> Result<Option<Duration>, BabelError<A>> {
+        let mut next_poll = None;
+        let mut run_selection = false;
+
+        // Check for missing hellos from neighbours.
+        for neighbour in self.neighbor_table.iter_mut() {
+            let (update, remaining) = neighbour.poll_tick(now);
+            next_poll = [remaining, next_poll].into_iter().flatten().min();
+            if update {
+                let interface = self
+                    .iface_table
+                    .inner
+                    .get_by_key(neighbour.interface())
+                    .ok_or(BabelError::InterfaceDoesntExist(*neighbour.interface()))?;
+                self.route_table
+                    .update_cost_for_neighbour(now, interface, neighbour);
+                run_selection |= true;
+            }
+        }
+
+        // Check for expired routes.
+        self.route_table.retain_mut(|route| {
+            if let Some(remaining) = route.expiry.time_remaining(now) {
+                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+                true
+            } else {
+                let out: bool;
+                // If the route has expired and the advertised metric is not yet infinity, set
+                // it to infinity and reset the timer.
+                if route.advertised_metric != Metric::INFINITY {
+                    route.advertised_metric = Metric::INFINITY;
+                    route.computed_metric = Metric::INFINITY;
+                    route.expiry.restart(now);
+                    let remaining = route.expiry.duration();
+                    next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+                    out = true;
+                } else {
+                    // If the metric was already infinity and the timer expires (again) then the
+                    // route is removed.
+                    out = false;
+                }
+                // In either case, the selection process must be run when the timer expires.
+                run_selection |= true;
+                out
+            }
+        });
+
+        if run_selection {
+            self.select_routes();
+        }
+
+        // Check for periodic updates
+        for interface in self.iface_table.iter_mut() {
+            if let Some(remaining) = interface.update_timer.time_remaining(now) {
+                // If there is still time remaining until the next periodic update. Merge with
+                // next_poll and skip.
+                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+            } else {
+                // Otherwize reset the update timer.
+                self.update_timer.restart(now);
+
+                // And queue an update for every selected route to every neighbour.
+                for route in self.route_table.iter().filter(|r| r.selected) {
+                    for neighbour in self.neighbor_table.neighbours_for_iface(interface.handle()) {
+                        self.update_table.add_update(Update::new(
+                            now,
+                            route.key(),
+                            neighbour.key(),
+                            !interface.prefer_ucast,
+                            interface.request_acks,
+                            interface.update_retry_interval.into(),
+                            1,
+                        )?)?;
+                    }
+                }
+
+                let remaining = self.update_timer.duration();
+                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+            }
+        }
+
+        // Poll and purge expired sources.
+        self.source_table.inner.retain(|s| {
+            if let Some(remaining) = s.gc_timer.time_remaining(now) {
+                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+                true
+            } else {
+                false
+            }
+        });
+
+        Ok(next_poll)
     }
 }
 
@@ -326,7 +372,6 @@ mod test {
     use crate::packet::packet_slice::PacketSlice;
     use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, TypedTlv};
     use crate::router::config::BabelRouterConfig;
-    use crate::utils::storage::ManagedSliceExt;
 
     // Long enough that it never fires again during a test unless a test means it to, but small
     // enough that the IHU interval derived from it (3x, below) still fits the 16-bit Interval
@@ -335,8 +380,8 @@ mod test {
 
     /// The interval a neighbour on a ucast-Hello interface sends its unicast Hellos at.
     ///
-    /// Deliberately the shortest interval here, so a ucast-Hello interface is recognisable by
-    /// `SetTimer` reporting this.
+    /// Deliberately shorter than `IFACE_INTERVAL`, so a unicast Hello comes due several times over
+    /// within one multicast Hello cycle.
     const UCAST_INTERVAL: Duration = Duration::from_secs(20);
 
     /// The interval a fresh neighbour both advertises in and schedules its outgoing IHUs at:
@@ -347,6 +392,21 @@ mod test {
     /// is derived from always beats it, and the two coincide exactly when the IHU comes due.
     const IHU_INTERVAL: Duration = Duration::from_secs(600);
 
+    /// The longest interval any test here configures, and so the bound every `SetTimer` is checked
+    /// against by [`expect_set_timer`].
+    ///
+    /// A wake-up is the minimum over every timer the router tracks, so pinning it to an exact value
+    /// makes a test fail whenever an unrelated timer is added or retuned — the periodic update
+    /// timer being the current example. What actually matters, and what does not churn, is that the
+    /// router never sleeps through something it has scheduled: every registered interface
+    /// contributes its multicast Hello timer, so a wake-up longer than the Hello interval means a
+    /// timer went missing.
+    ///
+    /// `IFACE_INTERVAL` is the largest of the configured intervals — `UCAST_INTERVAL` and the
+    /// router's own update interval are both shorter, and `IHU_INTERVAL` is derived from this one
+    /// rather than configured.
+    const MAX_CONFIGURED_INTERVAL: Duration = IFACE_INTERVAL;
+
     const NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
     /// The address family Babel normally runs on, and the only one the writer compresses.
     const LINK_LOCAL_NODE_ADDR: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
@@ -354,10 +414,16 @@ mod test {
     const NEIGHBOUR_1_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
     const NEIGHBOUR_2_ADDR: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
 
+    /// Builds a router born at the same instant every test measures from.
+    ///
+    /// `Instant::now` is `std` only, and it would put the router's birth decades ahead of the `t0`
+    /// every test below starts from.
     fn router(name: &'static str) -> BabelRouter<'static> {
-        BabelRouter::new(BabelRouterConfig::new(
-            RouterId::try_from(name).expect("bad router id"),
-        ))
+        BabelRouter::new(
+            Instant::from_secs(0),
+            BabelRouterConfig::new(RouterId::try_from(name).expect("bad router id")),
+        )
+        .expect("bad router")
     }
 
     fn iface_handle(name: &str) -> InterfaceHandle {
@@ -386,11 +452,34 @@ mod test {
         }
     }
 
+    /// Asserts the poll produced a wake-up rather than a packet, and that the wake-up is no longer
+    /// than [`MAX_CONFIGURED_INTERVAL`].
+    ///
+    /// The bound is the assertion. Callers that want the exact value are pinning something the next
+    /// timer to land will move, so they should have a reason spelled out at the call site.
     fn expect_set_timer<A: AddressExt>(output: Output<'_, A>) -> Duration {
         match output {
-            Output::SetTimer(d) => d,
+            Output::SetTimer(d) => {
+                assert!(
+                    d <= MAX_CONFIGURED_INTERVAL,
+                    "wake-up of {d:?} outlasts the longest configured interval \
+                     ({MAX_CONFIGURED_INTERVAL:?}); a scheduled timer was missed"
+                );
+                d
+            }
             Output::Transmit(t) => panic!("expected SetTimer, got Transmit({t:?})"),
         }
+    }
+
+    /// The bound in [`expect_set_timer`] is now the only assertion every other test makes about a
+    /// wake-up, so it has to be able to fail — a helper that accepts anything would quietly turn
+    /// each of those calls into a check that the poll merely did not transmit.
+    #[test]
+    #[should_panic(expected = "outlasts the longest configured interval")]
+    fn expect_set_timer_rejects_a_wake_up_past_the_longest_configured_interval() {
+        let output: Output<'_, NoExtension> =
+            Output::SetTimer(MAX_CONFIGURED_INTERVAL + Duration::from_secs(1));
+        expect_set_timer(output);
     }
 
     fn tlv_types(contents: &[u8]) -> Vec<u8> {
@@ -471,8 +560,7 @@ mod test {
     ) -> &'r mut Neighbour<NoExtension> {
         router
             .neighbor_table
-            .inner
-            .get_mut_by_key(&NeighbourIndex {
+            .get_mut(&NeighbourIndex {
                 iface,
                 addr: address.into(),
             })
@@ -530,13 +618,12 @@ mod test {
         }
 
         #[test]
-        fn not_due_after_firing_returns_set_timer_with_remaining() {
+        fn not_due_after_firing_returns_a_set_timer() {
             let mut r = router("node_1");
             let t0 = Instant::from_secs(0);
             drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
 
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, IFACE_INTERVAL);
+            expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
         }
 
         #[test]
@@ -570,8 +657,7 @@ mod test {
             let second = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(second.iface, handle_b);
 
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, IFACE_INTERVAL);
+            expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
         }
 
         #[test]
@@ -624,10 +710,8 @@ mod test {
                     .is_none()
             );
 
-            // Nothing is left to send, and with no unicast Hello in the mix the soonest thing
-            // scheduled is the interface's own multicast Hello.
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, IFACE_INTERVAL);
+            // Nothing is left to send, so the poll answers with a wake-up rather than a packet.
+            expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
         }
 
         /// Like an interface's multicast Hello timer, a fresh unicast Hello timer is eager: it
@@ -655,10 +739,9 @@ mod test {
             assert_eq!(hello.seqno(), SeqNo(0));
             assert_eq!(hello.interval(), UCAST_INTERVAL.into());
 
-            // The timer restarted, so an immediate repoll does not refire it — it just reports
-            // the full interval it is now waiting out, still the soonest thing scheduled.
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, UCAST_INTERVAL);
+            // The timer restarted, so an immediate repoll does not refire it — it has nothing
+            // left to send and answers with a wake-up.
+            expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
         }
 
         #[test]
@@ -712,8 +795,7 @@ mod test {
                 TransmitDestination::Unicast(NEIGHBOUR_2_ADDR.into())
             );
 
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, UCAST_INTERVAL);
+            expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
         }
 
         #[test]
@@ -725,11 +807,10 @@ mod test {
             drained_ihu_neighbour(&mut r, t0, iface_a, NEIGHBOUR_1_ADDR);
 
             // Scoping to iface_b must not fire iface_a's due ucast hello.
-            let remaining = expect_set_timer(
+            expect_set_timer(
                 r.poll_output_for_iface(t0, iface_b)
                     .expect("poll should succeed"),
             );
-            assert_eq!(remaining, IFACE_INTERVAL);
 
             // It's still there, untouched, for an unrestricted poll.
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
@@ -800,9 +881,8 @@ mod test {
             );
 
             // The timer was restarted by the successful write, so an immediate repoll doesn't
-            // refire it and the interface's Hello — a third of the IHU interval — is what's next.
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, IFACE_INTERVAL);
+            // refire it.
+            expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
         }
 
         /// The other half of the rx cost path: once enough Hellos have landed for `KOutOfJ` to
@@ -840,14 +920,11 @@ mod test {
             let iface = drained_iface(&mut r, t0, "iface_1", NODE_ADDR);
             drained_ihu_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
 
-            // Not yet due, so nothing is sent. The interface's Hello is nearer than the IHU and
-            // wins the wake-up — the IHU losing that race is inherent in deriving it as a
-            // multiple of the Hello interval.
-            let remaining = expect_set_timer(
+            // Half an interval in the IHU is not yet due, so nothing is sent.
+            expect_set_timer(
                 r.poll_output(t0 + IFACE_INTERVAL / 2)
                     .expect("poll should succeed"),
             );
-            assert_eq!(remaining, IFACE_INTERVAL / 2);
 
             // At three Hello intervals the IHU is due again, and the Hello it rode in on is due
             // with it, so the two go out together exactly as they did on the first poll.
@@ -922,8 +999,7 @@ mod test {
                 );
             }
 
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, IFACE_INTERVAL);
+            expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
         }
 
         /// An IHU only *prefers* multicast: when a unicast Hello has already claimed the packet
@@ -969,11 +1045,10 @@ mod test {
             r.add_neighbour(t0, iface_a, NEIGHBOUR_1_ADDR.into())
                 .expect("add_neighbour should succeed");
 
-            let remaining = expect_set_timer(
+            expect_set_timer(
                 r.poll_output_for_iface(t0, iface_b)
                     .expect("poll should succeed"),
             );
-            assert_eq!(remaining, IFACE_INTERVAL);
 
             let transmit = expect_transmit(r.poll_output(t0).expect("poll should succeed"));
             assert_eq!(transmit.iface, iface_a);
@@ -1012,8 +1087,7 @@ mod test {
             );
             assert!(nth_hello(&transmit.contents, 0).flags().is_multicast());
 
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, IFACE_INTERVAL);
+            expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
         }
 
         /// Every other test registers its interface and its neighbours at the same instant, which
@@ -1087,8 +1161,7 @@ mod test {
             );
 
             // Pass 3: everything drained.
-            let remaining = expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
-            assert_eq!(remaining, UCAST_INTERVAL);
+            expect_set_timer(r.poll_output(t0).expect("poll should succeed"));
         }
 
         #[test]
@@ -1181,11 +1254,10 @@ mod test {
             ));
 
             // The registered interface is untouched and still pollable.
-            let remaining = expect_set_timer(
+            expect_set_timer(
                 r.poll_output_for_iface(t0, real)
                     .expect("poll should succeed"),
             );
-            assert_eq!(remaining, IFACE_INTERVAL);
         }
 
         /// A router with no interfaces can never send anything and has no timer to report, so

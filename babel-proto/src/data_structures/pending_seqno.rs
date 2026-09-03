@@ -29,7 +29,7 @@ where
     /// While interfaces are generally well known at compile time, the number of [`SeqnoRequest`]s
     /// this Babel speaker might see is specific to its deployment. So it is important to right size
     /// this number for your specfic deployment.
-    pub fn new_with_storage<T>(table: T) -> Self
+    pub(crate) fn new_with_storage<T>(table: T) -> Self
     where
         T: Into<ManagedSlice<'storage, Option<SeqnoRequest<A>>>>,
     {
@@ -51,6 +51,8 @@ where
 /// and to which no reply has been received yet. This table is indexed by triples of the form
 /// (prefix, plen, router-id) (see [`SeqnoRequestIndex`]), and every entry in this table contains
 /// the following data:
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SeqnoRequest<A: AddressExt> {
     /// 3.2.7-2.1: the prefix [...] being requested
     prefix: Address<A>,

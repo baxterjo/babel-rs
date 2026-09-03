@@ -3,6 +3,7 @@ use thiserror::Error;
 use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
 use crate::data_structures::neighbour::{NeighbourError, NeighbourIndex};
 use crate::data_structures::route::RouteError;
+use crate::data_structures::updates::UpdateError;
 use crate::data_types::address::AddressError;
 use crate::data_types::address_encoding::AddressEncodingError;
 use crate::extension::address::AddressExt;
@@ -10,6 +11,7 @@ use crate::packet::error::len_error::LenError;
 use crate::packet::error::tlv_err::TlvError;
 use crate::packet::parser::ParserError;
 use crate::packet::writer::PacketWriterError;
+use crate::utils::TimerError;
 
 #[derive(Debug, Error)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -55,4 +57,8 @@ where
     Address(#[from] AddressError<A>),
     #[error(transparent)]
     Parser(#[from] ParserError<A>),
+    #[error(transparent)]
+    Timer(#[from] TimerError),
+    #[error(transparent)]
+    Update(#[from] UpdateError),
 }

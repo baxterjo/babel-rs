@@ -9,7 +9,6 @@ use crate::packet::packet_slice::PacketSlice;
 use crate::router::BabelRouter;
 use crate::router::config::BabelRouterConfig;
 use crate::utils::Instant;
-use crate::utils::storage::ManagedSliceExt;
 
 #[test]
 fn two_nodes_say_hello_and_ihu() {
@@ -20,9 +19,11 @@ fn two_nodes_say_hello_and_ihu() {
     // The two nodes must be distinguishable, otherwise the neighbour-table assertions below hold
     // trivially and would keep passing even if the addressing were wrong.
     // Create node 1
-    let mut node_1: BabelRouter<'_> = BabelRouter::new(BabelRouterConfig::new(
-        RouterId::try_from("node_1").expect("bad router ID"),
-    ));
+    let mut node_1: BabelRouter<'_> = BabelRouter::new(
+        Instant::now(),
+        BabelRouterConfig::new(RouterId::try_from("node_1").expect("bad router ID")),
+    )
+    .expect("bad router");
     let node_1_iface = InterfaceHandle::try_from("iface_1").expect("Bad interface");
     let node_1_addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
     node_1
@@ -33,9 +34,11 @@ fn two_nodes_say_hello_and_ihu() {
         .expect("Could not register interface.");
 
     // Create node 2
-    let mut node_2: BabelRouter<'_> = BabelRouter::new(BabelRouterConfig::new(
-        RouterId::try_from("node_2").expect("bad router ID"),
-    ));
+    let mut node_2: BabelRouter<'_> = BabelRouter::new(
+        Instant::now(),
+        BabelRouterConfig::new(RouterId::try_from("node_2").expect("bad router ID")),
+    )
+    .expect("bad router");
     let node_2_iface = InterfaceHandle::try_from("iface_2").expect("Bad interface");
     let node_2_addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
     node_2
@@ -65,8 +68,7 @@ fn two_nodes_say_hello_and_ihu() {
         .expect("node_1 failed to handle input.");
     node_2
         .neighbor_table
-        .inner
-        .get_by_key(&NeighbourIndex {
+        .get(&NeighbourIndex {
             iface: node_2_iface,
             addr: node_1_addr.into(),
         })
@@ -98,8 +100,7 @@ fn two_nodes_say_hello_and_ihu() {
 
     node_1
         .neighbor_table
-        .inner
-        .get_by_key(&NeighbourIndex {
+        .get(&NeighbourIndex {
             iface: node_1_iface,
             addr: node_2_addr.into(),
         })

@@ -8,5 +8,5 @@ pub(crate) mod storage;
 pub(crate) mod time;
 
 pub(crate) use managed_slice::ManagedSlice;
-pub(crate) use storage::{InternallyKeyed, ManagedSliceExt};
+pub(crate) use storage::InternallyKeyed;
 pub use time::{Duration, DurationMultiplier, Instant, Timer, TimerError};

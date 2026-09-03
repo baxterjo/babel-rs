@@ -60,14 +60,18 @@ pub enum InterfaceError {
     /// The storage given for the interface table is full.
     #[error("Interface table is full")]
     Full,
-    /// In this instance the interface is still registered in the interface table, and the handle
-    /// inside the error is still valid for referencing the interface. The user can decide what
-    /// they want to do with this error.
+    /// In this instance the NEW interface is still registered in the interface table, and the
+    /// handle inside the error is still valid for referencing the interface. The user can
+    /// decide what they want to do with this error.
     #[error("An interface with the same ID was registered twice.")]
     DuplicateInterfaceId(InterfaceHandle),
     #[error("Given interface ID is too long - max: 8, len: {}", len)]
     IdTooLong { len: usize },
-    /// The router was polled before any interface was registered, so it has nothing it could
+    #[error("Interface already holds the maximum of {max} other addresses")]
+    TooManyOtherAddresses { max: usize },
+    #[error("Interface already has an address in this address family")]
+    DuplicateAddressFamily,
+    /// The router was polled before any interfaces were registered, so it has nothing it could
     /// ever send.
     #[error("No interfaces are registered")]
     NoInterfacesRegistered,

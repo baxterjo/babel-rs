@@ -1,26 +1,17 @@
 use crate::data_structures::interface::{Interface, InterfaceHandle};
 use crate::data_structures::neighbour::neighbour_entry::Neighbour;
-use crate::data_structures::neighbour::{NeighbourConfig, NeighbourError};
+use crate::data_structures::neighbour::{NeighbourConfig, NeighbourError, NeighbourIndex};
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
-use crate::utils::{Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt as _};
+use crate::utils::storage::Table;
+use crate::utils::{Instant, InternallyKeyed, ManagedSlice};
 
 pub struct NeighbourTable<'storage, A>
 where
     A: AddressExt,
 {
-    pub(crate) inner: ManagedSlice<'storage, Option<Neighbour<A>>>,
-}
-
-#[cfg(any(feature = "std", feature = "alloc"))]
-impl<'storage, A> Default for NeighbourTable<'storage, A>
-where
-    A: AddressExt,
-{
-    fn default() -> Self {
-        Self::new()
-    }
+    inner: Table<'storage, NeighbourIndex<A>, Neighbour<A>>,
 }
 
 impl<'storage, A> NeighbourTable<'storage, A>
@@ -32,20 +23,40 @@ where
     /// While interfaces are generally well known at compile time, the number of neighbors this
     /// Babel speaker might see is specific to its deployment. So it is important to right size
     /// this number for your specfic deployment.
-    pub fn new_with_storage<T>(table: T) -> Self
+    pub(crate) fn new_with_storage<T>(storage: T) -> Self
     where
         T: Into<ManagedSlice<'storage, Option<Neighbour<A>>>>,
     {
         Self {
-            inner: table.into(),
+            inner: Table::new(storage),
         }
     }
 
-    #[cfg(any(feature = "std", feature = "alloc"))]
-    pub fn new() -> Self {
-        Self {
-            inner: ManagedSlice::Owned(Default::default()),
-        }
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Neighbour<A>> {
+        self.inner.iter()
+    }
+
+    /// Borrows the neighbour registered under `index`, if it exists.
+    pub(crate) fn get(&self, index: &NeighbourIndex<A>) -> Option<&Neighbour<A>> {
+        self.inner.get_by_key(index)
+    }
+
+    /// Mutably borrows the neighbour registered under `index`, if it exists.
+    pub(crate) fn get_mut(&mut self, index: &NeighbourIndex<A>) -> Option<&mut Neighbour<A>> {
+        self.inner.get_mut_by_key(index)
+    }
+    pub(crate) fn neighbours_for_iface(
+        &self,
+        iface: &InterfaceHandle,
+    ) -> impl Iterator<Item = &Neighbour<A>> {
+        self.iter().filter(move |n| n.interface() == iface)
+    }
+
+    pub(crate) fn neighbours_mut_for_iface(
+        &mut self,
+        iface: &InterfaceHandle,
+    ) -> impl Iterator<Item = &mut Neighbour<A>> {
+        self.iter_mut().filter(move |n| n.interface() == iface)
     }
 
     fn get_or_insert_default(
@@ -94,14 +105,7 @@ where
     }
 
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Neighbour<A>> {
-        self.inner.iter_mut().filter_map(|v| v.as_mut())
-    }
-
-    pub(crate) fn neighbours_mut_for_iface(
-        &mut self,
-        iface: InterfaceHandle,
-    ) -> impl Iterator<Item = &mut Neighbour<A>> {
-        self.iter_mut().filter(move |n| n.interface() == &iface)
+        self.inner.iter_mut()
     }
 
     //  _    _          _   _ _____  _      ______
@@ -155,7 +159,7 @@ where
         let neighbour = self.get_or_insert_default(now, address, interface)?;
         b_debug!(
             "[RECV] IHU - iface: {:?}, addr: {:?} - {:?}",
-            interface.handle,
+            interface.handle(),
             address,
             ihu
         );

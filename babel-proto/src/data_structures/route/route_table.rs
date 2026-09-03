@@ -7,9 +7,8 @@ use crate::data_types::address::Address;
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::packet::parser::ResolvedUpdate;
-use crate::utils::{
-    Duration, DurationMultiplier, Instant, InternallyKeyed, ManagedSlice, ManagedSliceExt, Timer,
-};
+use crate::utils::storage::Table;
+use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, ManagedSlice, Timer};
 
 pub const DEFAULT_SMOOTHING_MULTIPLE: DurationMultiplier = DurationMultiplier::new(3, 1);
 
@@ -21,7 +20,7 @@ pub struct RouteTable<'storage, A: AddressExt> {
     /// This should never be made public in any way as the insert/remove functions guarantee:
     /// * The table contents are unique by key
     /// * The table is sorted after any addition / removal of the keys.
-    inner: ManagedSlice<'storage, Option<Route<A>>>,
+    inner: Table<'storage, RouteIndex<A>, Route<A>>,
 
     pub(crate) route_expiry_time: DurationMultiplier,
     /// Multiple of the hello timer of a given route that should be used to generate the time
@@ -41,23 +40,49 @@ where
     /// While interfaces are generally well known at compile time, the number of routes this
     /// Babel speaker might see is specific to its deployment. So it is important to right size
     /// this number for your specfic deployment or do what you can to enable the alloc feature.
-    pub(crate) fn new_with_storage<T>(table: T, route_expiry: DurationMultiplier) -> Self
+    pub(crate) fn new_with_storage<T>(storage: T, route_expiry: DurationMultiplier) -> Self
     where
         T: Into<ManagedSlice<'storage, Option<Route<A>>>>,
     {
         Self {
-            inner: table.into(),
+            inner: Table::new(storage),
             route_expiry_time: route_expiry,
             smoothing_multiple: DEFAULT_SMOOTHING_MULTIPLE,
         }
     }
 
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<A>> {
-        self.inner.iter_mut().filter_map(|e| e.as_mut())
+        self.inner.iter_mut()
     }
 
     pub(crate) fn iter_mut_slots(&mut self) -> impl Iterator<Item = &mut Option<Route<A>>> {
-        self.inner.iter_mut()
+        self.inner.iter_mut_slots()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Route<A>> {
+        self.inner.iter()
+    }
+
+    /// The route an index names, if it is still in the table.
+    pub(crate) fn get_by_key(&self, key: &RouteIndex<A>) -> Option<&Route<A>> {
+        self.inner.get_by_key(key)
+    }
+
+    /// Test-only door into the table's storage.
+    ///
+    /// Production code only ever gains a route through [`Self::aquire_route`], which needs an
+    /// interface, a neighbour and a parsed update to build one. Tests in other modules need a
+    /// table with known contents without staging all of that.
+    #[cfg(test)]
+    pub(crate) fn insert(&mut self, route: Route<A>) -> Result<Option<Route<A>>, Route<A>> {
+        self.inner.insert(route)
+    }
+
+    pub(crate) fn retain_mut<F>(&mut self, f: F)
+    where
+        F: FnMut(&mut Route<A>) -> bool,
+    {
+        self.inner.retain_mut(f);
     }
 
     pub(crate) fn flush(&mut self) {
@@ -240,9 +265,10 @@ where
 
     /// Groups the routes in the table by the destination (prefix, plen) they lead to.
     //  `chunk_by` produces "runs" of elements. So this only works because one of the main
-    //  predicates of `ManagedSliceExt` is that it is always sorted. The key for he items in this
-    // particular `ManagedSliceExt` is a struct that consists of `(prefix, prefix_len, neighbour)`.
-    // Sorting by a key is also sorting by a subset of that key, so this grouping works.
+    //  predicates of `ManagedSlice<'storage, Option<V>>` is that it is always sorted. The key for
+    // the items in this particular `ManagedSlice` is a struct that consists of `(prefix,
+    // prefix_len, neighbour)`. Sorting by a key is also sorting by a subset of that key, so
+    // this grouping works.
     pub(crate) fn destination_groups_mut(
         &mut self,
     ) -> impl Iterator<Item = DestinationGroup<'_, A>> {

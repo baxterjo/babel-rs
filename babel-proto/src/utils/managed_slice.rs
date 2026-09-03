@@ -28,7 +28,7 @@ use std::vec::Vec;
 /// without any conversion at the call site.
 ///
 /// See also [Managed](enum.Managed.html).
-pub enum ManagedSlice<'a, T: 'a> {
+pub(crate) enum ManagedSlice<'a, T: 'a> {
     /// Borrowed variant.
     Borrowed(&'a mut [T]),
     /// Owned variant, only available with the `std` or `alloc` feature enabled.
