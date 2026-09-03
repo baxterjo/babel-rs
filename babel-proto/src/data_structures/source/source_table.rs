@@ -47,7 +47,7 @@ impl<A: AddressExt> SourceTable<'_, A> {
             return true;
         };
 
-        // Otherwise, check against the best feasibility ever seen.
+        // Otherwise, check against the best feasibility ever sent for this route.
         let incoming_feasibility = Feasibility::new(seqno, metric);
         incoming_feasibility < source.feasibility
     }
