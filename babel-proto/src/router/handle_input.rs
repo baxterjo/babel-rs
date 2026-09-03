@@ -29,7 +29,8 @@ where
         b_trace!("{:?}", input);
 
         // Update all time based state.
-        let (mut run_selection, _) = self.poll_tick(now)?;
+        self.poll_tick(now)?;
+        let mut run_selection = false;
         // Have to copy the interface here to avoid indexing the interface table for every TLV in
         // the loop below.
         let Some(interface) = self.iface_table.inner.get_by_key(&input.iface).copied() else {
@@ -86,9 +87,21 @@ where
                     ));
                 }
                 Tlv::RouterId(router_id) => {
+                    b_debug!(
+                        "[RECV] RouterId - iface: {:?}, source: {:?} - {:?}",
+                        interface,
+                        input.source_addr,
+                        router_id
+                    );
                     parser.handle_router_id_tlv(router_id);
                 }
                 Tlv::NextHop(next_hop) => {
+                    b_debug!(
+                        "[RECV] NextHop - iface: {:?}, source: {:?} - {:?}",
+                        interface,
+                        input.source_addr,
+                        next_hop
+                    );
                     ok_or_continue!(parser.handle_next_hop_tlv(next_hop));
                 }
                 Tlv::Update(update) => {
@@ -123,6 +136,12 @@ where
         address: Address<A>,
         hello: HelloSlice<'_>,
     ) -> Result<(), BabelError<A>> {
+        b_debug!(
+            "[RECV] Hello - iface: {:?}, source: {:?} - {:?}",
+            interface,
+            address,
+            hello
+        );
         // Handle the incoming hello
         self.neighbor_table
             .handle_hello(now, interface, address, hello)?;
@@ -155,6 +174,13 @@ where
             b_debug!("Ignoring IHU addressed to another neighbour");
             return Ok(false);
         }
+
+        b_debug!(
+            "[RECV] Ihu - iface: {:?}, source: {:?} - {:?}",
+            interface,
+            source_addr,
+            ihu
+        );
 
         let updates = self
             .neighbor_table
@@ -189,6 +215,12 @@ where
         parser: &mut Parser<P>,
         update: UpdateSlice<'_>,
     ) -> Result<(), BabelError<A>> {
+        b_debug!(
+            "[RECV] Update - iface: {:?}, source: {:?} - {:?}",
+            interface,
+            source_addr,
+            update
+        );
         let idx = NeighbourIndex {
             iface: *interface.handle(),
             addr: *source_addr,

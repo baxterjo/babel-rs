@@ -2,7 +2,6 @@ use core::fmt::Display;
 
 use thiserror::Error;
 
-use crate::data_structures::interface::InterfaceHandle;
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::output::TransmitDestination;
@@ -38,6 +37,9 @@ impl<A: AddressExt> DestAddr<A> {
         if *self != Self::None && *self != new {
             return Err(DestinationError::AlreadyClaimed { cur: *self, new });
         }
+        if *self != new {
+            b_trace!("Active destination is now: {:?}", new);
+        }
         *self = new;
         Ok(())
     }
@@ -52,10 +54,6 @@ impl<A: AddressExt> DestAddr<A> {
             Self::Unicast(addr) => Some(addr),
             _ => None,
         }
-    }
-
-    pub(crate) fn can_send_ihu(&self, addr: &Address<A>) -> bool {
-        self.is_free() || self.is_multicast() || self.unicast_addr().is_some_and(|a| a == addr)
     }
 }
 

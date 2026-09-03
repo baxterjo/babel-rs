@@ -7,6 +7,7 @@ use crate::metric::LinkCostCalculator;
 use crate::packet::tlv::hello_slice::HelloFlags;
 use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriterError, PacketWriterStep};
+use crate::utils::destination::DestAddr;
 use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, Timer};
 
 /// The maximum amount of other addresses an interface can be reached at.
@@ -61,6 +62,9 @@ pub struct Interface<A: AddressExt> {
 
     pub(crate) request_acks: bool,
 
+    /// The number of retries that should be sent on a triggered update.
+    ///
+    /// This is **NOT** the number of retries that should be sent on a periodic update.
     pub(crate) update_retry_limit: u8,
     pub(crate) update_retry_interval: Interval,
 }
@@ -114,6 +118,10 @@ impl<A: AddressExt> Interface<A> {
             .find(|address| address.encoding().address_family().as_ref() == Some(family))
     }
 
+    pub(crate) fn can_send_mcast_hello(&self, dest: &DestAddr<A>) -> bool {
+        dest.is_free() || dest.is_multicast()
+    }
+
     /// Polls this interface for an mcast hello.
     ///
     /// If the write to the writer is successful it will also update the state for the interface.
@@ -121,6 +129,7 @@ impl<A: AddressExt> Interface<A> {
         &mut self,
         now: Instant,
         next_poll: &mut Duration,
+        active_dest: &mut DestAddr<A>,
         mut writer: PacketWriterStep<'output, Ready>,
     ) -> Result<
         PacketWriterStep<'output, Ready>,
@@ -130,6 +139,10 @@ impl<A: AddressExt> Interface<A> {
         // writer unchanged.
         if let Some(remaining) = self.hello_timer.time_remaining(now) {
             *next_poll = remaining.min(*next_poll);
+            return Ok(writer);
+        }
+
+        if !self.can_send_mcast_hello(active_dest) {
             return Ok(writer);
         }
 
@@ -145,6 +158,11 @@ impl<A: AddressExt> Interface<A> {
             seqno,
             duration.as_centis()
         );
+        // Try to claim the destination BEFORE writing to the packet.
+        if let Err(err) = active_dest.claim(DestAddr::Multicast) {
+            b_debug!("Err: {}", err);
+            return Ok(writer);
+        }
 
         writer = writer
             .write_hello(flags, seqno, duration.into())?

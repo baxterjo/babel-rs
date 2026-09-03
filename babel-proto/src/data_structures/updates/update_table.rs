@@ -65,13 +65,35 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
     where
         P: ParserStateExt<AddressEncoding = A::Encoding, Address = A>,
     {
+        b_trace!("Polling for updates");
+        // First check if there are ANY updates due. This is a hot path escape hatch that iterates
+        // through the update table linearly to avoid the quadratic iteration below when
+        // it is not necessary.
+
+        // If none (not any) updates are due, exit early.
+        // any() is chosen here over all() because any() breaks out of the iterator early when a
+        // single element returns true.
+        if !self.inner.iter().any(|update| {
+            if let Some(remaining) = update.send_timer.time_remaining(now) {
+                *next_poll = remaining.min(*next_poll);
+                false
+            } else {
+                true
+            }
+        }) {
+            return Ok(writer);
+        }
         // Start a cursor over self that yields groups of router ids.
         let mut router_id_groups = self.router_id_groups_mut(interface.handle(), routes);
         // Start the parser for the packet with the initial next hop equal to the address of the
         // interface this packet will be sent on.
         let mut parser: Parser<P> = Parser::new(interface.address);
+        // Group by router ID to reduce the number of router-id tlvs.
         while let Some(mut rid_group) = router_id_groups.next_group() {
+            // Keep track of the last sent update, the below iterator is partially sorted by
+            // RouteIndex so this will have contiguous runs with the same idx.
             let mut sent_update: Option<RouteIndex<A>> = None;
+            // Run through the updates in the list.
             for (update, route) in rid_group.iter_mut() {
                 // If the timer still needs to fire then update the next poll value and continue.
                 if let Some(remaining) = update.send_timer.time_remaining(now) {
@@ -79,51 +101,55 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                     continue;
                 }
 
-                // If the update cannot be sent via multicast and the active destination is either
-                // multicast or doesn't match this update's destination address then skip.
-                if !update.mcast
-                    && (active_dest.is_multicast()
-                        || active_dest
-                            .unicast_addr()
-                            .is_some_and(|addr| addr != &update.neighbour().addr))
-                {
+                // If the update cannot be sent to the current destination, then skip it.
+                if !update.can_send(active_dest) {
                     continue;
                 }
 
-                // If the update CAN be sent to multicast, is already DESTINED for multicast, AND
-                // has already been written to the packet:
-                //
-                // THEN
-                //
-                // The TLV already in the packet reaches this neighbour too, so this update is
-                // satisfied without writing anything more. So decrement the update send count and
-                // restart the timer.
-                if update.mcast
-                    && active_dest.is_multicast()
-                    && sent_update.is_some_and(|idx| idx == route.key())
-                {
+                // If the update would be a duplicate TLV in the current packet, decrement the send
+                // counter and restart the send timer.
+                if update.would_duplicate(active_dest, &sent_update) {
                     update.send_count = update.send_count.saturating_sub(1);
                     update.send_timer.restart(now);
+                    *next_poll = update.send_timer.duration().min(*next_poll);
                     continue;
                 }
+
+                // Get the address that should be the next hop for the address family advertised in
+                // this route. If this interface does not have an address of that family, then we
+                // cannot advertise the route.
+                let Some(next_hop) = route
+                    .source()
+                    .prefix
+                    .encoding()
+                    .address_family()
+                    .and_then(|family| interface.address_for_family(&family).copied())
+                else {
+                    update.send_count = 0;
+                    continue;
+                };
 
                 // A this point we know an update TLV needs to be sent.
 
-                // Update the source table
-                if let Err(err) = sources.perform_maintenance(now, route) {
-                    b_debug!("Source Err: {}", err);
-                    continue;
-                };
+                b_trace!("Preparing Update TLV");
 
                 // Try to claim the active destination before doing anything.
+                if active_dest.is_free() {
+                    let new_dest = if update.mcast_allowed {
+                        DestAddr::Multicast
+                    } else {
+                        DestAddr::Unicast(update.neighbour().addr)
+                    };
+                    if let Err(err) = active_dest.claim(new_dest) {
+                        b_debug!("Err - {}", err);
+                        continue;
+                    };
+                }
 
-                let new_dest = if update.mcast {
-                    DestAddr::Multicast
-                } else {
-                    DestAddr::Unicast(update.neighbour().addr)
-                };
-                if let Err(err) = active_dest.claim(new_dest) {
-                    b_debug!("Active Dest Error in poll_for_update - {}", err);
+                // Perform source table maintenance for this update.
+
+                if let Err(err) = sources.perform_maintenance(now, route) {
+                    b_debug!("Source Err: {}", err);
                     continue;
                 };
 
@@ -135,27 +161,6 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                     .get_next_hop(&route.source().prefix.encoding())
                     .is_none()
                 {
-                    // A wildcard prefix belongs to no address family, so nothing can route it, and
-                    // no address in the route's family means the receiver would have nothing to
-                    // forward through. babeld bails the same way: `if(!ifp->ipv4) ... return;`.
-                    let next_hop_opt = route
-                        .source()
-                        .prefix
-                        .encoding()
-                        .address_family()
-                        .and_then(|family| interface.address_for_family(&family).copied());
-
-                    let Some(next_hop) = next_hop_opt else {
-                        // If this interface does not have an address of the same family as route's
-                        // address, then it cannot advertise the route as it does not support that
-                        // route's address family.
-                        //
-                        // i.e.: If the interface is Ipv6 only and the route is for Ipv4, then this
-                        // router has no way of forwarding on this interface, so we don't advertise
-                        // the route.
-                        update.send_count = 0;
-                        continue;
-                    };
                     // State the next hop this route's family is missing, resolved above.
                     b_debug!(
                         "[SEND] NextHop - iface: {:?}, dest: {:?} - next_hop: {:?}",
@@ -197,17 +202,36 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                 // still RECEIVE compressed addresses, it just doesn't send them yet.
                 //
                 // TODO: Router ID optimization in update flags.
+                let flags = UpdateFlags::new(false, false);
+                let ae = route.source().prefix.encoding();
+                let omitted = 0;
+                let trim = route.source().prefix_len.div_ceil(8);
+                b_debug!(
+                    "[SEND] Update - iface: {:?}, dest: {:?}, - \
+                    {:?}, {:?}, plen: {}, omitted: {}, interval: {}, \
+                    {:?}, {:?}, prefix: {:?}",
+                    interface,
+                    active_dest,
+                    ae,
+                    flags,
+                    route.source().prefix_len,
+                    omitted,
+                    Duration::from(update_interval).as_centis(),
+                    route.seqno,
+                    route.computed_metric,
+                    route.source().prefix
+                );
 
                 writer = writer
                     .write_update(
-                        route.source().prefix.encoding().into(),
-                        UpdateFlags::new(false, false),
+                        ae.into(),
+                        flags,
                         route.source().prefix_len,
-                        0,
+                        omitted,
                         update_interval,
                         route.seqno,
                         route.computed_metric,
-                        route.source().prefix.as_wire(),
+                        &route.source().prefix.as_wire()[..trim.into()],
                     )?
                     .finish_tlv()?;
 
@@ -1417,14 +1441,14 @@ mod test {
             assert_eq!(
                 out.tlv_types(),
                 alloc::vec![
-                    RouterIdSlice::TYPE_ID,
                     NextHopSlice::TYPE_ID,
+                    RouterIdSlice::TYPE_ID,
                     UpdateSlice::TYPE_ID
                 ],
                 "the next hop has to be stated before the update that relies on it"
             );
 
-            let next_hop = match out.nth_tlv(1) {
+            let next_hop = match out.nth_tlv(0) {
                 Tlv::NextHop(tlv) => tlv,
                 other => panic!("should be a next hop, got {other:?}"),
             };
@@ -1506,8 +1530,8 @@ mod test {
             assert_eq!(
                 out.tlv_types(),
                 alloc::vec![
-                    RouterIdSlice::TYPE_ID,
                     NextHopSlice::TYPE_ID,
+                    RouterIdSlice::TYPE_ID,
                     UpdateSlice::TYPE_ID
                 ]
             );

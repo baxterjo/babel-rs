@@ -93,12 +93,7 @@ where
         );
 
         // Poll time based state.
-        let (run_selection, next_poll) = self.poll_tick(now)?;
-
-        // Run selection if necessary.
-        if run_selection {
-            self.select_routes();
-        }
+        let next_poll = self.poll_tick(now)?;
 
         let writer = PacketWriter::new_packet(self.magic_number, self.version_number, buf.into())?;
 
@@ -156,11 +151,7 @@ where
         }
 
         let mut active_dest = DestAddr::default();
-        // The identity for the running minimum below. It can only survive as Duration::MAX if no
-        // interface was iterated at all, which the guards above have already ruled out: at
-        // least one interface is registered, a scoped poll names one that exists, and every
-        // interface contributes its multicast Hello timer on every path that reaches the
-        // end of the loop. The check after the loop rejects it if that ever stops holding.
+        // The running minimum for when the next wake-up time is.
         let mut next_poll = next_poll.unwrap_or(Duration::MAX);
 
         for interface in self.iface_table.iter_mut_filter(poll_only) {
@@ -206,47 +197,34 @@ where
                 writer
             ));
 
-            // First check for hellos. These are most important for keeping the mesh alive.
             b_trace!("Polling for MCAST Hellos");
-            writer = ok_or_try_send!(interface.poll_for_mcast_hello(now, &mut next_poll, writer));
-
-            // If the writer has any TLVs in it at this point then the active destination is
-            // multicast.
-            if writer.has_tlvs() {
-                active_dest
-                    .claim(DestAddr::Multicast)
-                    .expect("Active destination should be free");
-            }
+            writer = ok_or_try_send!(interface.poll_for_mcast_hello(
+                now,
+                &mut next_poll,
+                &mut active_dest,
+                writer
+            ));
 
             for neighbour in self
                 .neighbor_table
                 .neighbours_mut_for_iface(interface.handle())
             {
-                // If the active destination is free, poll for ucast hellos.
-                if active_dest.is_free() {
-                    b_trace!("Polling for UCAST Hellos");
-                    writer = ok_or_try_send!(neighbour.poll_for_ucast_hello(
-                        now,
-                        &mut next_poll,
-                        writer
-                    ));
-                    if writer.has_tlvs() {
-                        active_dest
-                            .claim(DestAddr::Unicast(*neighbour.address()))
-                            .expect("Active destination should be free.");
-                    }
-                }
+                b_trace!("Polling for UCAST Hellos");
+                writer = ok_or_try_send!(neighbour.poll_for_ucast_hello(
+                    now,
+                    &mut next_poll,
+                    &mut active_dest,
+                    writer
+                ));
 
-                if active_dest.can_send_ihu(neighbour.address()) {
-                    b_trace!("Polling for IHUs");
-                    writer = ok_or_try_send!(neighbour.poll_for_ihu(
-                        now,
-                        &mut active_dest,
-                        &mut next_poll,
-                        interface.cost_calc,
-                        writer,
-                    ));
-                }
+                b_trace!("Polling for IHUs");
+                writer = ok_or_try_send!(neighbour.poll_for_ihu(
+                    now,
+                    &mut active_dest,
+                    &mut next_poll,
+                    interface.cost_calc,
+                    writer,
+                ));
             }
             // Only one interface can be written to at a time. If there are TLVs at this point then
             // its time to send.
@@ -274,10 +252,7 @@ where
     // |_|  \___/|____|____|   |_| |___\___|_|\_\
 
     /// Polls and updates all of the time based states.
-    pub(super) fn poll_tick(
-        &mut self,
-        now: Instant,
-    ) -> Result<(bool, Option<Duration>), BabelError<A>> {
+    pub(super) fn poll_tick(&mut self, now: Instant) -> Result<Option<Duration>, BabelError<A>> {
         let mut next_poll = None;
         let mut run_selection = false;
 
@@ -324,15 +299,22 @@ where
             }
         });
 
+        if run_selection {
+            self.select_routes();
+        }
+
         // Check for periodic updates
-        if let Some(remaining) = self.update_timer.time_remaining(now) {
-            // If there is still time remaining until the next periodic update. Merge with
-            // next_poll and skip.
-            next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
-        } else {
-            // Otherwise queue an update for every selected route to every neighbour.
-            for route in self.route_table.iter().filter(|r| r.selected) {
-                for interface in self.iface_table.iter() {
+        for interface in self.iface_table.iter_mut() {
+            if let Some(remaining) = interface.update_timer.time_remaining(now) {
+                // If there is still time remaining until the next periodic update. Merge with
+                // next_poll and skip.
+                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+            } else {
+                // Otherwize reset the update timer.
+                self.update_timer.restart(now);
+
+                // And queue an update for every selected route to every neighbour.
+                for route in self.route_table.iter().filter(|r| r.selected) {
                     for neighbour in self.neighbor_table.neighbours_for_iface(interface.handle()) {
                         self.update_table.add_update(Update::new(
                             now,
@@ -345,11 +327,10 @@ where
                         )?)?;
                     }
                 }
+
+                let remaining = self.update_timer.duration();
+                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
             }
-            // Then reset the update timer.
-            self.update_timer.restart(now);
-            let remaining = self.update_timer.duration();
-            next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
         }
 
         // Poll and purge expired sources.
@@ -362,7 +343,7 @@ where
             }
         });
 
-        Ok((run_selection, next_poll))
+        Ok(next_poll)
     }
 }
 

@@ -38,9 +38,9 @@ impl NonReservedEncoding {
     }
 }
 
-impl Into<u8> for NonReservedEncoding {
-    fn into(self) -> u8 {
-        self.value()
+impl From<NonReservedEncoding> for u8 {
+    fn from(value: NonReservedEncoding) -> Self {
+        value.value()
     }
 }
 

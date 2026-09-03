@@ -159,7 +159,7 @@ where
         check_sorted!(self);
         let out = V::locate(&self.0[..], key).and_then(|idx| self.0[idx].take());
         // Ensure the slice is sorted after modifying it.
-        V::_my_sort(&mut self.0[..]);
+        self.flush();
         out
     }
 

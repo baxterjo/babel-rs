@@ -96,6 +96,21 @@ impl<
     const R: usize,
     const S: usize,
     const PS: usize,
+> Default for BabelMemoryPool<A, I, N, R, S, PS>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<
+    'storage,
+    A: AddressExt,
+    const I: usize,
+    const N: usize,
+    const R: usize,
+    const S: usize,
+    const PS: usize,
 > BabelMemoryPool<A, I, N, R, S, PS>
 where
     Self: 'storage,

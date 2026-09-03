@@ -277,7 +277,7 @@ impl<'a> PacketWriterStep<'a, Ready> {
         ae: u8,
         flags: UpdateFlags,
         prefix_len: u8,
-        ommitted: u8,
+        omitted: u8,
         interval: Interval,
         seqno: SeqNo,
         metric: Metric,
@@ -322,7 +322,7 @@ impl<'a> PacketWriterStep<'a, Ready> {
         length += len;
 
         // Write ommitted
-        let (len, step) = step.write_or_backtrack(&[ommitted], start_pos)?;
+        let (len, step) = step.write_or_backtrack(&[omitted], start_pos)?;
         length += len;
 
         // Write interval

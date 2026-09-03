@@ -11,6 +11,7 @@ use thiserror::Error;
 use crate::utils::TimerError;
 
 #[derive(Debug, Error)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum SourceError {
     #[error(transparent)]
     Timer(#[from] TimerError),

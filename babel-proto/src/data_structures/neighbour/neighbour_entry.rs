@@ -169,6 +169,17 @@ impl<A: AddressExt> Neighbour<A> {
         &self.address
     }
 
+    pub(crate) fn can_send_ucast_hello(&self, dest: &DestAddr<A>) -> bool {
+        self.pending.ucast_hello.is_some()
+            && (dest.is_free() || dest.unicast_addr().is_some_and(|a| a == self.address()))
+    }
+
+    pub(crate) fn can_send_ihu(&self, dest: &DestAddr<A>) -> bool {
+        dest.is_free()
+            || dest.is_multicast()
+            || dest.unicast_addr().is_some_and(|a| a == self.address())
+    }
+
     //  _    _          _   _ _____  _      ______
     // | |  | |   /\   | \ | |  __ \| |    |  ____|
     // | |__| |  /  \  |  \| | |  | | |    | |__
@@ -332,21 +343,32 @@ impl<A: AddressExt> Neighbour<A> {
         &mut self,
         now: Instant,
         next_poll: &mut Duration,
+        active_dest: &mut DestAddr<A>,
         mut writer: PacketWriterStep<'output, Ready>,
     ) -> Result<
         PacketWriterStep<'output, Ready>,
         (PacketWriterError, PacketWriterStep<'output, Ready>),
     > {
+        // If the timer is not done, update next poll and return writer unchanged.
+        if let Some(remaining) = self
+            .pending
+            .ucast_hello
+            .map(|u| u.timer.time_remaining(now))
+            .flatten()
+        {
+            *next_poll = remaining.min(*next_poll);
+            return Ok(writer);
+        }
+
+        if !self.can_send_ucast_hello(active_dest) {
+            return Ok(writer);
+        }
+
+        let address = *self.address();
         // Check if this neighbour wants to send ucast hellos. If not, return the writer unchanged.
         let Some(ucast_hello) = &mut self.pending.ucast_hello else {
             return Ok(writer);
         };
-
-        // If the timer is not done, update next poll and return writer unchanged.
-        if let Some(remaining) = ucast_hello.timer.time_remaining(now) {
-            *next_poll = remaining.min(*next_poll);
-            return Ok(writer);
-        }
 
         let flags = HelloFlags::new_unicast();
         let seqno = ucast_hello.seqno;
@@ -360,6 +382,13 @@ impl<A: AddressExt> Neighbour<A> {
             seqno,
             duration.as_centis()
         );
+
+        // Try to claim the destination BEFORE writing the packet.
+        if let Err(err) = active_dest.claim(DestAddr::Unicast(address)) {
+            b_debug!("Err: {}", err);
+            return Ok(writer);
+        }
+
         writer = writer
             .write_hello(flags, seqno, duration.into())?
             .finish_tlv()?;
@@ -393,12 +422,8 @@ impl<A: AddressExt> Neighbour<A> {
             return Ok(writer);
         }
 
-        // If the active address has been claimed and it is not destined for this neighbour, return
-        // the writer unchanged.
-        if active_dest
-            .unicast_addr()
-            .is_some_and(|addr| *addr != self.address)
-        {
+        // If we can't send an IHU to this neighbour, then return.
+        if !self.can_send_ihu(active_dest) {
             return Ok(writer);
         }
 

@@ -59,11 +59,14 @@ impl<A: AddressExt> SourceTable<'_, A> {
         now: Instant,
         route: &Route<A>,
     ) -> Result<(), SourceError> {
+        b_trace!("Performing maintenance for {:?}", route);
+
         if route.computed_metric == Metric::INFINITY {
             return Ok(());
         }
 
         let Some(source) = self.inner.get_mut_by_key(route.source()) else {
+            b_trace!("Route not in source table, adding.");
             // Just checked if there was something in the table.
             let _ = self.inner.insert(Source::new(
                 now,
@@ -79,10 +82,13 @@ impl<A: AddressExt> SourceTable<'_, A> {
 
         let advertised = route.feasibility();
         if advertised < source.feasibility {
+            b_trace!("Updating {:?}", advertised);
             source.feasibility = advertised;
         }
 
         source.gc_timer.restart(now);
+
+        b_trace!("Route maintenance complete");
 
         Ok(())
     }
