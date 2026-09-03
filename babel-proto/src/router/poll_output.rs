@@ -268,9 +268,20 @@ where
                     .ok_or(BabelError::InterfaceDoesntExist(*neighbour.interface()))?;
                 self.route_table
                     .update_cost_for_neighbour(now, interface, neighbour);
-                run_selection |= true;
+                run_selection = true;
             }
         }
+
+        // Poll and purge expired sources.
+        self.source_table.inner.retain(|s| {
+            if let Some(remaining) = s.gc_timer.time_remaining(now) {
+                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+                true
+            } else {
+                run_selection = true;
+                false
+            }
+        });
 
         // Check for expired routes.
         self.route_table.retain_mut(|route| {
@@ -280,13 +291,47 @@ where
             } else {
                 let out: bool;
                 // If the route has expired and the advertised metric is not yet infinity, set
-                // it to infinity and reset the timer.
+                // it to infinity, reset the timer, and send a route retraction.
                 if route.advertised_metric != Metric::INFINITY {
                     route.advertised_metric = Metric::INFINITY;
                     route.computed_metric = Metric::INFINITY;
                     route.expiry.restart(now);
                     let remaining = route.expiry.duration();
                     next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+                    // If the route was selected, send an update and unselect it.
+                    if route.selected {
+                        for interface in self.iface_table.iter() {
+                            // Get all the neighbours in the interface that are not the original
+                            // advertising neighbour.
+                            for dest_neigh in self
+                                .neighbor_table
+                                .neighbours_for_iface(&interface.key())
+                                .filter(|n| route.neigbour() != &n.key())
+                            {
+                                let update = match Update::new(
+                                    now,
+                                    route.key(),
+                                    dest_neigh.key(),
+                                    !interface.prefer_ucast,
+                                    false,
+                                    *interface.update_retry_interval,
+                                    interface.update_retry_limit,
+                                ) {
+                                    Ok(u) => u,
+                                    Err(err) => {
+                                        b_debug!("Err creating Update: {}", err);
+                                        continue;
+                                    }
+                                };
+                                if let Err(err) = self.update_table.add_update(update) {
+                                    b_debug!("Err adding update: {}", err);
+                                    continue;
+                                };
+                            }
+                        }
+                        route.selected = false;
+                    }
+
                     out = true;
                 } else {
                     // If the metric was already infinity and the timer expires (again) then the
@@ -294,13 +339,13 @@ where
                     out = false;
                 }
                 // In either case, the selection process must be run when the timer expires.
-                run_selection |= true;
+                run_selection = true;
                 out
             }
         });
 
         if run_selection {
-            self.select_routes();
+            self.select_routes(now);
         }
 
         // Check for periodic updates
@@ -332,16 +377,6 @@ where
                 next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
             }
         }
-
-        // Poll and purge expired sources.
-        self.source_table.inner.retain(|s| {
-            if let Some(remaining) = s.gc_timer.time_remaining(now) {
-                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
-                true
-            } else {
-                false
-            }
-        });
 
         Ok(next_poll)
     }

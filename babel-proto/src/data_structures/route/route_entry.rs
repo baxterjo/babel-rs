@@ -2,12 +2,14 @@ use crate::data_structures::interface::Interface;
 use crate::data_structures::neighbour::{Neighbour, NeighbourIndex};
 use crate::data_structures::route::RouteError;
 use crate::data_structures::source::SourceIndex;
+use crate::data_structures::updates::Update;
 use crate::data_types::address::Address;
 use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::metric::distance::Feasibility;
+use crate::packet::parser::ResolvedUpdate;
 use crate::utils::storage::InternallyKeyed;
 use crate::utils::{Duration, DurationMultiplier, Instant, Timer};
 /// Route entry as defined in
@@ -116,6 +118,7 @@ impl<A: AddressExt> Route<A> {
             expiry,
         })
     }
+
     pub(crate) fn destination(&self) -> Destination<A> {
         Destination {
             prefix: self.source.prefix,

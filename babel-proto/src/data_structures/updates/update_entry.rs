@@ -85,9 +85,9 @@ impl<A: AddressExt> Update<A> {
         sent_update: &Option<RouteIndex<A>>,
     ) -> bool {
         // Mcast is allowed for this update
-        self.mcast_allowed 
+        self.mcast_allowed
             // The destination is mcast
-            && dest.is_multicast() 
+            && dest.is_multicast()
                 // The update has been writen into the packet.
                 && sent_update.is_some_and(|idx| &idx == self.route())
     }

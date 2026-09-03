@@ -1,7 +1,8 @@
 use crate::data_structures::interface::Interface;
 use crate::data_structures::neighbour::NeighbourIndex;
-use crate::data_structures::route::Route;
+use crate::data_structures::route::{Route, RouteIndex};
 use crate::data_structures::source::{SourceIndex, SourceTable};
+use crate::data_structures::updates::Update;
 use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
 use crate::error::BabelError;
@@ -122,12 +123,16 @@ where
         }
 
         if run_selection {
-            // TODO: Triggered updates
-            let _triggered_update = self.select_routes();
+            self.select_routes(now);
         }
 
         Ok(())
     }
+
+    //  _  _   _   _  _ ___  _    ___   _  _ ___ _    _    ___
+    // | || | /_\ | \| |   \| |  | __| | || | __| |  | |  / _ \
+    // | __ |/ _ \| .` | |) | |__| _|  | __ | _|| |__| |_| (_) |
+    // |_||_/_/ \_\_|\_|___/|____|___| |_||_|___|____|____\___/
 
     fn handle_hello(
         &mut self,
@@ -158,6 +163,11 @@ where
         }
         Ok(())
     }
+
+    //  _  _   _   _  _ ___  _    ___   ___ _  _ _   _
+    // | || | /_\ | \| |   \| |  | __| |_ _| || | | | |
+    // | __ |/ _ \| .` | |) | |__| _|   | || __ | |_| |
+    // |_||_/_/ \_\_|\_|___/|____|___| |___|_||_|\___/
 
     /// Handle an incoming IHU from a neighbour.
     ///
@@ -221,6 +231,8 @@ where
             source_addr,
             update
         );
+
+        // Fetch the neighbour the update is from.
         let idx = NeighbourIndex {
             iface: *interface.handle(),
             addr: *source_addr,
@@ -240,7 +252,27 @@ where
                 });
             }
             self.route_table.handle_blanket_retraction(neighbour);
-        } else if update.is_retraction() {
+            // A blanket retraction triggers an update to be sent for all routes that neighbour has
+            // advertised.
+            for route in self.route_table.iter().filter(|r| r.neigbour() == &idx) {
+                // The destination is every neighbour that is not the neighbour that sent the
+                // update.
+                for dest_neigh in self.neighbor_table.iter().filter(|n| n.key() != idx) {
+                    self.update_table.add_update(Update::new(
+                        now,
+                        route.key(),
+                        dest_neigh.key(),
+                        !interface.prefer_ucast,
+                        false,
+                        *interface.update_retry_interval,
+                        interface.update_retry_limit,
+                    )?)?;
+                }
+            }
+            return Ok(());
+        }
+
+        if update.is_retraction() {
             // A retraction only has to name the entry it retracts. Section 4.6.9: "the router-id,
             // next hop, and seqno are not used" This means that the parser does not need to have
             // state for router-id or next hop in this branch.
@@ -248,25 +280,65 @@ where
 
             self.route_table
                 .handle_retraction(neighbour, prefix, update.plen());
-        } else {
-            // Resolve the update (this also updates the parser state)
-            let resolved_update = parser.handle_update(update)?;
 
-            // Check if the update is feasible against the source table.
-            let feasible = self.source_table.is_feasible(
-                &SourceIndex {
-                    router_id: resolved_update.router_id,
-                    prefix: resolved_update.address,
-                    prefix_len: resolved_update.slice.plen(),
-                },
-                resolved_update.slice.metric(),
-                resolved_update.slice.seqno(),
-            );
+            // A retraction from `neighbour` for this route is sent to all other neighbours.
+            for dest_neigh in self.neighbor_table.iter().filter(|n| n.key() != idx) {
+                self.update_table.add_update(Update::new(
+                    now,
+                    RouteIndex {
+                        prefix,
+                        prefix_len: update.plen(),
+                        neighbour: neighbour.key(),
+                    },
+                    dest_neigh.key(),
+                    !interface.prefer_ucast,
+                    false,
+                    *interface.update_retry_interval,
+                    interface.update_retry_limit,
+                )?)?;
+            }
 
-            // Aquire the route
-            self.route_table
-                .aquire_route(now, interface, neighbour, feasible, resolved_update)?;
+            return Ok(());
         }
+
+        // Resolve the update (this also updates the parser state)
+        let resolved_update = parser.handle_update(update)?;
+
+        // Check if the update is feasible against the source table.
+        let feasible = self.source_table.is_feasible(
+            &SourceIndex {
+                router_id: resolved_update.router_id,
+                prefix: resolved_update.address,
+                prefix_len: resolved_update.slice.plen(),
+            },
+            resolved_update.slice.metric(),
+            resolved_update.slice.seqno(),
+        );
+
+        // Aquire the route
+        let send_update =
+            self.route_table
+                .aquire_route(now, interface, neighbour, feasible, &resolved_update)?;
+
+        // If route aquisition requires an update, send it.
+        if send_update {
+            for dest_neigh in self.neighbor_table.iter().filter(|n| n.key() != idx) {
+                self.update_table.add_update(Update::new(
+                    now,
+                    RouteIndex {
+                        prefix: resolved_update.address,
+                        prefix_len: resolved_update.slice.plen(),
+                        neighbour: neighbour.key(),
+                    },
+                    dest_neigh.key(),
+                    !interface.prefer_ucast,
+                    false,
+                    *interface.update_retry_interval,
+                    interface.update_retry_limit,
+                )?)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -275,8 +347,7 @@ where
     /// and [Appendix A.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection)
     ///
     /// Returns `true` if the selection process triggered an update.
-    pub(super) fn select_routes(&mut self) -> bool {
-        let mut send_update = false;
+    pub(super) fn select_routes(&mut self, now: Instant) {
         // A shared borrow of one field while `route_table` is borrowed mutably below.
         let source_table = &self.source_table;
 
@@ -340,12 +411,40 @@ where
                     .find(|route| route.key() == winner.key())
                     .expect("the winner was picked out of this same group")
                     .selected = true;
-            }
 
-            // Section 3.7.2 wants an update sent when the selected route changes.
-            send_update |= winner.map(|w| w.key()) != previous.map(|p| p.key());
+                if previous.is_none_or(|p| p.key() != winner.key()) {
+                    for interface in self.iface_table.iter() {
+                        // Send updates to the niehgbours that are not the one we got the route
+                        // from.
+                        for dest_neigh in self
+                            .neighbor_table
+                            .neighbours_for_iface(&interface.key())
+                            .filter(|n| &n.key() != winner.neigbour())
+                        {
+                            let update = match Update::new(
+                                now,
+                                winner.key(),
+                                dest_neigh.key(),
+                                !interface.prefer_ucast,
+                                false,
+                                *interface.update_retry_interval,
+                                interface.update_retry_limit,
+                            ) {
+                                Ok(u) => u,
+                                Err(err) => {
+                                    b_debug!("Err Creating Update: {}", err);
+                                    continue;
+                                }
+                            };
+                            if let Err(err) = self.update_table.add_update(update) {
+                                b_debug!("Err adding Update: {}", err);
+                                continue;
+                            };
+                        }
+                    }
+                }
+            }
         }
-        send_update
     }
 }
 
@@ -693,6 +792,27 @@ mod test {
             receive(iface, from, ReceiveDestination::Multicast, &pkt),
         )
         .expect("handle_input should succeed");
+    }
+
+    fn nbr_idx(iface: InterfaceHandle, addr: Ipv6Addr) -> NeighbourIndex<NoExtension> {
+        NeighbourIndex {
+            iface,
+            addr: addr.into(),
+        }
+    }
+
+    /// The route table key an Update for `prefix` from `advertised_by` lands under, which is also
+    /// what a queued update names.
+    fn route_key(
+        iface: InterfaceHandle,
+        advertised_by: Ipv6Addr,
+        prefix: Ipv6Addr,
+    ) -> RouteIndex<NoExtension> {
+        RouteIndex {
+            prefix: prefix.into(),
+            prefix_len: PLEN,
+            neighbour: nbr_idx(iface, advertised_by),
+        }
     }
 
     /// Copies out the route table entry indexed by (prefix, plen, neighbour), if it exists.
@@ -2248,6 +2368,29 @@ mod test {
             .selected
     }
 
+    /// Runs selection, and reports the routes it queued triggered updates for.
+    ///
+    /// Section 3.7.2 wants an update sent when the selected route for a destination changes, and
+    /// `select_routes` queues those itself rather than reporting back — so an empty result is a run
+    /// that settled on the route it started from. The update table is emptied first so that what an
+    /// earlier step left owed cannot be mistaken for what this run decided, and the result is
+    /// deduplicated because one changed destination is queued once per neighbour.
+    fn selection_triggers(
+        r: &mut BabelRouter<'static>,
+        now: Instant,
+    ) -> Vec<RouteIndex<NoExtension>> {
+        r.update_table.inner.retain(|_| false);
+        r.select_routes(now);
+        let mut routes: Vec<RouteIndex<NoExtension>> = r
+            .update_table
+            .inner
+            .iter()
+            .map(|update| *update.route())
+            .collect();
+        routes.dedup();
+        routes
+    }
+
     /// Selection runs at the end of any packet that carried an Update, so a lone feasible route is
     /// already selected by the time `handle_input` returns.
     #[test]
@@ -2452,11 +2595,11 @@ mod test {
         assert!(is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_B, PLEN));
     }
 
-    /// Section 3.7.2 wants an update sent when the selected route *changes*, so the return value
-    /// has to distinguish a change from a re-run that settled on the same route. Re-running
-    /// selection over an unchanged table must not keep asking for updates.
+    /// Section 3.7.2 wants an update sent when the selected route *changes*, so selection has to
+    /// distinguish a change from a re-run that settled on the same route. Re-running selection over
+    /// an unchanged table must not keep queueing updates.
     #[test]
-    fn selection_reports_a_change_only_when_the_selected_route_moves() {
+    fn selection_queues_an_update_only_when_the_selected_route_moves() {
         let mut r = router("node_1");
         let t0 = Instant::from_secs(0);
         let iface = drained_iface(&mut r, t0, "iface_1");
@@ -2482,7 +2625,7 @@ mod test {
         );
 
         assert!(
-            !r.select_routes(),
+            selection_triggers(&mut r, t0).is_empty(),
             "handle_input already ran selection, so a re-run settles on the same route"
         );
 
@@ -2492,13 +2635,14 @@ mod test {
             route.computed_metric = Metric::INFINITY;
         }
 
-        assert!(
-            r.select_routes(),
+        assert_eq!(
+            selection_triggers(&mut r, t0),
+            alloc::vec![route_key(iface, NEIGHBOUR_2_ADDR, PREFIX_A)],
             "the destination moved to a different route, which is what triggers an update"
         );
         assert!(
-            !r.select_routes(),
-            "and once reported the state is stable again"
+            selection_triggers(&mut r, t0).is_empty(),
+            "and once queued the state is stable again"
         );
         assert!(
             is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
@@ -2602,8 +2746,9 @@ mod test {
             route.selected = false;
         }
 
-        assert!(
-            r.select_routes(),
+        assert_eq!(
+            selection_triggers(&mut r, t0),
+            alloc::vec![route_key(iface, NEIGHBOUR_2_ADDR, PREFIX_A)],
             "a destination going from nothing to a route is a change worth an update"
         );
         assert!(
@@ -2629,7 +2774,7 @@ mod test {
         force_selected(&mut r, iface, NEIGHBOUR_2_ADDR);
 
         assert!(
-            !r.select_routes(),
+            selection_triggers(&mut r, t0).is_empty(),
             "the selected route is already the best on offer, so nothing changed"
         );
         assert!(
@@ -2655,7 +2800,10 @@ mod test {
         diverged_metrics(&mut r, iface, t0);
         force_selected(&mut r, iface, NEIGHBOUR_1_ADDR);
 
-        assert!(!r.select_routes(), "the selection did not move");
+        assert!(
+            selection_triggers(&mut r, t0).is_empty(),
+            "the selection did not move"
+        );
         assert!(
             is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
             "metric 270 beats 320, but not by enough smoothed metric to be worth moving for"
@@ -2802,8 +2950,9 @@ mod test {
 
         force_selected(&mut r, iface, NEIGHBOUR_1_ADDR);
 
-        assert!(
-            r.select_routes(),
+        assert_eq!(
+            selection_triggers(&mut r, t1),
+            alloc::vec![route_key(iface, NEIGHBOUR_3_ADDR, PREFIX_A)],
             "the destination moves off the incumbent, which is what triggers an update"
         );
         assert!(
@@ -2820,8 +2969,490 @@ mod test {
         );
 
         assert!(
-            !r.select_routes(),
-            "and once reported the state is stable again"
+            selection_triggers(&mut r, t1).is_empty(),
+            "and once queued the state is stable again"
         );
+    }
+
+    //  _____ ___ ___ ___  ___ ___ ___ ___ ___    _   _ ___ ___  _ _____ ___ ___
+    // |_   _| _ \_ _/ __|/ __| __| _ \ __|   \  | | | | _ \   \/_\_   _| __/ __|
+    //   | | |   /| | (_ | (_ | _||   / _|| |) | | |_| |  _/ |) / _ \| | | _|\__ \
+    //   |_| |_|_\___\___|\___|___|_|_\___|___/   \___/|_| |___/_/ \_\_| |___|___/
+
+    /// RFC 8966 [3.7.2](https://datatracker.ietf.org/doc/html/rfc8966#name-triggered-updates): some
+    /// changes to the route table must not wait for the next periodic update, and are instead
+    /// queued for sending "in a timely manner".
+    ///
+    /// Five things can ask for one, spread over three places:
+    ///
+    /// * `handle_update`, for an ordinary Update, where [`RouteTable::aquire_route`] decides — see
+    ///   the `route_acquisition` tests over there for which changes count;
+    /// * `handle_update`, for a retraction, which is always relayed, because a route going away is
+    ///   the change the rest of the network most needs to hear about promptly;
+    /// * `handle_update`, for a blanket retraction, which is every route from that neighbour
+    ///   retracted at once;
+    /// * [`BabelRouter::select_routes`], when a destination changes which route it points at —
+    ///   including a destination that had none until now;
+    /// * `poll_tick`, when a selected route's hold time runs out, which is the only one of the five
+    ///   that no neighbour announces.
+    ///
+    /// All five queue the update to every neighbour *except* the one that advertised the route.
+    /// Sending it back would tell that neighbour something it said itself, and it is the only
+    /// neighbour on the link that already knows.
+    mod triggered_updates {
+        use super::*;
+        use crate::data_structures::interface::config::DEFAULT_WIRED_UPDATE_RETRY_LIMIT;
+        use crate::data_structures::route::route_table::METRIC_DIFFERENCE_THRESHOLD;
+
+        /// The metric the routes below settle at before anything is asked to move them, chosen so
+        /// that a move of the threshold in either direction stays finite and positive.
+        const SETTLED_METRIC: u16 = 500;
+
+        /// The smallest move of the advertised metric that route acquisition calls significant. The
+        /// link cost is added to both the old and the new metric, so it cancels out of the
+        /// difference and an advertised move of this size is a computed move of this size.
+        const SIGNIFICANT_MOVE: u16 = METRIC_DIFFERENCE_THRESHOLD.raw() + 1;
+
+        /// The (advertised route, destination neighbour) pairs the update table is holding.
+        ///
+        /// In table order, which is sorted by the route key — (prefix, plen, advertising
+        /// neighbour) — and then by the neighbour the update is owed to.
+        fn pending(
+            r: &BabelRouter<'static>,
+        ) -> Vec<(RouteIndex<NoExtension>, NeighbourIndex<NoExtension>)> {
+            r.update_table
+                .inner
+                .iter()
+                .map(|update| (*update.route(), *update.neighbour()))
+                .collect()
+        }
+
+        /// An interface with [`NEIGHBOUR_1_ADDR`], [`NEIGHBOUR_2_ADDR`] and [`NEIGHBOUR_3_ADDR`]
+        /// established on it.
+        ///
+        /// Three is the smallest number that separates "every other neighbour" from "the other
+        /// neighbour": with two, a relay that went to the wrong one and a relay that went to the
+        /// right one both produce a single update.
+        fn three_neighbours(r: &mut BabelRouter<'static>, now: Instant) -> InterfaceHandle {
+            let iface = drained_iface(r, now, "iface_1");
+            for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR, NEIGHBOUR_3_ADDR] {
+                established_neighbour(r, now, iface, addr);
+            }
+            iface
+        }
+
+        /// Sends one Update for `prefix` from [`NEIGHBOUR_1_ADDR`], under [`ORIGIN_1`] unless the
+        /// caller wants the prefix to change hands.
+        fn advertise(
+            r: &mut BabelRouter<'static>,
+            now: Instant,
+            iface: InterfaceHandle,
+            origin: [u8; 8],
+            prefix: &[u8; 8],
+            metric: u16,
+        ) {
+            send_updates(
+                r,
+                now,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                origin,
+                &[UpdateTlv::v6(PLEN, prefix, metric)],
+            );
+        }
+
+        /// A router whose only route is `(PREFIX_A, NEIGHBOUR_1)`, settled at [`SETTLED_METRIC`]
+        /// and selected, with nothing owed to anybody.
+        ///
+        /// Taking the destination queued that route's first advertisement, which is selection's
+        /// trigger rather than any of the ones the tests below are about — see
+        /// [`a_brand_new_route_is_queued_by_selection_rather_than_acquisition`] for that one. It is
+        /// drained here so what a test measures afterwards is only what its own step queued.
+        fn settled(r: &mut BabelRouter<'static>, now: Instant) -> InterfaceHandle {
+            let iface = three_neighbours(r, now);
+            advertise(r, now, iface, ORIGIN_1, &PREFIX_A_WIRE, SETTLED_METRIC);
+            assert!(
+                is_selected(r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+                "the only route to the destination should hold it"
+            );
+            r.update_table.inner.retain(|_| false);
+            iface
+        }
+
+        /// A prefix nobody has spoken about before is not a metric that changed significantly, and
+        /// it is not selected at the point acquisition sees it, so neither of the triggers
+        /// acquisition can see fires — it returns `false`. The update the route does deserve comes
+        /// from the other trigger in 3.7.2, selection handing it the destination, one step later.
+        ///
+        /// So an empty update table here would not mean "correctly kept quiet"; it would mean the
+        /// route was never advertised at all.
+        #[test]
+        fn a_brand_new_route_is_queued_by_selection_rather_than_acquisition() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = three_neighbours(&mut r, t0);
+
+            advertise(&mut r, t0, iface, ORIGIN_1, &PREFIX_A_WIRE, SETTLED_METRIC);
+
+            assert_eq!(route_count(&mut r), 1, "the route itself was still created");
+            assert_eq!(
+                pending(&r),
+                alloc::vec![
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                    ),
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
+                    ),
+                ],
+                "the newly selected route, owed to everybody but the neighbour it came from"
+            );
+        }
+
+        /// A metric that moves further than the threshold is relayed onwards — and to every
+        /// neighbour but the one that sent it, which is the whole of the addressing rule.
+        #[test]
+        fn a_significant_metric_move_is_relayed_to_every_other_neighbour() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = settled(&mut r, t0);
+
+            advertise(
+                &mut r,
+                t0,
+                iface,
+                ORIGIN_1,
+                &PREFIX_A_WIRE,
+                SETTLED_METRIC + SIGNIFICANT_MOVE,
+            );
+
+            assert_eq!(
+                pending(&r),
+                alloc::vec![
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                    ),
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
+                    ),
+                ],
+                "the route neighbour 1 advertised, owed to the other two and not back to it"
+            );
+        }
+
+        /// The other side of the threshold. Metrics drift constantly, and relaying every wobble
+        /// would put the link back under the load periodic updates are batched to avoid.
+        #[test]
+        fn a_metric_move_within_the_threshold_queues_nothing() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = settled(&mut r, t0);
+
+            advertise(
+                &mut r,
+                t0,
+                iface,
+                ORIGIN_1,
+                &PREFIX_A_WIRE,
+                SETTLED_METRIC + METRIC_DIFFERENCE_THRESHOLD.raw(),
+            );
+
+            assert!(pending(&r).is_empty());
+        }
+
+        /// 3.7.2's one MUST: "if the router-id of the selected route for a given prefix changes, a
+        /// node MUST send an update". The metric is left alone here so the router-id is the only
+        /// thing that moved.
+        #[test]
+        fn a_router_id_change_on_the_selected_route_is_relayed() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = settled(&mut r, t0);
+
+            advertise(&mut r, t0, iface, ORIGIN_2, &PREFIX_A_WIRE, SETTLED_METRIC);
+
+            assert_eq!(
+                pending(&r),
+                alloc::vec![
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                    ),
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
+                    ),
+                ],
+            );
+        }
+
+        /// A retraction is relayed unconditionally — there is no threshold to clear, because a
+        /// route going away is the change the rest of the network most needs to hear promptly.
+        ///
+        /// The queued update still names the retracted entry: the write pass renders the Update TLV
+        /// from the route it points at, and that route now carries an infinite metric, so what goes
+        /// out is itself a retraction.
+        #[test]
+        fn a_retraction_is_relayed_to_every_other_neighbour() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = settled(&mut r, t0);
+
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE)],
+            );
+
+            assert_eq!(
+                route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+                    .expect("the entry survives its retraction")
+                    .computed_metric,
+                Metric::INFINITY,
+            );
+            assert_eq!(
+                pending(&r),
+                alloc::vec![
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                    ),
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
+                    ),
+                ],
+            );
+        }
+
+        /// A blanket retraction is every route from the sending neighbour retracted at once, so it
+        /// queues a relay per (route it retracted, other neighbour) — and only for routes that
+        /// neighbour advertised. The same prefix learned from somebody else is untouched and must
+        /// not be dragged into the relay.
+        ///
+        /// This is also where both triggers land in one packet, because retracting a route the
+        /// destination was pointing at is exactly what makes selection move it:
+        ///
+        /// * neighbour 1's two routes are relayed as retractions to the other two neighbours;
+        /// * `PREFIX_A` fails over to neighbour 2's route, which selection then advertises to
+        ///   neighbours 1 and 3 — every neighbour but the one that advertised it, the same
+        ///   addressing rule the relay uses;
+        /// * `PREFIX_B` has nothing to fail over to, so selection queues nothing for it.
+        #[test]
+        fn a_blanket_retraction_relays_every_route_that_neighbour_advertised() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = three_neighbours(&mut r, t0);
+
+            advertise(&mut r, t0, iface, ORIGIN_1, &PREFIX_A_WIRE, SETTLED_METRIC);
+            advertise(&mut r, t0, iface, ORIGIN_1, &PREFIX_B_WIRE, SETTLED_METRIC);
+            // The decoy: the same prefix, from a neighbour that is not going away.
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, SETTLED_METRIC)],
+            );
+            assert!(
+                is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+                "the two routes to PREFIX_A tie on metric, so the lower route key holds it"
+            );
+            // Everything the setup queued is selection advertising the three new routes, which is
+            // not what this test is measuring.
+            r.update_table.inner.retain(|_| false);
+
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::blanket_retraction()],
+            );
+
+            assert_eq!(
+                pending(&r),
+                alloc::vec![
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                    ),
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
+                    ),
+                    // The failover, from selection rather than from the relay.
+                    (
+                        route_key(iface, NEIGHBOUR_2_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_1_ADDR)
+                    ),
+                    (
+                        route_key(iface, NEIGHBOUR_2_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
+                    ),
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_B),
+                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                    ),
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_B),
+                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
+                    ),
+                ],
+                "both of neighbour 1's routes relayed to the other two neighbours, plus the \
+                 PREFIX_A failover, and nothing owed for PREFIX_B beyond the retraction"
+            );
+            assert!(
+                is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
+                "neighbour 2's route was not retracted, and takes the destination"
+            );
+        }
+
+        /// A malformed blanket retraction is ignored, and ignoring it has to include the relay:
+        /// otherwise anybody on the link could have a neighbour's routes retracted across the
+        /// network with a TLV this node itself refused to act on.
+        #[test]
+        fn a_malformed_blanket_retraction_queues_nothing() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = settled(&mut r, t0);
+
+            // Plen and Omitted MUST both be 0 in a blanket retraction.
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::blanket_retraction().plen(64)],
+            );
+
+            assert!(pending(&r).is_empty());
+        }
+
+        /// The fourth way a route can go away, and the only one no neighbour announces: its hold
+        /// time runs out. Nothing arrives to relay, so `poll_tick` has to notice on its own —
+        /// otherwise the rest of the network keeps believing a route this node has already stopped
+        /// believing, until its own copy expires.
+        ///
+        /// `poll_tick` is called directly rather than through `poll_output`, which would send the
+        /// queued updates and clear them back out before they could be looked at.
+        #[test]
+        fn an_expiring_route_is_retracted_to_every_other_neighbour() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = settled(&mut r, t0);
+
+            // One second past the hold time the route's Interval bought it.
+            let expired = t0 + expected_expiry(UPDATE_INTERVAL_CENTIS) + Duration::from_secs(1);
+            r.poll_tick(expired).expect("poll should succeed");
+
+            let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+                .expect("an expired route is retracted before it is dropped");
+            assert_eq!(route.computed_metric, Metric::INFINITY);
+            assert!(!route.selected, "and it gives up the destination");
+            assert_eq!(
+                pending(&r),
+                alloc::vec![
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                    ),
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
+                    ),
+                ],
+            );
+        }
+
+        /// Only the selected route is worth a retraction. An unselected one was never advertised
+        /// onwards in the first place, so retracting it would tell the link about a route it has
+        /// never been offered.
+        ///
+        /// Both routes below expire on the same tick, so what separates them is which one held the
+        /// destination — neighbour 1's, because the two tie on metric and its route key sorts
+        /// first.
+        #[test]
+        fn an_expiring_route_that_held_nothing_is_not_retracted_onwards() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = three_neighbours(&mut r, t0);
+
+            advertise(&mut r, t0, iface, ORIGIN_1, &PREFIX_A_WIRE, SETTLED_METRIC);
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, SETTLED_METRIC)],
+            );
+            assert!(
+                is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+                "the lower route key holds the destination"
+            );
+            r.update_table.inner.retain(|_| false);
+
+            let expired = t0 + expected_expiry(UPDATE_INTERVAL_CENTIS) + Duration::from_secs(1);
+            r.poll_tick(expired).expect("poll should succeed");
+
+            assert_eq!(
+                pending(&r),
+                alloc::vec![
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                    ),
+                    (
+                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
+                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
+                    ),
+                ],
+                "only the route that held the destination is retracted onwards"
+            );
+        }
+
+        /// A triggered update is queued with the sending interface's retransmission policy, which
+        /// is what gets it onto the wire more than once against a lossy link. Multicast is allowed
+        /// because the interface does not prefer unicast, so one packet can serve both neighbours.
+        #[test]
+        fn a_queued_relay_carries_the_interfaces_retransmission_policy() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = settled(&mut r, t0);
+
+            advertise(
+                &mut r,
+                t0,
+                iface,
+                ORIGIN_1,
+                &PREFIX_A_WIRE,
+                SETTLED_METRIC + SIGNIFICANT_MOVE,
+            );
+
+            let policy: Vec<(u8, bool)> = r
+                .update_table
+                .inner
+                .iter()
+                .map(|update| (update.send_count, update.mcast_allowed))
+                .collect();
+            assert_eq!(
+                policy,
+                alloc::vec![
+                    (DEFAULT_WIRED_UPDATE_RETRY_LIMIT, true),
+                    (DEFAULT_WIRED_UPDATE_RETRY_LIMIT, true)
+                ],
+            );
+        }
     }
 }

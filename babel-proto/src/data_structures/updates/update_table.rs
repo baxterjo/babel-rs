@@ -5,6 +5,7 @@ use crate::data_structures::updates::{Update, UpdateError, UpdateIndex};
 use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
+use crate::metric::Metric;
 use crate::packet::parser::Parser;
 use crate::packet::tlv::update_slice::UpdateFlags;
 use crate::packet::writer::ready::Ready;
@@ -15,7 +16,7 @@ use crate::utils::{Duration, Instant, InternallyKeyed, ManagedSlice};
 
 /// Table for storing the state of triggered updates.
 pub(crate) struct UpdateTable<'storage, A: AddressExt> {
-    inner: Table<'storage, UpdateIndex<A>, Update<A>>,
+    pub(crate) inner: Table<'storage, UpdateIndex<A>, Update<A>>,
 }
 
 impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
@@ -69,18 +70,30 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         // First check if there are ANY updates due. This is a hot path escape hatch that iterates
         // through the update table linearly to avoid the quadratic iteration below when
         // it is not necessary.
-
-        // If none (not any) updates are due, exit early.
-        // any() is chosen here over all() because any() breaks out of the iterator early when a
-        // single element returns true.
-        if !self.inner.iter().any(|update| {
-            if let Some(remaining) = update.send_timer.time_remaining(now) {
-                *next_poll = remaining.min(*next_poll);
-                false
-            } else {
+        // Also purge dangling updates (no associated route) and updates for routes that are not
+        // selected.
+        let mut update_due = false;
+        self.inner.retain(|u| {
+            if routes
+                .get_by_key(u.route())
+                .is_some_and(|r| r.computed_metric.is_infinite() || r.selected)
+            {
+                if let Some(remaining) = u.send_timer.time_remaining(now) {
+                    // If there is time remaining in the timer, update next poll.
+                    *next_poll = remaining.min(*next_poll);
+                } else {
+                    // If there is no time remaining in this update, then an update is due.
+                    update_due |= true;
+                }
+                // This update has an associated route and it is either selected or a retraction,
+                // keep it.
                 true
+            } else {
+                false
             }
-        }) {
+        });
+
+        if !update_due {
             return Ok(writer);
         }
         // Start a cursor over self that yields groups of router ids.
@@ -243,8 +256,7 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
 
         // Purge the updates that are finished sending, plus the ones there is no longer anything
         // to send.
-        self.inner
-            .retain(|u| u.send_count != 0 && routes.get_by_key(u.route()).is_some());
+        self.inner.retain(|u| u.send_count != 0);
         Ok(writer)
     }
 
