@@ -1,11 +1,11 @@
-use crate::data_structures::interface::{Interface, InterfaceHandle};
+use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTable};
+use crate::data_structures::neighbour::NeighbourTable;
 use crate::data_structures::route::{Route, RouteIndex, RouteTable};
 use crate::data_structures::source::SourceTable;
 use crate::data_structures::updates::{Update, UpdateError, UpdateIndex};
 use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
-use crate::metric::Metric;
 use crate::packet::parser::Parser;
 use crate::packet::tlv::update_slice::UpdateFlags;
 use crate::packet::writer::ready::Ready;
@@ -47,6 +47,40 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         Ok(())
     }
 
+    pub(crate) fn broadcast_route_update(
+        &mut self,
+        now: Instant,
+        interfaces: &InterfaceTable<A>,
+        neighbours: &NeighbourTable<A>,
+        route: RouteIndex<A>,
+        retry_override: Option<u8>,
+    ) -> Result<(), UpdateError> {
+        for interface in interfaces.iter() {
+            for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
+                let update = match Update::new(
+                    now,
+                    route,
+                    neighbour.key(),
+                    !interface.prefer_ucast,
+                    false,
+                    *interface.update_retry_interval,
+                    retry_override.unwrap_or(interface.update_retry_limit),
+                ) {
+                    Ok(u) => u,
+                    Err(err) => {
+                        // An error here might be a bad timer, so we can continue.
+                        b_debug!("Err creating udpate: {}", err);
+                        continue;
+                    }
+                };
+
+                // An error here is a true error
+                self.add_update(update)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Walks the updates in the table one router-id at a time, handing out each group with the
     /// table still mutably borrowed, so the write pass can advance an update's state in place.
     pub(crate) fn poll_for_updates<'output, P>(
@@ -76,7 +110,7 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         self.inner.retain(|u| {
             if routes
                 .get_by_key(u.route())
-                .is_some_and(|r| r.computed_metric.is_infinite() || r.selected)
+                .is_some_and(|r| r.computed_metric().is_infinite() || r.selected)
             {
                 if let Some(remaining) = u.send_timer.time_remaining(now) {
                     // If there is time remaining in the timer, update next poll.
@@ -231,7 +265,7 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                     omitted,
                     Duration::from(update_interval).as_centis(),
                     route.seqno,
-                    route.computed_metric,
+                    route.computed_metric(),
                     route.source().prefix
                 );
 
@@ -243,7 +277,7 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                         omitted,
                         update_interval,
                         route.seqno,
-                        route.computed_metric,
+                        *route.computed_metric(),
                         &route.source().prefix.as_wire()[..trim.into()],
                     )?
                     .finish_tlv()?;

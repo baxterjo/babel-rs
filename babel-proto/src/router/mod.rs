@@ -4,8 +4,11 @@ use crate::BorrowedMemoryPool;
 use crate::data_structures::interface::{
     Interface, InterfaceConfig, InterfaceHandle, InterfaceTable,
 };
-use crate::data_structures::neighbour::{Neighbour, NeighbourConfig, NeighbourTable};
+use crate::data_structures::neighbour::{
+    Neighbour, NeighbourConfig, NeighbourIndex, NeighbourTable,
+};
 use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
+use crate::data_structures::route::route_table::METRIC_DIFFERENCE_THRESHOLD;
 use crate::data_structures::route::{Route, RouteTable};
 use crate::data_structures::source::{Source, SourceTable};
 use crate::data_structures::updates::{Update, UpdateTable};
@@ -15,7 +18,7 @@ use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
 use crate::router::config::BabelRouterConfig;
-use crate::utils::{Instant, ManagedSlice, Timer};
+use crate::utils::{Instant, InternallyKeyed, ManagedSlice, Timer};
 
 pub mod config;
 pub mod handle_input;
@@ -43,9 +46,12 @@ where
 
     pub(crate) source_table: SourceTable<'storage, A>,
 
+    // Implementation config
     pub(crate) update_table: UpdateTable<'storage, A>,
 
     pub(crate) update_timer: Timer,
+
+    pub(crate) route_selection_due: bool,
 
     // Extension markers
     _state_ext_marker: PhantomData<P>,
@@ -120,6 +126,7 @@ where
             source_table: SourceTable::new_with_storage(source_table),
             update_table: UpdateTable::new_with_storage(update_table),
             update_timer: Timer::from_interval(now, config.update_interval)?,
+            route_selection_due: false,
             _state_ext_marker: PhantomData,
             _addr_ext_marker: PhantomData,
         })
@@ -164,5 +171,44 @@ where
         let config = NeighbourConfig::interface_default(address, iface);
 
         Ok(self.neighbor_table.add_neighbour(now, config)?)
+    }
+
+    pub(crate) fn update_metrics_for_neighbour(
+        &mut self,
+        now: Instant,
+        interface: &Interface<A>,
+        neighbour_idx: NeighbourIndex<A>,
+    ) -> Result<(), BabelError<A>> {
+        let Some(neighbour) = self.neighbor_table.inner.get_by_key(&neighbour_idx) else {
+            b_debug!("Cannot update metrics for non-existant neighbour.");
+            return Ok(());
+        };
+        let smoothing_mul = self.route_table.smoothing_multiple;
+        for route in self
+            .route_table
+            .inner
+            .iter_mut()
+            .filter(|r| r.neigbour() == &neighbour_idx)
+        {
+            let old_computed = *route.computed_metric();
+            route.compute_metric(now, interface, neighbour, &smoothing_mul);
+
+            // Every route over this neighbour has its metric recomputed, but only the selected one
+            // can be worth relaying. 3.7.2 scopes the significant-metric trigger to the route that
+            // holds its destination: an unselected route was never advertised onwards, so no
+            // neighbour is holding a belief about it that the move would correct.
+            if route.selected
+                && route.computed_metric().abs_diff(old_computed) > METRIC_DIFFERENCE_THRESHOLD
+            {
+                self.update_table.broadcast_route_update(
+                    now,
+                    &self.iface_table,
+                    &self.neighbor_table,
+                    route.key(),
+                    None,
+                )?;
+            }
+        }
+        Ok(())
     }
 }

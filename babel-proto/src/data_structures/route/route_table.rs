@@ -3,7 +3,6 @@ use crate::data_structures::neighbour::Neighbour;
 use crate::data_structures::route::route_entry::{Destination, Route};
 use crate::data_structures::route::{RouteError, RouteIndex};
 use crate::data_structures::source::SourceIndex;
-use crate::data_types::address::Address;
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::packet::parser::ResolvedUpdate;
@@ -25,7 +24,7 @@ pub struct RouteTable<'storage, A: AddressExt> {
     ///
     /// The time constant will be taken from the max between mcast hello interval and ucast hello
     /// interval (if it exists)
-    smoothing_multiple: DurationMultiplier,
+    pub(crate) smoothing_multiple: DurationMultiplier,
 }
 
 impl<'storage, A> RouteTable<'storage, A>
@@ -88,7 +87,6 @@ where
 
     /// Route aquisition as defined in section
     /// [3.5.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-acquisition)
-
     ///
     /// Returns `Ok(true)` if the route aquisition requires an update to be sent.
     pub(crate) fn aquire_route(
@@ -127,6 +125,7 @@ where
                 //~ neigh), with source equal to (prefix, plen, router-id), seqno equal to seqno,
                 //~ and an advertised metric equal to the metric carried by the update.
 
+                // Calculate the link cost to this neighbour
                 let link_cost = interface.cost_calc.link_cost(
                     interface.cost_calc.rx_cost(
                         neighbour.mcast_hello_info.history,
@@ -136,9 +135,7 @@ where
                 );
                 let computed_metric = interface.cost_calc.metric(update.slice.metric(), link_cost);
 
-                // Ignore returned value as we already checked the entry didn't exist above.
-                // Calculate the link cost to this neighbour
-                let _ = self.inner.insert(Route::new(
+                if let Err(err) = self.inner.insert(Route::new(
                     now,
                     SourceIndex {
                         prefix: update.address,
@@ -155,8 +152,9 @@ where
                     false,
                     update.slice.interval(),
                     self.route_expiry_time,
-                )?);
-                // Updates sent for new routes are handled after selection.
+                )?) {
+                    b_debug!("Route table full - Discarded: {:?}", err);
+                }
                 Ok(false)
             }
             //~ If such an entry exists:
@@ -172,8 +170,8 @@ where
                     //~ are updated,
 
                     // ANALYSIS:
-                    // The inverse of the if statement above is worth stating and examining,
-                    // condition by condition, what would cause this block to execute in order to
+                    // The inverse of the if statement above is worth stating and examining
+                    // (condition by condition) what would cause this block to execute in order to
                     // understand the implicit behaviors of this block.
 
                     // The inverse of the statement is:
@@ -210,7 +208,8 @@ where
                     // - Only update selected routes when feasible.
                     // - The premise of feasibility relies on the source of Seqno, which is tracked by
                     // router-id, if this changes then Seqno and metric require a hard reset.
-                    // - Keep track of all non-selected routes for fast failover.
+                    // - Keep track of all non-selected routes (without regard to feasibility) for
+                    // fast failover.
 
                     // The new hold time is built before the entry is touched. An Interval the timer
                     // rejects has to leave the entry exactly as it was, rather than half-updated with
@@ -220,8 +219,6 @@ where
                         Duration::from(update.slice.interval()) * self.route_expiry_time,
                     )?;
 
-                    route.seqno = update.slice.seqno();
-                    route.advertised_metric = update.slice.metric();
                     //~ and if the advertised metric is not infinite, the route's expiry
                     //~ timer is reset to a small multiple of the interval value included in the update
                     //~ (see "Route Expiry time" in Appendix B for suggested values).
@@ -234,6 +231,9 @@ where
 
                     //~ If the update is unfeasible, then the (now unfeasible) entry MUST be immediately
                     //~ unselected. (Taken care of in route selection)
+                    if !feasible {
+                        route.selected = false;
+                    }
 
                     if route.source().router_id != update.router_id {
                         //~ If the update caused the router-id of the entry to change, an update
@@ -246,70 +246,13 @@ where
                         send_update |= route.selected;
                     }
 
-                    let old_metric = route.computed_metric;
+                    route.seqno = update.slice.seqno();
 
-                    route.update_cost(now, interface, neighbour, &self.smoothing_multiple);
-
-                    // If the route was selected and the update shifts the metric by a considerable
-                    // amount, an update MAY be sent.
-                    // TODO: Make this a user setting.
-                    send_update |= route.selected
-                        && route.computed_metric.abs_diff(old_metric) > METRIC_DIFFERENCE_THRESHOLD;
+                    route.set_advertised_metric(update.slice.metric());
                 }
 
                 Ok(send_update)
             }
-        }
-    }
-
-    /// Retracts every route this neighbour advertised, which is what an Update with AE 0 and an
-    /// infinite metric asks for.
-    ///
-    /// The expiry timers are deliberately left alone. Section
-    /// [3.5.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-acquisition) resets a
-    /// route's expiry timer only when the advertised metric is finite, so a retracted route runs
-    /// out the hold time it already had and is flushed when that timer fires.
-    pub(crate) fn handle_blanket_retraction(&mut self, neighbour: &Neighbour<A>) {
-        for route in self.iter_mut().filter(|r| *r.neigbour() == neighbour.key()) {
-            route.advertised_metric = Metric::INFINITY;
-            route.computed_metric = Metric::INFINITY;
-        }
-    }
-
-    /// Retracts the single route indexed by (prefix, prefix_len, neighbour).
-    ///
-    /// The seqno and router-id of the entry are left as its last real advertisement set them:
-    /// [Section 4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update) says that for a
-    /// retraction "the router-id, next hop, and seqno are not used", so there is nothing
-    /// meaningful on the wire to replace them with. See [`Self::handle_blanket_retraction`] for
-    /// why the expiry timer is untouched.
-    pub(crate) fn handle_retraction(
-        &mut self,
-        neighbour: &Neighbour<A>,
-        prefix: Address<A>,
-        prefix_len: u8,
-    ) {
-        let idx = RouteIndex {
-            prefix,
-            prefix_len,
-            neighbour: neighbour.key(),
-        };
-        // If an unknown route is somehow retracted, silently ignore.
-        if let Some(route) = self.inner.get_mut_by_key(&idx) {
-            route.advertised_metric = Metric::INFINITY;
-            route.computed_metric = Metric::INFINITY;
-        }
-    }
-
-    pub(crate) fn update_cost_for_neighbour(
-        &mut self,
-        now: Instant,
-        interface: &Interface<A>,
-        neighbour: &Neighbour<A>,
-    ) {
-        let smoothing_mul = self.smoothing_multiple;
-        for route in self.iter_mut().filter(|r| r.neigbour() == &neighbour.key()) {
-            route.update_cost(now, interface, neighbour, &smoothing_mul);
         }
     }
 
@@ -402,6 +345,27 @@ mod test {
         router_id: &str,
         neighbour: Ipv6Addr,
     ) -> Route<NoExtension> {
+        route_with_metrics(
+            prefix,
+            prefix_len,
+            router_id,
+            neighbour,
+            Metric::from(10),
+            Metric::from(10),
+        )
+    }
+
+    /// [`route`], with the advertised and computed metrics the caller wants it settled at. The
+    /// smoothed metric starts out equal to the computed one, as it does for any freshly created
+    /// entry.
+    fn route_with_metrics(
+        prefix: Ipv6Addr,
+        prefix_len: u8,
+        router_id: &str,
+        neighbour: Ipv6Addr,
+        advertised_metric: Metric,
+        computed_metric: Metric,
+    ) -> Route<NoExtension> {
         Route::new(
             Instant::from_secs(0),
             SourceIndex {
@@ -414,8 +378,8 @@ mod test {
                 addr: neighbour.into(),
             },
             SeqNo(0),
-            Metric::from(10),
-            Metric::from(10),
+            advertised_metric,
+            computed_metric,
             neighbour.into(),
             false,
             INTERVAL,
@@ -498,17 +462,27 @@ mod test {
     // |_|_\\___/ \___/  |_| |___| /_/ \_\___\__\_\\___/|___|___/___| |_| |___\___/|_|\_|
 
     /// The `bool` [`RouteTable::aquire_route`] returns is the triggered-update decision of RFC 8966
-    /// [3.7.2](https://datatracker.ietf.org/doc/html/rfc8966#name-triggered-updates), which lists
-    /// two things route acquisition can observe:
+    /// [3.7.2](https://datatracker.ietf.org/doc/html/rfc8966#name-triggered-updates). Of the
+    /// triggers that section lists, acquisition reports exactly one:
     ///
     /// * "if the router-id of the selected route for a given prefix changes, a node MUST send an
-    ///   update";
-    /// * "a node MAY send an update when the metric for a given prefix changes significantly" —
-    ///   which this crate reads as a move of more than [`METRIC_DIFFERENCE_THRESHOLD`].
+    ///   update".
     ///
-    /// The third trigger in that section — the selected route for a destination changing — is not
-    /// visible here: acquisition runs before route selection, so it is `select_routes` that has to
-    /// report it.
+    /// It is scoped to the *selected* route. Nothing this node puts on the wire is derived from an
+    /// unselected route, so its originator changing is not news to anybody.
+    ///
+    /// The other two triggers are not visible here, because acquisition no longer sees the values
+    /// they turn on:
+    ///
+    /// * the metric "changing significantly" is decided against the *computed* metric, and
+    ///   acquisition only records the advertised one — the computed metric is derived once per
+    ///   packet, after every Update in it has been applied, so it is `update_metrics_for_neighbour`
+    ///   that compares the two and relays the move;
+    /// * the selected route for a destination changing is decided by `select_routes`, which runs
+    ///   after acquisition.
+    ///
+    /// Both of those are covered by the `triggered_updates` tests in `router::handle_input`, which
+    /// can drive a whole router and so can reach the stage that owns them.
     mod route_acquisition {
         use super::*;
         use crate::data_structures::interface::{Interface, InterfaceConfig};
@@ -605,19 +579,34 @@ mod test {
         /// NEIGHBOUR_1)`, settled at [`SETTLED_ADVERTISED`] and originated by [`ORIGIN_1`].
         fn table_with_settled_route(selected: bool) -> RouteTable<'static, NoExtension> {
             let mut table = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
-            let mut route = route(DEST_A, 64, ORIGIN_1, NEIGHBOUR_1);
-            route.advertised_metric = Metric::from(SETTLED_ADVERTISED);
-            route.computed_metric = Metric::from(SETTLED_ADVERTISED + LINK_COST);
-            route.smoothed_metric = route.computed_metric;
+            let mut route = route_with_metrics(
+                DEST_A,
+                64,
+                ORIGIN_1,
+                NEIGHBOUR_1,
+                Metric::from(SETTLED_ADVERTISED),
+                Metric::from(SETTLED_ADVERTISED + LINK_COST),
+            );
             route.selected = selected;
             table.insert(route).expect("owned storage grows");
             table
         }
 
-        /// Runs acquisition of `update` against `table` from [`NEIGHBOUR_1`], which is the
-        /// neighbour the settled route above was learned from.
+        /// Runs acquisition of a feasible `update` against `table` from [`NEIGHBOUR_1`], which is
+        /// the neighbour the settled route above was learned from.
         fn aquire(
             table: &mut RouteTable<'_, NoExtension>,
+            update: &ResolvedUpdate<'_, NoExtension>,
+        ) -> bool {
+            aquire_with_feasibility(table, true, update)
+        }
+
+        /// [`aquire`], with the feasibility the caller's source table would have reported chosen by
+        /// the test. Feasibility is decided before acquisition is reached, so it is an input here
+        /// rather than something the update's own fields imply.
+        fn aquire_with_feasibility(
+            table: &mut RouteTable<'_, NoExtension>,
+            feasible: bool,
             update: &ResolvedUpdate<'_, NoExtension>,
         ) -> bool {
             table
@@ -625,7 +614,7 @@ mod test {
                     t0(),
                     &interface(),
                     &established_neighbour(NEIGHBOUR_1),
-                    true,
+                    feasible,
                     update,
                 )
                 .expect("acquisition should succeed")
@@ -657,9 +646,9 @@ mod test {
             assert!(!aquire(&mut table, &resolved(&bytes, ORIGIN_1)));
 
             let route = settled_route(&table);
-            assert_eq!(route.advertised_metric, Metric::from(100));
+            assert_eq!(*route.advertised_metric(), Metric::from(100));
             assert_eq!(
-                route.computed_metric,
+                *route.computed_metric(),
                 Metric::from(100 + LINK_COST),
                 "the spec metric is additive over the link cost"
             );
@@ -725,58 +714,169 @@ mod test {
             );
         }
 
-        /// The threshold is the boundary between a metric that has drifted and one that has
-        /// "changed significantly", and the comparison is strict — a move of exactly the threshold
-        /// is not past it. Pinned from both sides so the boundary cannot slip by one.
+        /// However far the advertised metric moves, and in whichever direction, acquisition records
+        /// it and asks for nothing. The significant-metric trigger is decided against the
+        /// *computed* metric, which is not derived until the whole packet has been applied,
+        /// so at this stage there is nothing yet to compare against — see
+        /// `update_metrics_for_neighbour` and the `triggered_updates` tests that drive it.
+        ///
+        /// Moves either side of the threshold are all passed in, so a trigger reappearing here
+        /// would fail rather than quietly duplicate the relay one stage later.
         #[test]
-        fn a_metric_move_of_exactly_the_threshold_asks_for_no_update() {
-            let mut table = table_with_settled_route(true);
-            let bytes = update_bytes(SETTLED_ADVERTISED + METRIC_DIFFERENCE_THRESHOLD.raw(), 2);
-
-            assert!(!aquire(&mut table, &resolved(&bytes, ORIGIN_1)));
-        }
-
-        #[test]
-        fn a_metric_move_past_the_threshold_asks_for_an_update() {
-            let mut table = table_with_settled_route(true);
-            let bytes = update_bytes(
+        fn a_metric_move_of_any_size_asks_for_no_update() {
+            for advertised in [
+                SETTLED_ADVERTISED + METRIC_DIFFERENCE_THRESHOLD.raw(),
                 SETTLED_ADVERTISED + METRIC_DIFFERENCE_THRESHOLD.raw() + 1,
-                2,
-            );
-
-            assert!(aquire(&mut table, &resolved(&bytes, ORIGIN_1)));
-        }
-
-        /// The comparison is on the absolute difference, so a route that gets *better* by more than
-        /// the threshold is just as significant as one that gets worse. A node that only relayed
-        /// degradations would leave the network on stale, worse routes.
-        #[test]
-        fn a_metric_improving_past_the_threshold_asks_for_an_update() {
-            let mut table = table_with_settled_route(true);
-            let bytes = update_bytes(
                 SETTLED_ADVERTISED - METRIC_DIFFERENCE_THRESHOLD.raw() - 1,
-                2,
-            );
+            ] {
+                let mut table = table_with_settled_route(true);
+                let bytes = update_bytes(advertised, 2);
 
-            assert!(aquire(&mut table, &resolved(&bytes, ORIGIN_1)));
-            assert!(
-                settled_route(&table).computed_metric
-                    < Metric::from(SETTLED_ADVERTISED + LINK_COST),
-                "the entry really did improve",
-            );
+                assert!(
+                    !aquire(&mut table, &resolved(&bytes, ORIGIN_1)),
+                    "a move to {advertised} is recorded, not relayed"
+                );
+                assert_eq!(
+                    *settled_route(&table).advertised_metric(),
+                    Metric::from(advertised),
+                    "the entry is still brought up to date"
+                );
+            }
         }
 
-        /// The two triggers are independent, so either one alone is enough. Here the router-id half
-        /// is switched off by the route being unselected, leaving the metric half to carry it.
+        /// The router-id trigger is scoped to the selected route. An unselected route is not what
+        /// this node advertises, so its originator changing is not news to anybody.
+        ///
+        /// The metric is moved here too, so neither half of the condition can be what keeps this
+        /// quiet — it is the route not holding its destination.
         #[test]
-        fn the_metric_trigger_stands_on_its_own() {
+        fn a_metric_move_on_an_unselected_route_asks_for_no_update() {
             let mut table = table_with_settled_route(false);
             let bytes = update_bytes(
                 SETTLED_ADVERTISED + METRIC_DIFFERENCE_THRESHOLD.raw() + 1,
                 2,
             );
 
-            assert!(aquire(&mut table, &resolved(&bytes, ORIGIN_2)));
+            assert!(!aquire(&mut table, &resolved(&bytes, ORIGIN_2)));
+            assert_eq!(
+                *settled_route(&table).advertised_metric(),
+                Metric::from(SETTLED_ADVERTISED + METRIC_DIFFERENCE_THRESHOLD.raw() + 1),
+                "the entry is still brought up to date, it is just not relayed"
+            );
+        }
+
+        //  _   _ _  _ ___ ___   _   ___ ___ ___ _    ___
+        // | | | | \| | __| __| /_\ / __|_ _| _ ) |  | __|
+        // | |_| | .` | _|| _| / _ \\__ \| || _ \ |__| _|
+        //  \___/|_|\_|_| |___/_/ \_\___/___|___/____|___|
+
+        /// The one update 3.5.3 lets a node decline outright: "if the entry is currently selected,
+        /// the update is unfeasible, and the router-id of the update is equal to the router-id of
+        /// the entry, then the update MAY be ignored".
+        ///
+        /// Taking that option means the entry is left exactly as it was — not updated and then
+        /// unselected. All three conditions have to hold at once, so the three tests after this one
+        /// drop each in turn and show the update being applied normally.
+        #[test]
+        fn an_unfeasible_update_from_the_same_router_for_the_selected_route_is_ignored() {
+            let mut table = table_with_settled_route(true);
+            let before = settled_route(&table);
+            let bytes = update_bytes(300, 2);
+
+            assert!(!aquire_with_feasibility(
+                &mut table,
+                false,
+                &resolved(&bytes, ORIGIN_1)
+            ));
+
+            let after = settled_route(&table);
+            assert_eq!(
+                (
+                    after.seqno,
+                    *after.advertised_metric(),
+                    *after.computed_metric()
+                ),
+                (
+                    before.seqno,
+                    *before.advertised_metric(),
+                    *before.computed_metric()
+                ),
+                "an ignored update leaves the entry untouched"
+            );
+            assert!(
+                after.selected,
+                "and does not unselect it either — there is nothing new to unselect it over"
+            );
+        }
+
+        /// Drop the router-id condition. A different originator means the seqno this entry's
+        /// feasibility was judged against no longer applies, so the entry needs the hard reset
+        /// whether or not the update looked unfeasible against the old source.
+        ///
+        /// Nothing is asked for, because 3.5.3's "if the update is unfeasible, then the (now
+        /// unfeasible) entry MUST be immediately unselected" is applied first: by the time the
+        /// router-id trigger is reached there is no longer a *selected* route whose originator
+        /// changed, and 3.7.2 scopes that trigger to the selected route. The destination losing the
+        /// route it was pointing at is `select_routes`' trigger to report on its next run.
+        #[test]
+        fn an_unfeasible_update_that_changes_the_router_id_is_applied() {
+            let mut table = table_with_settled_route(true);
+            let bytes = update_bytes(300, 2);
+
+            assert!(!aquire_with_feasibility(
+                &mut table,
+                false,
+                &resolved(&bytes, ORIGIN_2)
+            ));
+
+            let route = settled_route(&table);
+            assert!(
+                !route.selected,
+                "an unfeasible update unselects the entry immediately"
+            );
+            assert_eq!(
+                route.source().router_id,
+                RouterId::try_from(ORIGIN_2).expect("bad router id")
+            );
+            assert_eq!(*route.advertised_metric(), Metric::from(300));
+        }
+
+        /// Drop the selected condition. An unselected route is the alternative a destination fails
+        /// over to, so it is tracked unconditionally — declining to record what a neighbour is
+        /// currently offering would leave nothing to fail over *to*.
+        ///
+        /// Nothing is relayed, because both triggers are scoped to the selected route.
+        #[test]
+        fn an_unfeasible_update_for_an_unselected_route_is_applied() {
+            let mut table = table_with_settled_route(false);
+            let bytes = update_bytes(300, 2);
+
+            assert!(!aquire_with_feasibility(
+                &mut table,
+                false,
+                &resolved(&bytes, ORIGIN_1)
+            ));
+
+            let route = settled_route(&table);
+            assert_eq!(*route.advertised_metric(), Metric::from(300));
+            assert_eq!(route.seqno, SeqNo(2));
+        }
+
+        /// Drop the unfeasible condition, which is the ordinary path every other test here takes.
+        /// Spelled out once against the same fixture so the four cases can be read together.
+        #[test]
+        fn a_feasible_update_from_the_same_router_for_the_selected_route_is_applied() {
+            let mut table = table_with_settled_route(true);
+            let bytes = update_bytes(300, 2);
+
+            assert!(
+                !aquire(&mut table, &resolved(&bytes, ORIGIN_1)),
+                "the router-id is unchanged, and the metric move is not acquisition's to report"
+            );
+
+            let route = settled_route(&table);
+            assert_eq!(*route.advertised_metric(), Metric::from(300));
+            assert_eq!(route.seqno, SeqNo(2));
         }
     }
 }

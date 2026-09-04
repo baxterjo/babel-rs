@@ -37,9 +37,9 @@ where
 impl<A: AddressExt> SourceTable<'_, A> {
     /// This is a read only check to see if an incoming update is feasible. The source table will
     /// be updated when updates are sent to neighbours.
-    pub fn is_feasible(&self, idx: &SourceIndex<A>, metric: Metric, seqno: SeqNo) -> bool {
+    pub fn is_feasible(&self, idx: &SourceIndex<A>, metric: &Metric, seqno: &SeqNo) -> bool {
         // If the update is a retraction then it is automatically feasible.
-        if metric == Metric::INFINITY {
+        if metric == &Metric::INFINITY {
             return true;
         }
         // If the table does not contain the source, then the update is automatically feasible.
@@ -48,7 +48,7 @@ impl<A: AddressExt> SourceTable<'_, A> {
         };
 
         // Otherwise, check against the best feasibility ever sent for this route.
-        let incoming_feasibility = Feasibility::new(seqno, metric);
+        let incoming_feasibility = Feasibility::new(*seqno, *metric);
         incoming_feasibility < source.feasibility
     }
 
@@ -61,7 +61,7 @@ impl<A: AddressExt> SourceTable<'_, A> {
     ) -> Result<(), SourceError> {
         b_trace!("Performing maintenance for {:?}", route);
 
-        if route.computed_metric == Metric::INFINITY {
+        if route.computed_metric() == &Metric::INFINITY {
             return Ok(());
         }
 
@@ -74,7 +74,7 @@ impl<A: AddressExt> SourceTable<'_, A> {
                 route.source().prefix_len,
                 route.source().router_id,
                 route.seqno,
-                route.computed_metric,
+                *route.computed_metric(),
                 SPEC_DEFAULT_SOURCE_GC_TIME,
             )?);
             return Ok(());
@@ -630,7 +630,7 @@ mod test {
         let mut table = empty_table();
 
         assert!(
-            table.is_feasible(&source, Metric::from(100), SeqNo(5)),
+            table.is_feasible(&source, &Metric::from(100), &SeqNo(5)),
             "anything is feasible before we have advertised the source"
         );
 
@@ -639,19 +639,19 @@ mod test {
             .expect("an owned table always has room");
 
         assert!(
-            !table.is_feasible(&source, Metric::from(100), SeqNo(5)),
+            !table.is_feasible(&source, &Metric::from(100), &SeqNo(5)),
             "our own distance coming back is not strictly better"
         );
         assert!(
-            !table.is_feasible(&source, Metric::from(101), SeqNo(5)),
+            !table.is_feasible(&source, &Metric::from(101), &SeqNo(5)),
             "nor is a worse one"
         );
         assert!(
-            table.is_feasible(&source, Metric::from(99), SeqNo(5)),
+            table.is_feasible(&source, &Metric::from(99), &SeqNo(5)),
             "a strictly better metric at the same seqno is feasible"
         );
         assert!(
-            table.is_feasible(&source, Metric::from(65534), SeqNo(6)),
+            table.is_feasible(&source, &Metric::from(65534), &SeqNo(6)),
             "as is any metric under a newer seqno"
         );
     }
