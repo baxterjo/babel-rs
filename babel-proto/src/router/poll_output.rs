@@ -296,7 +296,7 @@ where
         });
 
         // Check for expired routes.
-        self.route_table.retain_mut(|route| {
+        self.route_table.inner.retain_mut(|route| {
             // Check if there is time remaining in the route.
             if let Some(remaining) = route.expiry.time_remaining(now) {
                 next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
@@ -349,11 +349,12 @@ where
                 self.update_timer.restart(now);
 
                 // And queue an update for every selected route to every neighbour.
-                for route in self.route_table.iter().filter(|r| r.selected) {
+                for route in self.route_table.inner.iter().filter(|r| r.selected) {
                     for neighbour in self.neighbor_table.neighbours_for_iface(interface.handle()) {
                         self.update_table.add_update(Update::new(
                             now,
-                            route.key(),
+                            route.source().prefix,
+                            route.source().prefix_len,
                             neighbour.key(),
                             !interface.prefer_ucast,
                             interface.request_acks,

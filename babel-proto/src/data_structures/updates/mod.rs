@@ -11,7 +11,7 @@ pub(crate) use update_entry::Update;
 pub(crate) use update_table::UpdateTable;
 
 use crate::data_structures::neighbour::NeighbourIndex;
-use crate::data_structures::route::RouteIndex;
+use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::utils::TimerError;
 
@@ -27,6 +27,7 @@ pub enum UpdateError {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct UpdateIndex<A: AddressExt> {
-    route: RouteIndex<A>,
-    neighbour: NeighbourIndex<A>,
+    pub(crate) prefix: Address<A>,
+    pub(crate) prefix_len: u8,
+    pub(crate) neighbour: NeighbourIndex<A>,
 }

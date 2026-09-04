@@ -3,6 +3,7 @@ use crate::data_structures::neighbour::Neighbour;
 use crate::data_structures::route::route_entry::{Destination, Route};
 use crate::data_structures::route::{RouteError, RouteIndex};
 use crate::data_structures::source::SourceIndex;
+use crate::data_structures::updates::UpdateIndex;
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::packet::parser::ResolvedUpdate;
@@ -47,21 +48,55 @@ where
         }
     }
 
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<A>> {
-        self.inner.iter_mut()
-    }
+    /// Gets the route for the given update.
+    ///
+    /// This will either return the selected route, or an arbitrary infinite route.
+    pub(crate) fn get_for_udpate(&self, update_idx: UpdateIndex<A>) -> Option<&Route<A>> {
+        // Track first selected
+        let mut first_selected: Option<&Route<A>> = None;
+        // Track the last iterated
+        let mut last: Option<&Route<A>> = None;
+        // Track weather all are infinite.
+        let mut all_infinite: Option<bool> = None;
 
-    pub(crate) fn iter_mut_slots(&mut self) -> impl Iterator<Item = &mut Option<Route<A>>> {
-        self.inner.iter_mut_slots()
-    }
+        for route in self.inner.iter().filter(|r| {
+            r.source().prefix == update_idx.prefix && r.source().prefix_len == update_idx.prefix_len
+        }) {
+            if route.selected {
+                // When running in non-optimized builds, we want iterate through all of the
+                // matching routes to ensure there is only one selected route.
+                #[cfg(debug_assertions)]
+                if first_selected.is_some() {
+                    panic!("There should be only one selected route.")
+                }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Route<A>> {
-        self.inner.iter()
-    }
+                first_selected = Some(route);
 
-    /// The route an index names, if it is still in the table.
-    pub(crate) fn get_by_key(&self, key: &RouteIndex<A>) -> Option<&Route<A>> {
-        self.inner.get_by_key(key)
+                // When running optimized builds, return this as soon as it is found.
+                #[cfg(not(debug_assertions))]
+                return break;
+            }
+            // Update the last route matching the prefix.
+            last = Some(route);
+
+            // Initializes to true && route_is_infinite on the first pass.
+            // Updates to existing && route_is_infinite on following passes.
+            *all_infinite.get_or_insert(true) &= route.computed_metric().is_infinite();
+        }
+
+        // When running non optimized builds, we want to make sure that if we don't find a selected
+        // route then we assert all the other routes matching this destination are infinite.
+        #[cfg(debug_assertions)]
+        if first_selected.is_none() {
+            assert!(
+                all_infinite.is_none_or(|all_inf| all_inf),
+                "There should either be a selected route or all should be unreachable."
+            );
+        }
+
+        // Returns either the selected route or an arbitrary infinite route.
+        // Returns None if there were no routes matching the destination.
+        first_selected.or(last)
     }
 
     pub(crate) fn retain_mut<F>(&mut self, f: F)
@@ -619,6 +654,7 @@ mod test {
         /// The route the tests below are about, read back out of the table.
         fn settled_route(table: &RouteTable<'_, NoExtension>) -> Route<NoExtension> {
             *table
+                .inner
                 .get_by_key(&RouteIndex {
                     prefix: DEST_A.into(),
                     prefix_len: 64,
@@ -660,7 +696,7 @@ mod test {
             let bytes = update_bytes(0xFFFF, 1);
 
             assert!(!aquire(&mut table, &resolved(&bytes, ORIGIN_1)));
-            assert_eq!(table.iter().count(), 0, "no entry is conjured up");
+            assert_eq!(table.inner.iter().count(), 0, "no entry is conjured up");
         }
 
         /// The ordinary case, and by far the most common one: a neighbour repeating what it has

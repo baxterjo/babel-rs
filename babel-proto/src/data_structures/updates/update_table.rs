@@ -2,8 +2,13 @@ use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTab
 use crate::data_structures::neighbour::NeighbourTable;
 use crate::data_structures::route::{Route, RouteIndex, RouteTable};
 use crate::data_structures::source::SourceTable;
+<<<<<<< HEAD
 use crate::data_structures::updates::{Update, UpdateError};
 use crate::data_types::{Interval, RouterId};
+=======
+use crate::data_structures::updates::{Update, UpdateError, UpdateIndex};
+use crate::data_types::{Address, Interval, RouterId};
+>>>>>>> b0379f1 (chore: PR review comments)
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::packet::parser::Parser;
@@ -70,7 +75,8 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
             for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
                 let update = match Update::new(
                     now,
-                    route,
+                    route.prefix,
+                    route.prefix_len,
                     neighbour.key(),
                     !interface.prefer_ucast,
                     false,
@@ -116,11 +122,11 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         // through the update table linearly to avoid the quadratic iteration below when
         // it is not necessary.
         // Also purge dangling updates (no associated route) and updates for routes that are not
-        // selected.
+        // selected or are retractions.
         let mut update_due = false;
         self.inner.retain(|u| {
             if routes
-                .get_by_key(u.route())
+                .get_for_udpate(u.key())
                 .is_some_and(|r| r.computed_metric().is_infinite() || r.selected)
             {
                 if let Some(remaining) = u.send_timer.time_remaining(now) {
@@ -150,7 +156,7 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         while let Some(mut rid_group) = router_id_groups.next_group() {
             // Keep track of the last sent update, the below iterator is partially sorted by
             // RouteIndex so this will have contiguous runs with the same idx.
-            let mut sent_update: Option<RouteIndex<A>> = None;
+            let mut sent_update: Option<(Address<A>, u8)> = None;
             // Run through the updates in the list.
             for (update, route) in rid_group.iter_mut() {
                 // If the timer still needs to fire then update the next poll value and continue.
@@ -293,7 +299,7 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                     )?
                     .finish_tlv()?;
 
-                sent_update = Some(route.key());
+                sent_update = Some((route.source().prefix, route.source().prefix_len));
                 update.send_count = update.send_count.saturating_sub(1);
                 update.send_timer.restart(now);
             }
@@ -414,7 +420,7 @@ impl<A: AddressExt> RouterIdGroup<'_, '_, '_, A> {
             .iter()
             .filter(move |update| &update.neighbour().iface == interface)
             .filter_map(move |update| {
-                let route = routes.get_by_key(update.route())?;
+                let route = routes.get_for_udpate(update.key())?;
                 (route.source().router_id == router_id).then_some((update, route))
             })
     }
@@ -432,7 +438,7 @@ impl<A: AddressExt> RouterIdGroup<'_, '_, '_, A> {
             .iter_mut()
             .filter(move |update| &update.neighbour().iface == interface)
             .filter_map(move |update| {
-                let route = routes.get_by_key(update.route())?;
+                let route = routes.get_for_udpate(update.key())?;
                 (route.source().router_id == router_id).then_some((update, route))
             })
     }
@@ -442,7 +448,7 @@ impl<A: AddressExt> RouterIdGroup<'_, '_, '_, A> {
 /// table since the update was queued.
 fn router_id_of<A: AddressExt>(routes: &RouteTable<'_, A>, update: &Update<A>) -> Option<RouterId> {
     routes
-        .get_by_key(update.route())
+        .get_for_udpate(update.key())
         .map(|route| route.source().router_id)
 }
 
@@ -541,8 +547,17 @@ mod test {
         route: &Route<NoExtension>,
         send_to: NeighbourIndex<NoExtension>,
     ) -> Update<NoExtension> {
-        Update::new(t0(), route.key(), send_to, true, false, RETRY_INTERVAL, 1)
-            .expect("bad retry interval")
+        Update::new(
+            t0(),
+            route.source().prefix,
+            route.source().prefix_len,
+            send_to,
+            true,
+            false,
+            RETRY_INTERVAL,
+            1,
+        )
+        .expect("bad retry interval")
     }
 
     fn update(route: &Route<NoExtension>, send_to: Ipv6Addr) -> Update<NoExtension> {
@@ -719,7 +734,7 @@ mod test {
             .inner
             .iter()
             .map(|u| {
-                let route = routes.get_by_key(u.route()).expect("route should exist");
+                let route = routes.get_for_udpate(u.key()).expect("route should exist");
                 (route.source().prefix, u.send_count)
             })
             .collect();
@@ -746,34 +761,24 @@ mod test {
     ///    would not describe every Update TLV behind it.
     /// 2. One interface per group — otherwise a packet built for one link would carry updates owed
     ///    on another.
-    /// 3. Unique by (route, destination neighbour) — otherwise a neighbour is sent the same route
-    ///    twice in one packet.
-    /// 4. Sorted by route key then destination neighbour — this is what makes runs of a repeated
-    ///    route *contiguous*, which is what lets the multicast de-duplication in the write pass
-    ///    compare against only the previous element instead of remembering the whole packet.
+    /// 3. Unique by (destination, destination neighbour) — otherwise a neighbour is sent the same
+    ///    destination twice in one packet.
+    /// 4. Sorted by destination then destination neighbour — this is what makes runs of a repeated
+    ///    destination *contiguous*, which is what lets the multicast de-duplication in the write
+    ///    pass compare against only the previous element instead of remembering the whole packet.
     mod group_order {
         use super::*;
 
-        /// The four fields the group is sorted by, in the order they break ties: the route key's
-        /// (prefix, plen, advertising neighbour), then the update's destination neighbour.
-        type SortKey = (
-            Address<NoExtension>,
-            u8,
-            NeighbourIndex<NoExtension>,
-            NeighbourIndex<NoExtension>,
-        );
+        /// The three fields the group is sorted by, in the order they break ties: the destination's
+        /// (prefix, plen), then the update's destination neighbour.
+        type SortKey = (Address<NoExtension>, u8, NeighbourIndex<NoExtension>);
 
         fn sort_keys(group: &RouterIdGroup<'_, '_, '_, NoExtension>) -> Vec<SortKey> {
             group
                 .iter()
-                .map(|(update, route)| {
-                    let route = route.key();
-                    (
-                        route.prefix,
-                        route.prefix_len,
-                        route.neighbour,
-                        *update.neighbour(),
-                    )
+                .map(|(update, _)| {
+                    let key = update.key();
+                    (key.prefix, key.prefix_len, key.neighbour)
                 })
                 .collect()
         }
@@ -782,29 +787,40 @@ mod test {
         /// deliberately unrelated to the one it must be read back in.
         ///
         /// Reading the expectation top to bottom: `DEST_SUPER` sorts ahead of `DEST_A` on the
-        /// prefix; its two entries are separated only by `plen`; the two `DEST_A` routes are
-        /// separated only by the neighbour that advertised them; and inside every one of those, the
+        /// prefix; its two entries are separated only by `plen`; and inside every one of those, the
         /// destination neighbour is what orders the pair.
+        ///
+        /// `DEST_A` is reached through two neighbours, and appears once all the same: an update
+        /// names a destination, so the second route's updates land on the keys the first one's
+        /// already made rather than beside them.
         #[test]
-        fn is_sorted_by_route_key_then_destination_neighbour() {
+        fn is_sorted_by_destination_then_destination_neighbour() {
             let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
             let mut updates = UpdateTable::new_with_storage(Vec::new());
 
             // Every route below is originated by rtr-a except the decoy, which is a prefix from
-            // another router sorting into the middle of rtr-a's range.
+            // another router sorting into the middle of rtr-a's range. Only one route per
+            // destination is selected, as the selection process guarantees.
             let fixture = [
-                (DEST_C, 64, "rtr-a", NEIGHBOUR_1),
-                (DEST_B, 64, "rtr-b", NEIGHBOUR_1),
-                (DEST_A, 64, "rtr-a", NEIGHBOUR_2),
-                (DEST_SUPER, 64, "rtr-a", NEIGHBOUR_1),
-                (DEST_A, 64, "rtr-a", NEIGHBOUR_1),
-                (DEST_SUPER, 48, "rtr-a", NEIGHBOUR_1),
+                (DEST_C, 64, "rtr-a", NEIGHBOUR_1, true),
+                (DEST_B, 64, "rtr-b", NEIGHBOUR_1, true),
+                (DEST_A, 64, "rtr-a", NEIGHBOUR_2, false),
+                (DEST_SUPER, 64, "rtr-a", NEIGHBOUR_1, true),
+                (DEST_A, 64, "rtr-a", NEIGHBOUR_1, true),
+                (DEST_SUPER, 48, "rtr-a", NEIGHBOUR_1, true),
             ];
             // Inserted back to front, and each route's two updates with the higher-sorting
             // destination first, so nothing in the expectation below can be insertion order.
+<<<<<<< HEAD
             for (prefix, plen, id, advertised_by) in fixture {
                 let route = route_with(prefix, plen, id, neighbour(advertised_by));
                 routes.inner.insert(route).expect("owned storage grows");
+=======
+            for (prefix, plen, id, advertised_by, selected) in fixture {
+                let mut route = route_with(prefix, plen, id, neighbour(advertised_by));
+                route.selected = selected;
+                routes.insert(route).expect("owned storage grows");
+>>>>>>> b0379f1 (chore: PR review comments)
                 for send_to in [NEIGHBOUR_2, NEIGHBOUR_1] {
                     updates
                         .add_update(update(&route, send_to))
@@ -822,28 +838,26 @@ mod test {
                 sort_keys(&group),
                 alloc::vec![
                     // Same prefix as the next pair, shorter, so `plen` decides.
-                    (DEST_SUPER.into(), 48, n1, n1),
-                    (DEST_SUPER.into(), 48, n1, n2),
-                    (DEST_SUPER.into(), 64, n1, n1),
-                    (DEST_SUPER.into(), 64, n1, n2),
-                    // Identical prefix and plen, so the advertising neighbour decides.
-                    (DEST_A.into(), 64, n1, n1),
-                    (DEST_A.into(), 64, n1, n2),
-                    (DEST_A.into(), 64, n2, n1),
-                    (DEST_A.into(), 64, n2, n2),
+                    (DEST_SUPER.into(), 48, n1),
+                    (DEST_SUPER.into(), 48, n2),
+                    (DEST_SUPER.into(), 64, n1),
+                    (DEST_SUPER.into(), 64, n2),
+                    // One pair, not two, for the destination two routes lead to.
+                    (DEST_A.into(), 64, n1),
+                    (DEST_A.into(), 64, n2),
                     // rtr-b's DEST_B sorts in here and is not part of this group.
-                    (DEST_C.into(), 64, n1, n1),
-                    (DEST_C.into(), 64, n1, n2),
+                    (DEST_C.into(), 64, n1),
+                    (DEST_C.into(), 64, n2),
                 ],
             );
         }
 
-        /// The de-duplication the write pass does is only sound because a repeated route key is a
+        /// The de-duplication the write pass does is only sound because a repeated destination is a
         /// *contiguous* run: it compares the element it is holding against the one before it, and
         /// never looks further back. A group that merely contained the right elements in some other
-        /// order would silently emit the same route twice.
+        /// order would silently emit the same destination twice.
         #[test]
-        fn repeated_route_keys_form_contiguous_runs() {
+        fn repeated_destinations_form_contiguous_runs() {
             let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
             let mut updates = UpdateTable::new_with_storage(Vec::new());
 
@@ -861,14 +875,20 @@ mod test {
             let mut cursor = updates.router_id_groups_mut(&iface, &routes);
             let group = cursor.next_group().expect("rtr-a should have a group");
 
-            let route_keys: Vec<RouteIndex<NoExtension>> =
-                group.iter().map(|(update, _)| *update.route()).collect();
-            let mut runs = route_keys.clone();
+            let destinations: Vec<(Address<NoExtension>, u8)> = group
+                .iter()
+                .map(|(update, _)| {
+                    let key = update.key();
+                    (key.prefix, key.prefix_len)
+                })
+                .collect();
+            let mut runs = destinations.clone();
             runs.dedup();
             assert_eq!(
                 runs.len(),
                 2,
-                "each of the two routes should appear as one unbroken run, got {route_keys:?}"
+                "each of the two destinations should appear as one unbroken run, got \
+                 {destinations:?}"
             );
         }
 
@@ -1022,7 +1042,8 @@ mod test {
         ) -> Update<NoExtension> {
             Update::new(
                 t0(),
-                route.key(),
+                route.source().prefix,
+                route.source().prefix_len,
                 send_to,
                 mcast,
                 false,

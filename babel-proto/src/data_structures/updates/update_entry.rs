@@ -1,6 +1,10 @@
 use crate::data_structures::neighbour::NeighbourIndex;
+<<<<<<< HEAD
 use crate::data_structures::route::RouteIndex;
+=======
+>>>>>>> b0379f1 (chore: PR review comments)
 use crate::data_structures::updates::{UpdateError, UpdateIndex};
+use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::utils::destination::DestAddr;
 use crate::utils::{Duration, Instant, InternallyKeyed, Timer};
@@ -8,8 +12,9 @@ use crate::utils::{Duration, Instant, InternallyKeyed, Timer};
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct Update<A: AddressExt> {
-    /// The route that is being sent in the update.
-    route: RouteIndex<A>,
+    /// The destination (prefix, plen) this update is advertising
+    prefix: Address<A>,
+    prefix_len: u8,
     /// The neighbour that the update needs to go to.
     neighbour: NeighbourIndex<A>,
     /// Is mcast allowed for the update?
@@ -32,7 +37,8 @@ impl<A: AddressExt> InternallyKeyed for Update<A> {
     type Key = UpdateIndex<A>;
     fn key(&self) -> Self::Key {
         UpdateIndex {
-            route: self.route,
+            prefix: self.prefix,
+            prefix_len: self.prefix_len,
             neighbour: self.neighbour,
         }
     }
@@ -41,7 +47,8 @@ impl<A: AddressExt> InternallyKeyed for Update<A> {
 impl<A: AddressExt> Update<A> {
     pub(crate) fn new(
         now: Instant,
-        route: RouteIndex<A>,
+        prefix: Address<A>,
+        prefix_len: u8,
         neighbour: NeighbourIndex<A>,
         mcast_allowed: bool,
         _ack: bool,
@@ -51,7 +58,8 @@ impl<A: AddressExt> Update<A> {
         // Retry count cannot be more than 5
         let send_count = send_count.min(5);
         Ok(Self {
-            route,
+            prefix,
+            prefix_len,
             neighbour,
             mcast_allowed,
             _ack: None,
@@ -60,6 +68,7 @@ impl<A: AddressExt> Update<A> {
         })
     }
 
+<<<<<<< HEAD
     /// Takes over the send state of a newly queued update for the same (route, neighbour) pair.
     pub(crate) fn refresh_from(&mut self, incoming: Self) {
         // Destructured so that a new field on `Update` is a compile error here rather than a
@@ -82,6 +91,11 @@ impl<A: AddressExt> Update<A> {
     pub(crate) fn route(&self) -> &RouteIndex<A> {
         &self.route
     }
+=======
+    //pub(crate) fn route(&self) -> &RouteIndex<A> {
+    //    &self.route
+    //}
+>>>>>>> b0379f1 (chore: PR review comments)
 
     pub(crate) fn neighbour(&self) -> &NeighbourIndex<A> {
         &self.neighbour
@@ -101,13 +115,13 @@ impl<A: AddressExt> Update<A> {
     pub(crate) fn would_duplicate(
         &self,
         dest: &DestAddr<A>,
-        sent_update: &Option<RouteIndex<A>>,
+        sent_update: &Option<(Address<A>, u8)>,
     ) -> bool {
         // Mcast is allowed for this update
         self.mcast_allowed
             // The destination is mcast
             && dest.is_multicast()
                 // The update has been writen into the packet.
-                && sent_update.is_some_and(|idx| &idx == self.route())
+                && sent_update.is_some_and(|idx| &idx == &(self.prefix, self.prefix_len))
     }
 }

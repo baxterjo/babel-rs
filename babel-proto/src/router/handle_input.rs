@@ -252,16 +252,24 @@ where
             }
             // A blanket retraction triggers an update to be sent for all routes this neighbour has
             // advertised.
-            for route in self.route_table.iter_mut().filter(|r| r.neigbour() == &idx) {
+            for route in self
+                .route_table
+                .inner
+                .iter_mut()
+                .filter(|r| r.neigbour() == &idx)
+            {
                 route.retract();
-                // Send to all neighbours
-                self.update_table.broadcast_route_update(
-                    now,
-                    &self.iface_table,
-                    &self.neighbor_table,
-                    route.key(),
-                    None,
-                )?;
+                // Send an update if the route was selected
+                if route.selected {
+                    self.update_table.broadcast_route_update(
+                        now,
+                        &self.iface_table,
+                        &self.neighbor_table,
+                        route.key(),
+                        None,
+                    )?;
+                }
+                self.route_selection_due = true;
             }
             return Ok(neighbour.key());
         }
@@ -277,9 +285,8 @@ where
                 prefix_len: update.plen(),
                 neighbour: neighbour.key(),
             }) {
-                // If the advertised metric was not already infinite, send an update. Doing so
-                // unconditionally would cause a retraction loop.
-                if !route.advertised_metric().is_infinite() {
+                // Only send an update if the route is selected.
+                if route.selected {
                     self.update_table.broadcast_route_update(
                         now,
                         &self.iface_table,
@@ -289,8 +296,8 @@ where
                     )?;
                 }
                 route.retract();
+                self.route_selection_due = true;
             }
-
             return Ok(neighbour.key());
         }
 
@@ -465,6 +472,7 @@ mod test {
     use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_structures::route::route_table::DEFAULT_SMOOTHING_MULTIPLE;
     use crate::data_structures::route::{Route, RouteIndex};
+    use crate::data_structures::updates::UpdateIndex;
     use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Interval, RouterId};
     use crate::extension::NoExtension;
@@ -783,17 +791,18 @@ mod test {
         }
     }
 
-    /// The route table key an Update for `prefix` from `advertised_by` lands under, which is also
-    /// what a queued update names.
-    fn route_key(
-        iface: InterfaceHandle,
-        advertised_by: Ipv6Addr,
+    /// The update table key an update for `prefix` owed to `send_to` lands under.
+    ///
+    /// A queued update names a *destination*, not one neighbour's route to it — which route the
+    /// TLV is rendered from is decided when the packet is written, not when the update is queued.
+    fn update_key(
         prefix: Ipv6Addr,
-    ) -> RouteIndex<NoExtension> {
-        RouteIndex {
+        send_to: NeighbourIndex<NoExtension>,
+    ) -> UpdateIndex<NoExtension> {
+        UpdateIndex {
             prefix: prefix.into(),
             prefix_len: PLEN,
-            neighbour: nbr_idx(iface, advertised_by),
+            neighbour: send_to,
         }
     }
 
@@ -813,14 +822,11 @@ mod test {
                 addr: neighbour.into(),
             },
         };
-        r.route_table
-            .iter_mut()
-            .find(|route| route.key() == idx)
-            .map(|route| *route)
+        r.route_table.inner.get_by_key(&idx).copied()
     }
 
     fn route_count(r: &mut BabelRouter<'static>) -> usize {
-        r.route_table.iter_mut().count()
+        r.route_table.inner.iter().count()
     }
 
     /// Brings a neighbour to the state an Update needs to yield a finite route metric: enough
@@ -2355,27 +2361,32 @@ mod test {
             .selected
     }
 
-    /// Runs selection, and reports the routes it queued triggered updates for.
+    /// Runs selection, and reports the destinations it queued triggered updates for.
     ///
     /// Section 3.7.2 wants an update sent when the selected route for a destination changes, and
     /// `select_routes` queues those itself rather than reporting back — so an empty result is a run
     /// that settled on the route it started from. The update table is emptied first so that what an
     /// earlier step left owed cannot be mistaken for what this run decided, and the result is
-    /// deduplicated because one changed destination is queued once per neighbour.
+    /// deduplicated because one changed destination is queued once per neighbour. Which route the
+    /// destination moved *to* is not visible here — the update names the destination alone — so the
+    /// callers check that with [`is_selected`].
     fn selection_triggers(
         r: &mut BabelRouter<'static>,
         now: Instant,
-    ) -> Vec<RouteIndex<NoExtension>> {
+    ) -> Vec<(Address<NoExtension>, u8)> {
         r.update_table.inner.retain(|_| false);
         r.select_routes(now);
-        let mut routes: Vec<RouteIndex<NoExtension>> = r
+        let mut destinations: Vec<(Address<NoExtension>, u8)> = r
             .update_table
             .inner
             .iter()
-            .map(|update| *update.route())
+            .map(|update| {
+                let key = update.key();
+                (key.prefix, key.prefix_len)
+            })
             .collect();
-        routes.dedup();
-        routes
+        destinations.dedup();
+        destinations
     }
 
     /// Selection runs in `poll_tick`, which follows the packet that carried the Update, so a lone
@@ -2498,6 +2509,7 @@ mod test {
 
         let selected: Vec<Route<NoExtension>> = r
             .route_table
+            .inner
             .iter()
             .filter(|r| r.selected)
             .copied()
@@ -2602,7 +2614,7 @@ mod test {
             "so selection must have taken the destination off it"
         );
 
-        for route in r.route_table.iter().filter(|r| r.selected) {
+        for route in r.route_table.inner.iter().filter(|r| r.selected) {
             assert!(
                 is_eligible(&r.source_table, route),
                 "a selected route must satisfy the feasibility condition, {route:?} does not"
@@ -2792,13 +2804,18 @@ mod test {
 
         // Drive the selected route to infinity behind selection's back, the way an expiry sweep
         // would, so the next run has a real change to report.
-        for route in r.route_table.iter_mut().filter(|route| route.selected) {
+        for route in r
+            .route_table
+            .inner
+            .iter_mut()
+            .filter(|route| route.selected)
+        {
             route.retract();
         }
 
         assert_eq!(
             selection_triggers(&mut r, t0),
-            alloc::vec![route_key(iface, NEIGHBOUR_2_ADDR, PREFIX_A)],
+            alloc::vec![(PREFIX_A.into(), PLEN)],
             "the destination moved to a different route, which is what triggers an update"
         );
         assert!(
@@ -2881,7 +2898,7 @@ mod test {
             iface,
             addr: neighbour.into(),
         };
-        for route in r.route_table.iter_mut() {
+        for route in r.route_table.inner.iter_mut() {
             route.selected = *route.neigbour() == idx;
         }
     }
@@ -2903,13 +2920,13 @@ mod test {
 
         // Clear the selection the updates left behind. This is the state a destination is in when
         // every route towards it has just come back from having been retracted.
-        for route in r.route_table.iter_mut() {
+        for route in r.route_table.inner.iter_mut() {
             route.selected = false;
         }
 
         assert_eq!(
             selection_triggers(&mut r, t0),
-            alloc::vec![route_key(iface, NEIGHBOUR_2_ADDR, PREFIX_A)],
+            alloc::vec![(PREFIX_A.into(), PLEN)],
             "a destination going from nothing to a route is a change worth an update"
         );
         assert!(
@@ -3121,7 +3138,7 @@ mod test {
 
         assert_eq!(
             selection_triggers(&mut r, t1),
-            alloc::vec![route_key(iface, NEIGHBOUR_3_ADDR, PREFIX_A)],
+            alloc::vec![(PREFIX_A.into(), PLEN)],
             "the destination moves off the incumbent, which is what triggers an update"
         );
         assert!(
@@ -3184,17 +3201,16 @@ mod test {
         /// difference and an advertised move of this size is a computed move of this size.
         const SIGNIFICANT_MOVE: u16 = METRIC_DIFFERENCE_THRESHOLD.raw() + 1;
 
-        /// The (advertised route, destination neighbour) pairs the update table is holding.
+        /// The (destination, destination neighbour) keys the update table is holding.
         ///
-        /// In table order, which is sorted by the route key — (prefix, plen, advertising
-        /// neighbour) — and then by the neighbour the update is owed to.
-        fn pending(
-            r: &BabelRouter<'static>,
-        ) -> Vec<(RouteIndex<NoExtension>, NeighbourIndex<NoExtension>)> {
+        /// In table order, which is sorted by the destination — (prefix, plen) — and then by the
+        /// neighbour the update is owed to. Note that a queued update names the destination only:
+        /// two routes to the same prefix cannot each queue their own update.
+        fn pending(r: &BabelRouter<'static>) -> Vec<UpdateIndex<NoExtension>> {
             r.update_table
                 .inner
                 .iter()
-                .map(|update| (*update.route(), *update.neighbour()))
+                .map(|update| update.key())
                 .collect()
         }
 
@@ -3289,18 +3305,9 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_1_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
-                    ),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
                 "the newly selected route, owed to every neighbour on the link"
             );
@@ -3325,18 +3332,9 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_1_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
-                    ),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
                 "the route neighbour 1 advertised, owed to the whole link including neighbour 1"
             );
@@ -3459,18 +3457,9 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_1_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
-                    ),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
             );
         }
@@ -3505,33 +3494,26 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_1_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
-                    ),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
             );
         }
 
         /// A blanket retraction is every route from the sending neighbour retracted at once, so it
-        /// queues a relay per (route it retracted, other neighbour) — and only for routes that
-        /// neighbour advertised. The same prefix learned from somebody else is untouched and must
-        /// not be dragged into the relay.
+        /// queues a relay per (destination it held, other neighbour) — and only for destinations
+        /// that neighbour was holding.
         ///
         /// This is also where both triggers land in one packet, because retracting a route the
         /// destination was pointing at is exactly what makes selection move it:
         ///
-        /// * neighbour 1's two routes are relayed as retractions to every neighbour on the link;
-        /// * `PREFIX_A` fails over to neighbour 2's route, which selection then advertises to the
-        ///   whole link as well — the same addressing rule the relay uses;
+        /// * neighbour 1 held both destinations, so both are relayed to every neighbour on the
+        ///   link;
+        /// * `PREFIX_A` fails over to neighbour 2's route, which selection advertises to the whole
+        ///   link as well — but an update names a destination, not one neighbour's route to it, so
+        ///   the failover lands on the keys the relay already queued rather than beside them. That
+        ///   is what stops a retraction and its own failover from both reaching the wire;
         /// * `PREFIX_B` has nothing to fail over to, so selection queues nothing for it.
         #[test]
         fn a_blanket_retraction_relays_every_route_that_neighbour_advertised() {
@@ -3570,46 +3552,15 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_1_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
-                    ),
-                    // The failover, from selection rather than from the relay.
-                    (
-                        route_key(iface, NEIGHBOUR_2_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_1_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_2_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_2_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_B),
-                        nbr_idx(iface, NEIGHBOUR_1_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_B),
-                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_B),
-                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
-                    ),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    update_key(PREFIX_B, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(PREFIX_B, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(PREFIX_B, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
-                "both of neighbour 1's routes relayed to the whole link, plus the PREFIX_A \
-                 failover, and nothing owed for PREFIX_B beyond the retraction"
+                "both destinations owed to the whole link, once each — the failover selection \
+                 queued for PREFIX_A lands on the same key the relay already made"
             );
             assert!(
                 is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
@@ -3663,18 +3614,9 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_1_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
-                    ),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
             );
         }
@@ -3713,18 +3655,9 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_1_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_2_ADDR)
-                    ),
-                    (
-                        route_key(iface, NEIGHBOUR_1_ADDR, PREFIX_A),
-                        nbr_idx(iface, NEIGHBOUR_3_ADDR)
-                    ),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
                 "only the route that held the destination is retracted onwards"
             );
