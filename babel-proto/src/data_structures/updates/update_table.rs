@@ -1,4 +1,5 @@
-use crate::data_structures::interface::{Interface, InterfaceHandle};
+use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTable};
+use crate::data_structures::neighbour::NeighbourTable;
 use crate::data_structures::route::{Route, RouteIndex, RouteTable};
 use crate::data_structures::source::SourceTable;
 use crate::data_structures::updates::{Update, UpdateError, UpdateIndex};
@@ -15,7 +16,7 @@ use crate::utils::{Duration, Instant, InternallyKeyed, ManagedSlice};
 
 /// Table for storing the state of triggered updates.
 pub(crate) struct UpdateTable<'storage, A: AddressExt> {
-    inner: Table<'storage, UpdateIndex<A>, Update<A>>,
+    pub(crate) inner: Table<'storage, UpdateIndex<A>, Update<A>>,
 }
 
 impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
@@ -46,6 +47,40 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         Ok(())
     }
 
+    pub(crate) fn broadcast_route_update(
+        &mut self,
+        now: Instant,
+        interfaces: &InterfaceTable<A>,
+        neighbours: &NeighbourTable<A>,
+        route: RouteIndex<A>,
+        retry_override: Option<u8>,
+    ) -> Result<(), UpdateError> {
+        for interface in interfaces.iter() {
+            for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
+                let update = match Update::new(
+                    now,
+                    route,
+                    neighbour.key(),
+                    !interface.prefer_ucast,
+                    false,
+                    *interface.update_retry_interval,
+                    retry_override.unwrap_or(interface.update_retry_limit),
+                ) {
+                    Ok(u) => u,
+                    Err(err) => {
+                        // An error here might be a bad timer, so we can continue.
+                        b_debug!("Err creating udpate: {}", err);
+                        continue;
+                    }
+                };
+
+                // An error here is a true error
+                self.add_update(update)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Walks the updates in the table one router-id at a time, handing out each group with the
     /// table still mutably borrowed, so the write pass can advance an update's state in place.
     pub(crate) fn poll_for_updates<'output, P>(
@@ -69,18 +104,30 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         // First check if there are ANY updates due. This is a hot path escape hatch that iterates
         // through the update table linearly to avoid the quadratic iteration below when
         // it is not necessary.
-
-        // If none (not any) updates are due, exit early.
-        // any() is chosen here over all() because any() breaks out of the iterator early when a
-        // single element returns true.
-        if !self.inner.iter().any(|update| {
-            if let Some(remaining) = update.send_timer.time_remaining(now) {
-                *next_poll = remaining.min(*next_poll);
-                false
-            } else {
+        // Also purge dangling updates (no associated route) and updates for routes that are not
+        // selected.
+        let mut update_due = false;
+        self.inner.retain(|u| {
+            if routes
+                .get_by_key(u.route())
+                .is_some_and(|r| r.computed_metric().is_infinite() || r.selected)
+            {
+                if let Some(remaining) = u.send_timer.time_remaining(now) {
+                    // If there is time remaining in the timer, update next poll.
+                    *next_poll = remaining.min(*next_poll);
+                } else {
+                    // If there is no time remaining in this update, then an update is due.
+                    update_due |= true;
+                }
+                // This update has an associated route and it is either selected or a retraction,
+                // keep it.
                 true
+            } else {
+                false
             }
-        }) {
+        });
+
+        if !update_due {
             return Ok(writer);
         }
         // Start a cursor over self that yields groups of router ids.
@@ -218,7 +265,7 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                     omitted,
                     Duration::from(update_interval).as_centis(),
                     route.seqno,
-                    route.computed_metric,
+                    route.computed_metric(),
                     route.source().prefix
                 );
 
@@ -230,7 +277,7 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
                         omitted,
                         update_interval,
                         route.seqno,
-                        route.computed_metric,
+                        *route.computed_metric(),
                         &route.source().prefix.as_wire()[..trim.into()],
                     )?
                     .finish_tlv()?;
@@ -243,8 +290,7 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
 
         // Purge the updates that are finished sending, plus the ones there is no longer anything
         // to send.
-        self.inner
-            .retain(|u| u.send_count != 0 && routes.get_by_key(u.route()).is_some());
+        self.inner.retain(|u| u.send_count != 0);
         Ok(writer)
     }
 

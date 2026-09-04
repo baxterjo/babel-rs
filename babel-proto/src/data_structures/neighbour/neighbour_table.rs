@@ -11,7 +11,7 @@ pub struct NeighbourTable<'storage, A>
 where
     A: AddressExt,
 {
-    inner: Table<'storage, NeighbourIndex<A>, Neighbour<A>>,
+    pub(crate) inner: Table<'storage, NeighbourIndex<A>, Neighbour<A>>,
 }
 
 impl<'storage, A> NeighbourTable<'storage, A>
@@ -32,31 +32,20 @@ where
         }
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Neighbour<A>> {
-        self.inner.iter()
-    }
-
-    /// Borrows the neighbour registered under `index`, if it exists.
-    pub(crate) fn get(&self, index: &NeighbourIndex<A>) -> Option<&Neighbour<A>> {
-        self.inner.get_by_key(index)
-    }
-
-    /// Mutably borrows the neighbour registered under `index`, if it exists.
-    pub(crate) fn get_mut(&mut self, index: &NeighbourIndex<A>) -> Option<&mut Neighbour<A>> {
-        self.inner.get_mut_by_key(index)
-    }
     pub(crate) fn neighbours_for_iface(
         &self,
         iface: &InterfaceHandle,
     ) -> impl Iterator<Item = &Neighbour<A>> {
-        self.iter().filter(move |n| n.interface() == iface)
+        self.inner.iter().filter(move |n| n.interface() == iface)
     }
 
     pub(crate) fn neighbours_mut_for_iface(
         &mut self,
         iface: &InterfaceHandle,
     ) -> impl Iterator<Item = &mut Neighbour<A>> {
-        self.iter_mut().filter(move |n| n.interface() == iface)
+        self.inner
+            .iter_mut()
+            .filter(move |n| n.interface() == iface)
     }
 
     fn get_or_insert_default(

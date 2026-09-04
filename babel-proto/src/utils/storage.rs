@@ -175,6 +175,23 @@ where
         self.0.get_mut(idx)?.as_mut()
     }
 
+    /// The number of slots the table holds, occupied or not.
+    ///
+    /// Paired with [`Self::get_mut_slot_at`] to walk the table by position, which a caller needs
+    /// when it has to let go of its borrow between entries.
+    pub(crate) fn slot_count(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Mutably borrows the entry in slot `idx`, or `None` if that slot is free or out of range.
+    ///
+    /// Positions are not stable across an insert or a remove — both re-sort the table — so this is
+    /// only for a walk that does not modify the table's shape.
+    pub(crate) fn get_mut_slot_at(&mut self, idx: usize) -> Option<&mut V> {
+        check_sorted!(self);
+        self.0.get_mut(idx)?.as_mut()
+    }
+
     pub(crate) fn iter<'a>(&'a self) -> impl Iterator<Item = &'a V>
     where
         V: 'a,

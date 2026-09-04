@@ -68,7 +68,8 @@ fn two_nodes_say_hello_and_ihu() {
         .expect("node_1 failed to handle input.");
     node_2
         .neighbor_table
-        .get(&NeighbourIndex {
+        .inner
+        .get_by_key(&NeighbourIndex {
             iface: node_2_iface,
             addr: node_1_addr.into(),
         })
@@ -100,7 +101,8 @@ fn two_nodes_say_hello_and_ihu() {
 
     node_1
         .neighbor_table
-        .get(&NeighbourIndex {
+        .inner
+        .get_by_key(&NeighbourIndex {
             iface: node_1_iface,
             addr: node_2_addr.into(),
         })

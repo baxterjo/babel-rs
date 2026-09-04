@@ -35,13 +35,13 @@ pub struct Route<A: AddressExt> {
 
     /// the metric with which this route was advertised by the neighbour, or FFFF
     /// hexadecimal (infinity) for a recently retracted route
-    pub(crate) advertised_metric: Metric,
+    advertised_metric: Metric,
 
     /// The computed metric of this route.
-    pub(crate) computed_metric: Metric,
+    computed_metric: Metric,
 
     /// The smoothed metric for hysteresis
-    pub(crate) smoothed_metric: Metric,
+    smoothed_metric: Metric,
 
     /// The instant the last smoothed metric was calculated.
     pub(crate) smoothed_metric_time: Instant,
@@ -116,6 +116,7 @@ impl<A: AddressExt> Route<A> {
             expiry,
         })
     }
+
     pub(crate) fn destination(&self) -> Destination<A> {
         Destination {
             prefix: self.source.prefix,
@@ -139,16 +140,45 @@ impl<A: AddressExt> Route<A> {
         Feasibility::new(self.seqno, self.computed_metric)
     }
 
-    /// Recomputes this route's metric from the neighbour's current link cost and updates the
-    /// smoothed metric.
-    pub(crate) fn update_cost(
+    pub(crate) fn computed_metric(&self) -> &Metric {
+        &self.computed_metric
+    }
+
+    pub(crate) fn advertised_metric(&self) -> &Metric {
+        &self.advertised_metric
+    }
+    pub(crate) fn smoothed_metric(&self) -> &Metric {
+        &self.smoothed_metric
+    }
+
+    /// Sets the advertised metric for this route.
+    ///
+    /// It is expected that compute metric will be called AFTER all metric mutations are complete
+    /// for a given [`Instant`]. Doing otherwise could incorrectly bias the smoothing algorithm to
+    /// "think" there were multiple datapoints entered at a given [`Instant`].
+    pub(crate) fn set_advertised_metric(&mut self, value: Metric) {
+        // Update the advertised_metric
+        self.advertised_metric = value;
+    }
+
+    /// When a route has expired set all of its metrics to infinity.
+    pub(crate) fn retract(&mut self) {
+        self.advertised_metric = Metric::INFINITY;
+        self.computed_metric = Metric::INFINITY;
+        // Theoretically, a smoothed version of an infinite metric is infinite. This is not
+        // technically true for our "simulated infinity", but we can make it true by just setting
+        // it instead of running it through the smoothing procedure.
+        self.smoothed_metric = Metric::INFINITY;
+    }
+
+    pub(crate) fn compute_metric(
         &mut self,
         now: Instant,
         interface: &Interface<A>,
         neighbour: &Neighbour<A>,
         smoothing_multiple: &DurationMultiplier,
     ) {
-        // Update computed metric
+        // Update computed metric from the advertised metric
         let link_cost = interface.cost_calc.link_cost(
             interface.cost_calc.rx_cost(
                 neighbour.mcast_hello_info.history,
@@ -160,6 +190,7 @@ impl<A: AddressExt> Route<A> {
             .cost_calc
             .metric(self.advertised_metric, link_cost);
         self.computed_metric = computed_metric;
+
         // Update smoothed metric
         let step_dur = now - self.smoothed_metric_time;
         let interval = neighbour
