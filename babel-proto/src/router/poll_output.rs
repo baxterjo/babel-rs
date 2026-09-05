@@ -189,7 +189,6 @@ where
             writer = ok_or_try_send!(self.update_table.poll_for_updates::<P>(
                 now,
                 interface,
-                &self.route_table,
                 &mut self.source_table,
                 self.update_timer.interval(),
                 &mut active_dest,
@@ -316,7 +315,7 @@ where
                         now,
                         &self.iface_table,
                         &self.neighbor_table,
-                        route.key(),
+                        route,
                         None,
                     ) {
                         b_debug!("Failed to broadcast update: {}", err);
@@ -353,12 +352,11 @@ where
                     for neighbour in self.neighbor_table.neighbours_for_iface(interface.handle()) {
                         self.update_table.add_update(Update::new(
                             now,
-                            route.source().prefix,
-                            route.source().prefix_len,
                             neighbour.key(),
+                            route,
                             !interface.prefer_ucast,
                             interface.request_acks,
-                            interface.update_retry_interval.into(),
+                            *interface.update_retry_interval,
                             1,
                         )?)?;
                     }

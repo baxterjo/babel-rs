@@ -19,3 +19,5 @@ pub mod router_id;
 
 #[doc(inline)]
 pub use router_id::RouterId;
+
+pub mod destination;

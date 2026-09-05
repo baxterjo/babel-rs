@@ -11,7 +11,7 @@ pub struct NeighbourTable<'storage, A>
 where
     A: AddressExt,
 {
-    inner: Table<'storage, Option<Neighbour<A>>>,
+    pub(crate) inner: Table<'storage, Option<Neighbour<A>>>,
 }
 
 impl<'storage, A> NeighbourTable<'storage, A>
@@ -233,8 +233,15 @@ mod test {
         ucast_config.ucast_hello_interval = Some(Interval::from_duration(Duration::from_secs(600)));
         let _ = table.add_neighbour(now, ucast_config);
 
-        assert_eq!(table.iter().count(), 1, "the duplicate must not add a row");
-        let neighbour = table.get(&index(NEIGHBOUR_1)).expect("registered above");
+        assert_eq!(
+            table.inner.iter().count(),
+            1,
+            "the duplicate must not add a row"
+        );
+        let neighbour = table
+            .inner
+            .get_by_key(&index(NEIGHBOUR_1))
+            .expect("registered above");
         assert!(
             neighbour.pending.ucast_hello.is_none(),
             "the original entry should have survived, not been replaced by the incoming config"

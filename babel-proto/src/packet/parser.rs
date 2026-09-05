@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::data_types::address::{AddressError, Ipv4Addr, Ipv6Addr};
 use crate::data_types::address_encoding::{AddressEncoding, AddressEncodingError};
+use crate::data_types::destination::RouteDestination;
 use crate::data_types::router_id::RouterIdError;
 use crate::data_types::{Address, RouterId};
 use crate::extension::address::AddressExt;
@@ -173,9 +174,11 @@ where
             .get_next_hop(&ae)
             .ok_or(ParserError::MissingState("next_hop", Some(ae)))?;
 
+        let destination = RouteDestination::new(address, update.plen())?;
+
         Ok(ResolvedUpdate {
             router_id,
-            address,
+            destination,
             next_hop,
             slice: update,
         })
@@ -289,7 +292,7 @@ pub(crate) struct UpdateArgs<'a> {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct ResolvedUpdate<'a, A: AddressExt> {
     pub(crate) router_id: RouterId,
-    pub(crate) address: Address<A>,
+    pub(crate) destination: RouteDestination<A>,
     pub(crate) next_hop: Address<A>,
     pub(crate) slice: UpdateSlice<'a>,
 }
@@ -623,7 +626,7 @@ mod test {
             .expect("an uncompressed update should resolve");
 
         assert_eq!(
-            info.address,
+            *info.destination.prefix(),
             v4(StdIpv4Addr::new(192, 168, 0, 0)),
             "the three prefix octets should be padded out to a full IPv4 address"
         );
@@ -654,7 +657,7 @@ mod test {
             .expect("a /64 update should resolve");
 
         assert_eq!(
-            info.address,
+            *info.destination.prefix(),
             v6(StdIpv6Addr::new(0xfd00, 0x002a, 0, 0, 0, 0, 0, 0)),
             "the low half of the address should be zero-filled"
         );
@@ -690,7 +693,7 @@ mod test {
                 .unwrap_or_else(|e| panic!("a /{plen} update should resolve: {e:?}"));
 
             assert_eq!(
-                info.address,
+                *info.destination.prefix(),
                 v4(StdIpv4Addr::from_octets(expected)),
                 "the bits beyond /{plen} should have been cleared"
             );
@@ -711,7 +714,7 @@ mod test {
             .expect("a /24 update should resolve");
 
         assert_eq!(
-            info.address,
+            *info.destination.prefix(),
             v4(StdIpv4Addr::new(10, 0, 0xff, 0)),
             "a /24 ends on an octet boundary, so nothing should be masked off"
         );
@@ -734,7 +737,7 @@ mod test {
             .expect("a fully omitted /12 should resolve");
 
         assert_eq!(
-            info.address,
+            *info.destination.prefix(),
             v4(StdIpv4Addr::new(10, 16, 0, 0)),
             "the low nibble of the omitted octet is beyond /12 and should be cleared"
         );
@@ -779,10 +782,11 @@ mod test {
 
         let host_v4 = update_tlv(1, NO_FLAGS, 32, 0, &[192, 168, 0, 1]);
         assert_eq!(
-            parser
+            *parser
                 .handle_update(host_v4.slice())
                 .expect("a /32 IPv4 prefix should resolve")
-                .address,
+                .destination
+                .prefix(),
             v4(StdIpv4Addr::new(192, 168, 0, 1)),
             "32 bits is exactly an IPv4 address"
         );
@@ -795,10 +799,11 @@ mod test {
             &[0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9],
         );
         assert_eq!(
-            parser
+            *parser
                 .handle_update(host_v6.slice())
                 .expect("a /128 IPv6 prefix should resolve")
-                .address,
+                .destination
+                .prefix(),
             v6(StdIpv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 9)),
             "128 bits is exactly an IPv6 address"
         );
@@ -808,10 +813,11 @@ mod test {
         // field, and 128 is the longest Plen it can carry.
         let link_local = update_tlv(3, NO_FLAGS, 128, 0, &[0, 0, 0, 0, 0, 0, 0, 7]);
         assert_eq!(
-            parser
+            *parser
                 .handle_update(link_local.slice())
                 .expect("a /128 link-local prefix should resolve")
-                .address,
+                .destination
+                .prefix(),
             v6(StdIpv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 7)),
             "128 bits is the whole address AE 3 names, 64 of them implied"
         );
@@ -828,10 +834,11 @@ mod test {
 
         let update = update_tlv(3, NO_FLAGS, 64, 0, &[]);
         assert_eq!(
-            parser
+            *parser
                 .handle_update(update.slice())
                 .expect("a /64 link-local prefix should resolve")
-                .address,
+                .destination
+                .prefix(),
             v6(StdIpv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0)),
             "Plen 64 is exactly the implied fe80::/64, so nothing is sent"
         );
@@ -900,10 +907,11 @@ mod test {
         // keeps only its top 4 bits.
         let update = update_tlv(3, NO_FLAGS, 100, 0, &[0x11, 0x22, 0x33, 0x44, 0xff]);
         assert_eq!(
-            parser
+            *parser
                 .handle_update(update.slice())
                 .expect("a /100 link-local prefix should resolve")
-                .address,
+                .destination
+                .prefix(),
             v6(StdIpv6Addr::new(0xfe80, 0, 0, 0, 0x1122, 0x3344, 0xf000, 0)),
             "the low 4 bits of the fifth suffix octet are beyond /100"
         );
@@ -949,7 +957,7 @@ mod test {
             .expect("the compressed update should resolve");
 
         assert_eq!(
-            info.address,
+            *info.destination.prefix(),
             v4(StdIpv4Addr::new(192, 168, 7, 0)),
             "the omitted octets should be taken from the default prefix"
         );
@@ -979,7 +987,7 @@ mod test {
             .expect("the compressed update should resolve");
 
         assert_eq!(
-            info.address,
+            *info.destination.prefix(),
             v4(StdIpv4Addr::new(192, 168, 9, 0)),
             "the default should still be the flagged update's prefix, not the ordinary one's"
         );
@@ -1021,7 +1029,7 @@ mod test {
             .expect("a fully omitted prefix should resolve");
 
         assert_eq!(
-            info.address,
+            *info.destination.prefix(),
             v4(StdIpv4Addr::new(192, 168, 0, 0)),
             "every octet should have come from the default prefix"
         );

@@ -18,7 +18,7 @@ use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
 use crate::router::config::BabelRouterConfig;
-use crate::utils::{Instant, InternallyKeyed, ManagedSlice, Timer};
+use crate::utils::{Instant, ManagedSlice, Timer};
 
 pub mod config;
 pub mod handle_input;
@@ -173,6 +173,7 @@ where
         Ok(self.neighbor_table.add_neighbour(now, config)?)
     }
 
+    /// Runs metric updates for all of the routes advertised by this neighbour.
     pub(crate) fn update_metrics_for_neighbour(
         &mut self,
         now: Instant,
@@ -204,7 +205,7 @@ where
                     now,
                     &self.iface_table,
                     &self.neighbor_table,
-                    route.key(),
+                    route,
                     None,
                 )?;
             }

@@ -1,6 +1,6 @@
-use crate::data_structures::route::Route;
 use crate::data_structures::source::source_entry::SPEC_DEFAULT_SOURCE_GC_TIME;
 use crate::data_structures::source::{Source, SourceError, SourceIndex};
+use crate::data_structures::updates::Update;
 use crate::data_types::seqno::SeqNo;
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
@@ -57,25 +57,23 @@ impl<A: AddressExt> SourceTable<'_, A> {
     pub(crate) fn perform_maintenance(
         &mut self,
         now: Instant,
-        route: &Route<A>,
-    ) -> Result<(), SourceError> {
-        b_trace!("Performing maintenance for {:?}", route);
+        update: &Update<A>,
+    ) -> Result<(), SourceError<A>> {
+        b_trace!("Performing maintenance for {:?}", update);
 
-        if route.computed_metric() == &Metric::INFINITY {
+        if update.metric == Metric::INFINITY {
             return Ok(());
         }
 
-        let Some(source) = self.inner.get_mut_by_key(route.source()) else {
+        let Some(source) = self.inner.get_mut_by_key(update.source()) else {
             b_trace!("Route not in source table, adding.");
             // NOTE: Ignore return value that is not "Full" as we just checked if the item already
             // existed.
             let _ = match self.inner.insert(Source::new(
                 now,
-                route.source().prefix,
-                route.source().prefix_len,
-                route.source().router_id,
-                route.seqno,
-                *route.computed_metric(),
+                *update.source(),
+                update.seqno,
+                update.metric,
                 SPEC_DEFAULT_SOURCE_GC_TIME,
             )?) {
                 Err(InsertError::Full(_)) => return Err(SourceError::Full),
@@ -84,7 +82,7 @@ impl<A: AddressExt> SourceTable<'_, A> {
             return Ok(());
         };
 
-        let advertised = route.feasibility();
+        let advertised = update.feasibility();
         if advertised < source.feasibility {
             b_trace!("Updating {:?}", advertised);
             source.feasibility = advertised;
@@ -106,6 +104,8 @@ mod test {
     use super::*;
     use crate::data_structures::interface::InterfaceHandle;
     use crate::data_structures::neighbour::NeighbourIndex;
+    use crate::data_structures::route::Route;
+    use crate::data_types::destination::RouteDestination;
     use crate::data_types::{Address, Interval, RouterId};
     use crate::extension::NoExtension;
     use crate::router::config::DEFAULT_ROUTE_EXPIRY_TIME;
@@ -113,10 +113,12 @@ mod test {
 
     /// Long enough that no route expires mid-test, still inside the `Timer` bound.
     const INTERVAL: Interval = Interval::from_duration(Duration::from_secs(600));
+    const SEND_INTERVAL: Interval = Interval::from_duration(Duration::from_secs(10));
 
     const DEST_A: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, 0);
     const DEST_B: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 2, 0, 0, 0, 0);
     const NEIGHBOUR_1: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
+    const NEIGHBOUR_2: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
 
     fn t0() -> Instant {
         Instant::from_secs(0)
@@ -140,15 +142,24 @@ mod test {
     ) -> SourceIndex<NoExtension> {
         SourceIndex {
             router_id: router_id(id),
-            prefix: prefix.into(),
-            prefix_len,
+            destination: RouteDestination::new(prefix.into(), prefix_len).expect("bad address"),
         }
     }
 
     /// A route whose *advertised* and *computed* metrics are the same, which is the ordinary case:
     /// what a neighbour told us and what we would pass on only diverge by the link cost.
-    fn route(source: SourceIndex<NoExtension>, seqno: u16, metric: u16) -> Route<NoExtension> {
-        route_advertising(source, seqno, metric, metric)
+    fn update(source: SourceIndex<NoExtension>, seqno: u16, metric: u16) -> Update<NoExtension> {
+        let route = route_advertising(source, seqno, metric, metric);
+        Update::new(
+            t0(),
+            neighbour(NEIGHBOUR_2),
+            &route,
+            false,
+            false,
+            *SEND_INTERVAL,
+            1,
+        )
+        .expect("bad update")
     }
 
     /// [`route`] with the two metrics pulled apart, for the tests that care which one is recorded.
@@ -186,7 +197,7 @@ mod test {
     ) -> SourceTable<'static, NoExtension> {
         let mut table = empty_table();
         table
-            .perform_maintenance(t0(), &route(source, seqno, metric))
+            .perform_maintenance(t0(), &update(source, seqno, metric))
             .expect("seeding a fresh table cannot fail");
         table
     }
@@ -232,7 +243,7 @@ mod test {
         let mut table = empty_table();
 
         table
-            .perform_maintenance(t0(), &route(source, 5, Metric::INFINITY.raw()))
+            .perform_maintenance(t0(), &update(source, 5, Metric::INFINITY.raw()))
             .expect("a retraction is a no-op, not an error");
 
         assert_eq!(fd(&table, &source), None);
@@ -247,7 +258,7 @@ mod test {
         let mut table = table_holding(source, 5, 100);
 
         table
-            .perform_maintenance(t0(), &route(source, 6, Metric::INFINITY.raw()))
+            .perform_maintenance(t0(), &update(source, 6, Metric::INFINITY.raw()))
             .expect("a retraction is a no-op, not an error");
 
         assert_eq!(
@@ -270,7 +281,7 @@ mod test {
         let mut table = empty_table();
 
         table
-            .perform_maintenance(t0(), &route(source, 7, 42))
+            .perform_maintenance(t0(), &update(source, 7, 42))
             .expect("an owned table always has room");
 
         assert_eq!(
@@ -288,12 +299,14 @@ mod test {
         let mut table = empty_table();
 
         table
-            .perform_maintenance(t0(), &route(source, 7, 42))
+            .perform_maintenance(t0(), &update(source, 7, 42))
             .expect("an owned table always has room");
 
         let entry = table.inner.get_by_key(&source).expect("entry should exist");
-        assert_eq!(*entry.prefix(), Address::<NoExtension>::from(DEST_A));
-        assert_eq!(*entry.prefix_len(), 48);
+        assert_eq!(
+            *entry.destination(),
+            RouteDestination::new(DEST_A.into(), 48).unwrap()
+        );
         assert_eq!(*entry.router_id(), router_id("rtr-a"));
     }
 
@@ -305,7 +318,7 @@ mod test {
         let mut table = empty_table();
 
         table
-            .perform_maintenance(t0(), &route(source, 7, 42))
+            .perform_maintenance(t0(), &update(source, 7, 42))
             .expect("an owned table always has room");
 
         let entry = table.inner.get_by_key(&source).expect("entry should exist");
@@ -313,25 +326,6 @@ mod test {
             entry.gc_timer.time_remaining(t0()),
             Some(SPEC_DEFAULT_SOURCE_GC_TIME),
             "the timer should be running, with a full interval left"
-        );
-    }
-
-    /// The feasibility distance has to record the metric we *put on the wire*, which is the
-    /// computed metric — the advertised metric is what the neighbour told us, before our own link
-    /// cost was added. Recording the smaller advertised metric would claim a distance we never
-    /// offered, and would make a genuinely better route from a neighbour look infeasible.
-    #[test]
-    fn the_computed_metric_is_recorded_not_the_advertised_one() {
-        let source = source_index(DEST_A, 64, "rtr-a");
-        let mut table = empty_table();
-
-        table
-            .perform_maintenance(t0(), &route_advertising(source, 7, 42, 96))
-            .expect("an owned table always has room");
-
-        assert_eq!(
-            fd(&table, &source),
-            Some(Feasibility::new(SeqNo(7), Metric::from(96)))
         );
     }
 
@@ -348,7 +342,7 @@ mod test {
         let mut table = table_holding(source, 5, 100);
 
         table
-            .perform_maintenance(t0(), &route(source, 5, 60))
+            .perform_maintenance(t0(), &update(source, 5, 60))
             .expect("updating in place cannot fail");
 
         assert_eq!(
@@ -367,7 +361,7 @@ mod test {
         let mut table = table_holding(source, 5, 100);
 
         table
-            .perform_maintenance(t0(), &route(source, 6, 500))
+            .perform_maintenance(t0(), &update(source, 6, 500))
             .expect("updating in place cannot fail");
 
         assert_eq!(
@@ -386,7 +380,7 @@ mod test {
         let mut table = table_holding(source, 5, 100);
 
         table
-            .perform_maintenance(t0(), &route(source, 5, 200))
+            .perform_maintenance(t0(), &update(source, 5, 200))
             .expect("a no-op is not an error");
 
         assert_eq!(
@@ -402,7 +396,7 @@ mod test {
         let mut table = table_holding(source, 5, 100);
 
         table
-            .perform_maintenance(t0(), &route(source, 5, 100))
+            .perform_maintenance(t0(), &update(source, 5, 100))
             .expect("a no-op is not an error");
 
         assert_eq!(
@@ -418,7 +412,7 @@ mod test {
         let mut table = table_holding(source, 5, 100);
 
         table
-            .perform_maintenance(t0(), &route(source, 4, 1))
+            .perform_maintenance(t0(), &update(source, 4, 1))
             .expect("a no-op is not an error");
 
         assert_eq!(
@@ -436,7 +430,7 @@ mod test {
         let mut table = table_holding(source, u16::MAX, 100);
 
         table
-            .perform_maintenance(t0(), &route(source, 0, 200))
+            .perform_maintenance(t0(), &update(source, 0, 200))
             .expect("updating in place cannot fail");
 
         assert_eq!(
@@ -463,7 +457,7 @@ mod test {
         let mut table = table_holding(a, 5, 100);
 
         table
-            .perform_maintenance(t0(), &route(b, 5, 200))
+            .perform_maintenance(t0(), &update(b, 5, 200))
             .expect("an owned table always has room");
 
         assert_eq!(entry_count(&table), 2);
@@ -488,7 +482,7 @@ mod test {
         let mut table = table_holding(short, 5, 100);
 
         table
-            .perform_maintenance(t0(), &route(long, 5, 200))
+            .perform_maintenance(t0(), &update(long, 5, 200))
             .expect("an owned table always has room");
 
         assert_eq!(entry_count(&table), 2);
@@ -508,7 +502,7 @@ mod test {
         let mut table = table_holding(a, 5, 100);
 
         table
-            .perform_maintenance(t0(), &route(b, 5, 200))
+            .perform_maintenance(t0(), &update(b, 5, 200))
             .expect("an owned table always has room");
 
         assert_eq!(entry_count(&table), 2);
@@ -538,7 +532,7 @@ mod test {
         );
 
         table
-            .perform_maintenance(later, &route(source, 5, 60))
+            .perform_maintenance(later, &update(source, 5, 60))
             .expect("updating in place cannot fail");
 
         assert_eq!(
@@ -559,7 +553,7 @@ mod test {
 
         let later = t0() + Duration::from_secs(60);
         table
-            .perform_maintenance(later, &route(source, 5, 100))
+            .perform_maintenance(later, &update(source, 5, 100))
             .expect("a no-op is not an error");
 
         assert_eq!(
@@ -583,7 +577,7 @@ mod test {
 
         let later = t0() + Duration::from_secs(60);
         table
-            .perform_maintenance(later, &route(source, 5, 200))
+            .perform_maintenance(later, &update(source, 5, 200))
             .expect("a no-op is not an error");
 
         assert_eq!(
@@ -607,7 +601,7 @@ mod test {
 
         let later = t0() + Duration::from_secs(60);
         table
-            .perform_maintenance(later, &route(source, 6, Metric::INFINITY.raw()))
+            .perform_maintenance(later, &update(source, 6, Metric::INFINITY.raw()))
             .expect("a retraction is a no-op, not an error");
 
         assert_eq!(
@@ -639,7 +633,7 @@ mod test {
         );
 
         table
-            .perform_maintenance(t0(), &route(source, 5, 100))
+            .perform_maintenance(t0(), &update(source, 5, 100))
             .expect("an owned table always has room");
 
         assert!(

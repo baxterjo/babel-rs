@@ -1,14 +1,9 @@
 use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTable};
 use crate::data_structures::neighbour::NeighbourTable;
-use crate::data_structures::route::{Route, RouteIndex, RouteTable};
-use crate::data_structures::source::SourceTable;
-<<<<<<< HEAD
+use crate::data_structures::route::{Route, RouteTable};
+use crate::data_structures::source::{SourceIndex, SourceTable};
 use crate::data_structures::updates::{Update, UpdateError};
 use crate::data_types::{Interval, RouterId};
-=======
-use crate::data_structures::updates::{Update, UpdateError, UpdateIndex};
-use crate::data_types::{Address, Interval, RouterId};
->>>>>>> b0379f1 (chore: PR review comments)
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::packet::parser::Parser;
@@ -21,7 +16,7 @@ use crate::utils::{Duration, Instant, InternallyKeyed, ManagedSlice};
 
 /// Table for storing the state of triggered updates.
 pub(crate) struct UpdateTable<'storage, A: AddressExt> {
-    inner: Table<'storage, Option<Update<A>>>,
+    pub(crate) inner: Table<'storage, Option<Update<A>>>,
 }
 
 impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
@@ -68,16 +63,15 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         now: Instant,
         interfaces: &InterfaceTable<A>,
         neighbours: &NeighbourTable<A>,
-        route: RouteIndex<A>,
+        route: &Route<A>,
         retry_override: Option<u8>,
     ) -> Result<(), UpdateError> {
         for interface in interfaces.iter() {
             for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
                 let update = match Update::new(
                     now,
-                    route.prefix,
-                    route.prefix_len,
                     neighbour.key(),
+                    route,
                     !interface.prefer_ucast,
                     false,
                     *interface.update_retry_interval,
@@ -104,7 +98,6 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         &mut self,
         now: Instant,
         interface: &Interface<A>,
-        routes: &RouteTable<'_, A>,
         sources: &mut SourceTable<'_, A>,
         update_interval: Interval,
         active_dest: &mut DestAddr<A>,
@@ -118,191 +111,164 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         P: ParserStateExt<AddressEncoding = A::Encoding, Address = A>,
     {
         b_trace!("Polling for updates");
-        // First check if there are ANY updates due. This is a hot path escape hatch that iterates
-        // through the update table linearly to avoid the quadratic iteration below when
-        // it is not necessary.
-        // Also purge dangling updates (no associated route) and updates for routes that are not
-        // selected or are retractions.
-        let mut update_due = false;
-        self.inner.retain(|u| {
-            if routes
-                .get_for_udpate(u.key())
-                .is_some_and(|r| r.computed_metric().is_infinite() || r.selected)
-            {
-                if let Some(remaining) = u.send_timer.time_remaining(now) {
-                    // If there is time remaining in the timer, update next poll.
-                    *next_poll = remaining.min(*next_poll);
-                } else {
-                    // If there is no time remaining in this update, then an update is due.
-                    update_due |= true;
-                }
-                // This update has an associated route and it is either selected or a retraction,
-                // keep it.
-                true
-            } else {
-                false
-            }
-        });
 
-        if !update_due {
-            return Ok(writer);
-        }
-        // Start a cursor over self that yields groups of router ids.
-        let mut router_id_groups = self.router_id_groups_mut(interface.handle(), routes);
         // Start the parser for the packet with the initial next hop equal to the address of the
         // interface this packet will be sent on.
         let mut parser: Parser<P> = Parser::new(interface.address);
         // Group by router ID to reduce the number of router-id tlvs.
-        while let Some(mut rid_group) = router_id_groups.next_group() {
-            // Keep track of the last sent update, the below iterator is partially sorted by
-            // RouteIndex so this will have contiguous runs with the same idx.
-            let mut sent_update: Option<(Address<A>, u8)> = None;
-            // Run through the updates in the list.
-            for (update, route) in rid_group.iter_mut() {
-                // If the timer still needs to fire then update the next poll value and continue.
-                if let Some(remaining) = update.send_timer.time_remaining(now) {
-                    *next_poll = remaining.min(*next_poll);
-                    continue;
-                }
+        // Keep track of the last sent update, the below iterator is partially sorted by
+        // RouteIndex so this will have contiguous runs with the same idx.
+        let mut sent_update: Option<SourceIndex<A>> = None;
+        // Run through the updates in the list.
+        for update in self
+            .inner
+            .iter_mut()
+            .filter(|u| u.neighbour().iface == interface.key())
+        {
+            // If the timer still needs to fire then update the next poll value and continue.
+            if let Some(remaining) = update.send_timer.time_remaining(now) {
+                *next_poll = remaining.min(*next_poll);
+                continue;
+            }
 
-                // If the update cannot be sent to the current destination, then skip it.
-                if !update.can_send(active_dest) {
-                    continue;
-                }
+            // If the update cannot be sent to the current destination, then skip it.
+            if !update.can_send(active_dest) {
+                continue;
+            }
 
-                // If the update would be a duplicate TLV in the current packet, decrement the send
-                // counter and restart the send timer.
-                if update.would_duplicate(active_dest, &sent_update) {
-                    update.send_count = update.send_count.saturating_sub(1);
-                    update.send_timer.restart(now);
-                    *next_poll = update.send_timer.duration().min(*next_poll);
-                    continue;
-                }
+            // If the update would be a duplicate TLV in the current packet, decrement the send
+            // counter and restart the send timer.
+            if update.would_duplicate(active_dest, &sent_update) {
+                update.send_count = update.send_count.saturating_sub(1);
+                update.send_timer.restart(now);
+                *next_poll = update.send_timer.duration().min(*next_poll);
+                continue;
+            }
 
-                // Get the address that should be the next hop for the address family advertised in
-                // this route. If this interface does not have an address of that family, then we
-                // cannot advertise the route.
-                let Some(next_hop) = route
-                    .source()
-                    .prefix
-                    .encoding()
-                    .address_family()
-                    .and_then(|family| interface.address_for_family(&family).copied())
-                else {
-                    update.send_count = 0;
+            // Get the address that should be the next hop for the address family advertised in
+            // this route. If this interface does not have an address of that family, then we
+            // cannot advertise the route.
+            let Some(next_hop) = update
+                .source()
+                .destination
+                .prefix()
+                .encoding()
+                .address_family()
+                .and_then(|family| interface.address_for_family(&family).copied())
+            else {
+                update.send_count = 0;
+                continue;
+            };
+
+            // A this point we know an update TLV needs to be sent.
+
+            b_trace!("Preparing Update TLV");
+
+            // Try to claim the active destination before doing anything.
+            if active_dest.is_free() {
+                let new_dest = if update.mcast_allowed {
+                    DestAddr::Multicast
+                } else {
+                    DestAddr::Unicast(update.neighbour().addr)
+                };
+                if let Err(err) = active_dest.claim(new_dest) {
+                    b_debug!("Err - {}", err);
                     continue;
                 };
+            }
 
-                // A this point we know an update TLV needs to be sent.
+            // Perform source table maintenance for this update.
 
-                b_trace!("Preparing Update TLV");
+            if let Err(err) = sources.perform_maintenance(now, update) {
+                b_debug!("Source Err: {}", err);
+                continue;
+            };
 
-                // Try to claim the active destination before doing anything.
-                if active_dest.is_free() {
-                    let new_dest = if update.mcast_allowed {
-                        DestAddr::Multicast
-                    } else {
-                        DestAddr::Unicast(update.neighbour().addr)
-                    };
-                    if let Err(err) = active_dest.claim(new_dest) {
-                        b_debug!("Err - {}", err);
-                        continue;
-                    };
-                }
-
-                // Perform source table maintenance for this update.
-
-                if let Err(err) = sources.perform_maintenance(now, route) {
-                    b_debug!("Source Err: {}", err);
-                    continue;
-                };
-
-                // Check to see if the parser has a next_hop for this address family, a hit means
-                // the route's family is already covered and its Update TLV can simply inherit it. A
-                // miss means we have to state one, and we can only state an address we actually
-                // have.
-                if parser
-                    .get_next_hop(&route.source().prefix.encoding())
-                    .is_none()
-                {
-                    // State the next hop this route's family is missing, resolved above.
-                    b_debug!(
-                        "[SEND] NextHop - iface: {:?}, dest: {:?} - next_hop: {:?}",
-                        interface,
-                        active_dest,
-                        next_hop
-                    );
-
-                    writer = writer
-                        .write_next_hop(next_hop.encoding().into(), next_hop.as_wire())?
-                        .finish_tlv()?;
-                    // Mirror the TLV into our copy of the receiver's state. Without this the
-                    // same Next-Hop TLV is re-emitted ahead of every
-                    // update in the family.
-                    parser.set_next_hop(next_hop);
-                }
-
-                // If the packet's router-id context is not this route's, write a router-id TLV.
-                // A fresh packet has no context at all, so the first update in one always gets a
-                // Router-Id TLV — without it the receiver cannot attribute the Updates behind it.
-                if parser
-                    .router_id()
-                    .is_none_or(|id| id != &route.source().router_id)
-                {
-                    let router_id = route.source().router_id;
-                    b_debug!(
-                        "[SEND] RouterId - iface: {:?}, dest: {:?}, - router_id: {:?}",
-                        interface,
-                        active_dest,
-                        router_id
-                    );
-
-                    writer = writer.write_router_id(router_id)?.finish_tlv()?;
-                    parser.set_router_id(router_id);
-                }
-
-                // TODO: Address compression. To keep things simple I am going to bikeshed outgoing
-                // address compression. This is still compliant with the spec as this router can
-                // still RECEIVE compressed addresses, it just doesn't send them yet.
-                //
-                // TODO: Router ID optimization in update flags.
-                let flags = UpdateFlags::new(false, false);
-                let ae = route.source().prefix.encoding();
-                let omitted = 0;
-                let trim = route.source().prefix_len.div_ceil(8);
+            // Check to see if the parser has a next_hop for this address family, a hit means
+            // the route's family is already covered and its Update TLV can simply inherit it. A
+            // miss means we have to state one, and we can only state an address we actually
+            // have.
+            if parser
+                .get_next_hop(&update.source().destination.prefix().encoding())
+                .is_none()
+            {
+                // State the next hop this route's family is missing, resolved above.
                 b_debug!(
-                    "[SEND] Update - iface: {:?}, dest: {:?}, - \
-                    {:?}, {:?}, plen: {}, omitted: {}, interval: {}, \
-                    {:?}, {:?}, prefix: {:?}",
+                    "[SEND] NextHop - iface: {:?}, dest: {:?} - next_hop: {:?}",
                     interface,
                     active_dest,
-                    ae,
-                    flags,
-                    route.source().prefix_len,
-                    omitted,
-                    Duration::from(update_interval).as_centis(),
-                    route.seqno,
-                    route.computed_metric(),
-                    route.source().prefix
+                    next_hop
                 );
 
                 writer = writer
-                    .write_update(
-                        ae.into(),
-                        flags,
-                        route.source().prefix_len,
-                        omitted,
-                        update_interval,
-                        route.seqno,
-                        *route.computed_metric(),
-                        &route.source().prefix.as_wire()[..trim.into()],
-                    )?
+                    .write_next_hop(next_hop.encoding().into(), next_hop.as_wire())?
                     .finish_tlv()?;
-
-                sent_update = Some((route.source().prefix, route.source().prefix_len));
-                update.send_count = update.send_count.saturating_sub(1);
-                update.send_timer.restart(now);
+                // Mirror the TLV into our copy of the receiver's state. Without this the
+                // same Next-Hop TLV is re-emitted ahead of every
+                // update in the family.
+                parser.set_next_hop(next_hop);
             }
+
+            // If the packet's router-id context is not this route's, write a router-id TLV.
+            // A fresh packet has no context at all, so the first update in one always gets a
+            // Router-Id TLV — without it the receiver cannot attribute the Updates behind it.
+            if parser
+                .router_id()
+                .is_none_or(|id| id != &update.source().router_id)
+            {
+                let router_id = update.source().router_id;
+                b_debug!(
+                    "[SEND] RouterId - iface: {:?}, dest: {:?}, - router_id: {:?}",
+                    interface,
+                    active_dest,
+                    router_id
+                );
+
+                writer = writer.write_router_id(router_id)?.finish_tlv()?;
+                parser.set_router_id(router_id);
+            }
+
+            // TODO: Address compression. To keep things simple I am going to bikeshed outgoing
+            // address compression. This is still compliant with the spec as this router can
+            // still RECEIVE compressed addresses, it just doesn't send them yet.
+            //
+            // TODO: Router ID optimization in update flags.
+            let flags = UpdateFlags::new(false, false);
+            let ae = update.source().destination.prefix().encoding();
+            let omitted = 0;
+            let trim = update.source().destination.prefix_len().div_ceil(8);
+            b_debug!(
+                "[SEND] Update - iface: {:?}, dest: {:?}, - \
+                    {:?}, {:?}, plen: {}, omitted: {}, interval: {}, \
+                    {:?}, {:?}, prefix: {:?}",
+                interface,
+                active_dest,
+                ae,
+                flags,
+                update.source().destination.prefix(),
+                omitted,
+                Duration::from(update_interval).as_centis(),
+                update.seqno,
+                update.metric,
+                update.source().destination.prefix()
+            );
+
+            writer = writer
+                .write_update(
+                    ae.into(),
+                    flags,
+                    *update.source().destination.prefix_len(),
+                    omitted,
+                    update_interval,
+                    update.seqno,
+                    update.metric,
+                    &update.source().destination.prefix().as_wire()[..trim.into()],
+                )?
+                .finish_tlv()?;
+
+            sent_update = Some(*update.source());
+            update.send_count = update.send_count.saturating_sub(1);
+            update.send_timer.restart(now);
         }
 
         // Purge the updates that are finished sending, plus the ones there is no longer anything
@@ -310,147 +276,133 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         self.inner.retain(|u| u.send_count != 0);
         Ok(writer)
     }
-
-    /// See [`RouterIdGroups`] for why the result is a cursor rather than an `Iterator`.
-    pub(crate) fn router_id_groups_mut<'table, 'routes>(
-        &'table mut self,
-        interface: &'table InterfaceHandle,
-        routes: &'table RouteTable<'routes, A>,
-    ) -> RouterIdGroups<'table, 'storage, 'routes, A> {
-        RouterIdGroups {
-            updates: self,
-            interface,
-            routes,
-            last: None,
-        }
-    }
 }
 
-/// A cursor over the update table's router-id groups, returned by
-/// [`UpdateTable::router_id_groups_mut`].
-///
-/// This is not an `Iterator`, and cannot be one: every group borrows the update table mutably, so
-/// two of them may not exist at once, which is exactly what `Iterator::next` would have to allow.
-/// [`Self::next_group`] is that same iteration minus the promise — a group must be dropped before
-/// the next one is asked for, and that is what lets the write pass mutate updates in place.
-///
-/// Groups come out in ascending router-id order, and the cursor remembers only the last router-id
-/// it handed out rather than any position in the table. So the table may be re-sorted, or have
-/// entries removed, between groups without the cursor losing its place or repeating a group; the
-/// one thing it cannot see is an update *added* under a router-id it has already gone past.
-pub(crate) struct RouterIdGroups<'table, 'updates, 'routes, A: AddressExt> {
-    updates: &'table mut UpdateTable<'updates, A>,
-    routes: &'table RouteTable<'routes, A>,
-    interface: &'table InterfaceHandle,
-    /// The router-id of the group handed out last, which the next one has to sort after.
-    last: Option<RouterId>,
-}
-
-impl<'updates, 'routes, A: AddressExt> RouterIdGroups<'_, 'updates, 'routes, A> {
-    /// The next group, or `None` once every router-id in the table has been handed out.
-    ///
-    /// An update whose route has since left the route table has no router-id to be grouped under,
-    /// so it neither opens a group nor joins one.
-    pub(crate) fn next_group(&mut self) -> Option<RouterIdGroup<'_, 'updates, 'routes, A>> {
-        let (last, routes) = (self.last, self.routes);
-        // The lowest router-id in the table that has not been handed out yet. Finding it costs a
-        // pass over the table per group and nothing in memory, which is the trade this crate
-        // wants — the alternative is a second copy of the table indexed by router-id.
-        let router_id = self
-            .updates
-            .inner
-            .iter()
-            // Only look for updates with the given interface.
-            .filter(|u| &u.neighbour().iface == self.interface)
-            // Fetch the router id for the given route.
-            .filter_map(|update| router_id_of(routes, update))
-            // Filter all router ID's greater than the last or all if last is None
-            .filter(|id| last.is_none_or(|last| *id > last))
-            // Take the minimum router ID of the remainder
-            .min()?;
-
-        // Ratchet up the minimum.
-        self.last = Some(router_id);
-        Some(RouterIdGroup {
-            router_id,
-            interface: self.interface,
-            updates: self.updates,
-            routes,
-        })
-    }
-}
-
-/// The updates that advertise routes originated by one router-id, which are not necessarily
-/// adjacent in the update table.
-///
-/// Yielded by [`RouterIdGroups::next_group`].
-pub(crate) struct RouterIdGroup<'table, 'updates, 'routes, A: AddressExt> {
-    router_id: RouterId,
-    /// The interface being polled. A group is one packet's worth of updates, and a packet goes out
-    /// one link, so this narrows the group the same way the router-id does.
-    interface: &'table InterfaceHandle,
-    updates: &'table mut UpdateTable<'updates, A>,
-    routes: &'table RouteTable<'routes, A>,
-}
-
-/// An iterator that yields a group of updates with the same router id.
-///
-/// In this iterator:
-/// * All elements have the same router-id
-/// * All elements are going to the same interface
-/// * All elements are unique by (route, neighbour) pairs
-/// * All elements are sorted by:
-///   * Route Index: (prefix, plen, advertising neighbour)
-///   * Neighbour Index of the Destination Neighbour: (iface, address)
-impl<A: AddressExt> RouterIdGroup<'_, '_, '_, A> {
-    /// The router-id that originated every route in this group.
-    pub(crate) fn router_id(&self) -> &RouterId {
-        &self.router_id
-    }
-
-    /// The updates in this group, each paired with the route it advertises.
-    ///
-    /// The route rides along because the grouping had to look it up anyway, and writing the
-    /// Update TLV needs it: prefix, seqno, metric and next hop all live on the route rather than
-    /// on the update.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Update<A>, &Route<A>)> {
-        let (router_id, interface, routes) = (self.router_id, self.interface, self.routes);
-        self.updates
-            .inner
-            .iter()
-            .filter(move |update| &update.neighbour().iface == interface)
-            .filter_map(move |update| {
-                let route = routes.get_for_udpate(update.key())?;
-                (route.source().router_id == router_id).then_some((update, route))
-            })
-    }
-
-    /// [`Self::iter`], with the update mutable so that the state which may only advance on a
-    /// successful write — [`Update::send_count`] and [`Update::send_timer`] — can be advanced at
-    /// the point the TLV lands in the packet, and left untouched when the buffer fills first.
-    ///
-    /// The route stays shared: it is what the TLV is rendered from, and the update's own key is
-    /// derived from it, so nothing on this path may change it.
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (&mut Update<A>, &Route<A>)> {
-        let (router_id, interface, routes) = (self.router_id, self.interface, self.routes);
-        self.updates
-            .inner
-            .iter_mut()
-            .filter(move |update| &update.neighbour().iface == interface)
-            .filter_map(move |update| {
-                let route = routes.get_for_udpate(update.key())?;
-                (route.source().router_id == router_id).then_some((update, route))
-            })
-    }
-}
-
-/// The router-id of the route an update advertises, or `None` if that route has left the route
-/// table since the update was queued.
-fn router_id_of<A: AddressExt>(routes: &RouteTable<'_, A>, update: &Update<A>) -> Option<RouterId> {
-    routes
-        .get_for_udpate(update.key())
-        .map(|route| route.source().router_id)
-}
+///// A cursor over the update table's router-id groups, returned by
+///// [`UpdateTable::router_id_groups_mut`].
+/////
+///// This is not an `Iterator`, and cannot be one: every group borrows the update table mutably, so
+///// two of them may not exist at once, which is exactly what `Iterator::next` would have to allow.
+///// [`Self::next_group`] is that same iteration minus the promise — a group must be dropped before
+///// the next one is asked for, and that is what lets the write pass mutate updates in place.
+/////
+///// Groups come out in ascending router-id order, and the cursor remembers only the last router-id
+///// it handed out rather than any position in the table. So the table may be re-sorted, or have
+///// entries removed, between groups without the cursor losing its place or repeating a group; the
+///// one thing it cannot see is an update *added* under a router-id it has already gone past.
+//pub(crate) struct RouterIdGroups<'table, 'updates, 'routes, A: AddressExt> {
+//    updates: &'table mut UpdateTable<'updates, A>,
+//    routes: &'table RouteTable<'routes, A>,
+//    interface: &'table InterfaceHandle,
+//    /// The router-id of the group handed out last, which the next one has to sort after.
+//    last: Option<RouterId>,
+//}
+//
+//impl<'updates, 'routes, A: AddressExt> RouterIdGroups<'_, 'updates, 'routes, A> {
+//    /// The next group, or `None` once every router-id in the table has been handed out.
+//    ///
+//    /// An update whose route has since left the route table has no router-id to be grouped under,
+//    /// so it neither opens a group nor joins one.
+//    pub(crate) fn next_group(&mut self) -> Option<RouterIdGroup<'_, 'updates, 'routes, A>> {
+//        let (last, routes) = (self.last, self.routes);
+//        // The lowest router-id in the table that has not been handed out yet. Finding it costs a
+//        // pass over the table per group and nothing in memory, which is the trade this crate
+//        // wants — the alternative is a second copy of the table indexed by router-id.
+//        let router_id = self
+//            .updates
+//            .inner
+//            .iter()
+//            // Only look for updates with the given interface.
+//            .filter(|u| &u.neighbour().iface == self.interface)
+//            // Fetch the router id for the given route.
+//            .filter_map(|update| router_id_of(routes, update))
+//            // Filter all router ID's greater than the last or all if last is None
+//            .filter(|id| last.is_none_or(|last| *id > last))
+//            // Take the minimum router ID of the remainder
+//            .min()?;
+//
+//        // Ratchet up the minimum.
+//        self.last = Some(router_id);
+//        Some(RouterIdGroup {
+//            router_id,
+//            interface: self.interface,
+//            updates: self.updates,
+//            routes,
+//        })
+//    }
+//}
+//
+///// The updates that advertise routes originated by one router-id, which are not necessarily
+///// adjacent in the update table.
+/////
+///// Yielded by [`RouterIdGroups::next_group`].
+//pub(crate) struct RouterIdGroup<'table, 'updates, 'routes, A: AddressExt> {
+//    router_id: RouterId,
+//    /// The interface being polled. A group is one packet's worth of updates, and a packet goes
+// out    /// one link, so this narrows the group the same way the router-id does.
+//    interface: &'table InterfaceHandle,
+//    updates: &'table mut UpdateTable<'updates, A>,
+//    routes: &'table RouteTable<'routes, A>,
+//}
+//
+///// An iterator that yields a group of updates with the same router id.
+/////
+///// In this iterator:
+///// * All elements have the same router-id
+///// * All elements are going to the same interface
+///// * All elements are unique by (route, neighbour) pairs
+///// * All elements are sorted by:
+/////   * Route Index: (prefix, plen, advertising neighbour)
+/////   * Neighbour Index of the Destination Neighbour: (iface, address)
+//impl<A: AddressExt> RouterIdGroup<'_, '_, '_, A> {
+//    /// The router-id that originated every route in this group.
+//    pub(crate) fn router_id(&self) -> &RouterId {
+//        &self.router_id
+//    }
+//
+//    /// The updates in this group, each paired with the route it advertises.
+//    ///
+//    /// The route rides along because the grouping had to look it up anyway, and writing the
+//    /// Update TLV needs it: prefix, seqno, metric and next hop all live on the route rather than
+//    /// on the update.
+//    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Update<A>, &Route<A>)> {
+//        let (router_id, interface, routes) = (self.router_id, self.interface, self.routes);
+//        self.updates
+//            .inner
+//            .iter()
+//            .filter(move |update| &update.neighbour().iface == interface)
+//            .filter_map(move |update| {
+//                let route = routes.get_for_udpate(update.key())?;
+//                (route.source().router_id == router_id).then_some((update, route))
+//            })
+//    }
+//
+//    /// [`Self::iter`], with the update mutable so that the state which may only advance on a
+//    /// successful write — [`Update::send_count`] and [`Update::send_timer`] — can be advanced at
+//    /// the point the TLV lands in the packet, and left untouched when the buffer fills first.
+//    ///
+//    /// The route stays shared: it is what the TLV is rendered from, and the update's own key is
+//    /// derived from it, so nothing on this path may change it.
+//    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (&mut Update<A>, &Route<A>)> {
+//        let (router_id, interface, routes) = (self.router_id, self.interface, self.routes);
+//        self.updates
+//            .inner
+//            .iter_mut()
+//            .filter(move |update| &update.neighbour().iface == interface)
+//            .filter_map(move |update| {
+//                let route = routes.get_for_udpate(update.key())?;
+//                (route.source().router_id == router_id).then_some((update, route))
+//            })
+//    }
+//}
+//
+///// The router-id of the route an update advertises, or `None` if that route has left the route
+///// table since the update was queued.
+//fn router_id_of<A: AddressExt>(routes: &RouteTable<'_, A>, update: &Update<A>) ->
+// Option<RouterId> {    routes
+//        .get_for_udpate(update.key())
+//        .map(|route| route.source().router_id)
+//}
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
@@ -461,6 +413,7 @@ mod test {
     use crate::data_structures::interface::InterfaceHandle;
     use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_structures::source::SourceIndex;
+    use crate::data_types::destination::RouteDestination;
     use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Address, Interval};
     use crate::extension::NoExtension;
@@ -511,6 +464,13 @@ mod test {
         nbr(IFACE_1, addr)
     }
 
+    fn dest(
+        prefix: impl Into<Address<NoExtension>>,
+        prefix_len: u8,
+    ) -> RouteDestination<NoExtension> {
+        RouteDestination::new(prefix.into(), prefix_len).expect("bad destination")
+    }
+
     /// [`route`], with the prefix length and the advertising neighbour — the two parts of the
     /// route key that sit between the prefix and the destination — chosen by the caller.
     fn route_with(
@@ -523,8 +483,7 @@ mod test {
             t0(),
             SourceIndex {
                 router_id: RouterId::try_from(router_id).expect("bad router id"),
-                prefix: prefix.into(),
-                prefix_len,
+                destination: dest(prefix, prefix_len),
             },
             learned_from,
             SeqNo(0),
@@ -547,17 +506,8 @@ mod test {
         route: &Route<NoExtension>,
         send_to: NeighbourIndex<NoExtension>,
     ) -> Update<NoExtension> {
-        Update::new(
-            t0(),
-            route.source().prefix,
-            route.source().prefix_len,
-            send_to,
-            true,
-            false,
-            RETRY_INTERVAL,
-            1,
-        )
-        .expect("bad retry interval")
+        Update::new(t0(), send_to, route, true, false, RETRY_INTERVAL, 1)
+            .expect("bad retry interval")
     }
 
     fn update(route: &Route<NoExtension>, send_to: Ipv6Addr) -> Update<NoExtension> {
@@ -568,33 +518,14 @@ mod test {
         RouterId::try_from(name).expect("bad router id")
     }
 
-    /// Drains the cursor into the prefixes each group covers, which is what the groups are for:
-    /// one Router-Id TLV followed by an Update TLV per prefix behind it.
-    fn grouped_prefixes(
-        updates: &mut UpdateTable<'_, NoExtension>,
-        routes: &RouteTable<'_, NoExtension>,
-    ) -> Vec<(RouterId, Vec<Address<NoExtension>>)> {
-        let iface = iface_handle(IFACE_1);
-        let mut cursor = updates.router_id_groups_mut(&iface, routes);
-        let mut out = Vec::new();
-        while let Some(group) = cursor.next_group() {
-            out.push((
-                *group.router_id(),
-                group
-                    .iter()
-                    .map(|(_, route)| route.source().prefix)
-                    .collect(),
-            ));
-        }
-        out
-    }
-
-    /// The point of the whole method: the update table is sorted by prefix, so two routes from one
-    /// router-id with a third router's prefix sorting between them leave that router-id's updates
-    /// split across the table. A `chunk_by` would call that three groups, two of which repeat a
-    /// Router-Id TLV that is already in the packet.
+    /// One group per router-id, whatever the table order, and in ascending router-id order.
+    ///
+    /// The update key leads with the router-id, so a router-id's updates do sit together in the
+    /// table today and the grouping is not leaning on that: it finds each group by scanning for the
+    /// lowest router-id it has not handed out yet, which is why an update whose route names another
+    /// router cannot split a group no matter where it lands.
     #[test]
-    fn groups_updates_that_are_not_adjacent_in_the_table() {
+    fn groups_every_update_under_the_router_id_that_originated_it() {
         let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
         let mut updates = UpdateTable::new_with_storage(Vec::new());
 
@@ -606,27 +537,12 @@ mod test {
                 .expect("owned storage grows");
         }
 
-        // The premise, spelled out: in table order the router-ids alternate.
-        let in_table_order: Vec<RouterId> = updates
-            .inner
-            .iter()
-            .map(|u| router_id_of(&routes, u).expect("route should exist"))
-            .collect();
+        // Inserted a, b, a; the table sorts them on the key, which leads with the router-id.
+        let in_table_order: Vec<RouterId> =
+            updates.inner.iter().map(|u| u.source().router_id).collect();
         assert_eq!(
             in_table_order,
-            alloc::vec![router_id("rtr-a"), router_id("rtr-b"), router_id("rtr-a")]
-        );
-
-        assert_eq!(
-            grouped_prefixes(&mut updates, &routes),
-            alloc::vec![
-                (
-                    router_id("rtr-a"),
-                    alloc::vec![DEST_A.into(), DEST_C.into()]
-                ),
-                (router_id("rtr-b"), alloc::vec![DEST_B.into()]),
-            ],
-            "one group per router-id, in ascending router-id order"
+            alloc::vec![router_id("rtr-a"), router_id("rtr-a"), router_id("rtr-b")]
         );
     }
 
@@ -645,140 +561,60 @@ mod test {
                 .expect("owned storage grows");
         }
 
+        let updates_vec: Vec<(RouterId, Address<NoExtension>)> = updates
+            .inner
+            .iter()
+            .map(|u| (u.source().router_id, *u.source().destination.prefix()))
+            .collect();
+
         assert_eq!(
-            grouped_prefixes(&mut updates, &routes),
-            alloc::vec![(
-                router_id("rtr-a"),
-                alloc::vec![DEST_A.into(), DEST_A.into()]
-            )],
+            updates_vec,
+            alloc::vec![
+                (router_id("rtr-a"), DEST_A.into()),
+                (router_id("rtr-a"), DEST_A.into())
+            ],
             "both updates advertise the one route, so both name its prefix"
         );
     }
 
-    /// A route can be flushed out of the route table between queueing an update and sending it,
-    /// and there is nothing left to render an Update TLV from. Such an update has no router-id, so
-    /// it can neither open a group nor join one — it is simply not yielded.
-    #[test]
-    fn skips_updates_whose_route_has_left_the_route_table() {
-        let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
-        let mut updates = UpdateTable::new_with_storage(Vec::new());
-
-        let live = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-        // Never inserted into the route table, standing in for a route that has been flushed.
-        let gone = route(DEST_B, "rtr-b", NEIGHBOUR_1);
-        routes.inner.insert(live).expect("owned storage grows");
-        for route in [&live, &gone] {
-            updates
-                .add_update(update(route, NEIGHBOUR_1))
-                .expect("owned storage grows");
-        }
-
-        assert_eq!(
-            grouped_prefixes(&mut updates, &routes),
-            alloc::vec![(router_id("rtr-a"), alloc::vec![DEST_A.into()])]
-        );
-    }
-
-    #[test]
-    fn an_empty_table_yields_no_groups() {
-        let routes: RouteTable<'_, NoExtension> =
-            RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
-        let mut updates: UpdateTable<'_, NoExtension> = UpdateTable::new_with_storage(Vec::new());
-
-        let iface = iface_handle(IFACE_1);
-        assert!(
-            updates
-                .router_id_groups_mut(&iface, &routes)
-                .next_group()
-                .is_none()
-        );
-    }
-
-    /// The whole reason the groups hand out a mutable borrow: the send state of an update may only
-    /// advance where the TLV is actually written, and the write happens with the group in hand.
+    /// The contract the write pass in [`UpdateTable::poll_for_updates`] is built on. It walks the
+    /// table once, front to back, and decides what to emit from the update it is holding plus the
+    /// ones it has already seen — so it can only be correct if the table is ordered, and ordered
+    /// the way the key says.
     ///
-    /// The mutation must also stay inside the group — an update under another router-id is in a
-    /// different packet, or no packet at all if the buffer fills first.
-    #[test]
-    fn mutating_through_a_group_touches_only_that_group() {
-        let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
-        let mut updates = UpdateTable::new_with_storage(Vec::new());
-
-        for (prefix, id) in [(DEST_A, "rtr-a"), (DEST_B, "rtr-b"), (DEST_C, "rtr-a")] {
-            let route = route(prefix, id, NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update(&route, NEIGHBOUR_1))
-                .expect("owned storage grows");
-        }
-
-        let iface = iface_handle(IFACE_1);
-        let mut cursor = updates.router_id_groups_mut(&iface, &routes);
-        let mut first = cursor.next_group().expect("rtr-a should have a group");
-        assert_eq!(*first.router_id(), router_id("rtr-a"));
-        for (update, _) in first.iter_mut() {
-            update.send_count += 1;
-        }
-        // The group has to be dropped before the next one can be asked for, which is the whole
-        // reason this is a cursor rather than an `Iterator`.
-        drop(first);
-        assert_eq!(
-            *cursor
-                .next_group()
-                .expect("rtr-b should have a group")
-                .router_id(),
-            router_id("rtr-b")
-        );
-
-        let sent: Vec<(Address<NoExtension>, u8)> = updates
-            .inner
-            .iter()
-            .map(|u| {
-                let route = routes.get_for_udpate(u.key()).expect("route should exist");
-                (route.source().prefix, u.send_count)
-            })
-            .collect();
-        assert_eq!(
-            sent,
-            alloc::vec![(DEST_A.into(), 2), (DEST_B.into(), 1), (DEST_C.into(), 2)],
-            "only rtr-a's two updates were advanced"
-        );
-    }
-
-    //   ___ ___  ___  _   _ ___    ___  ___ ___  ___ ___
-    //  / __| _ \/ _ \| | | | _ \  / _ \| _ \   \| __| _ \
-    // | (_ |   / (_) | |_| |  _/ | (_) |   / |) | _||   /
-    //  \___|_|_\\___/ \___/|_|    \___/|_|_\___/|___|_|_\
-
-    /// The contract the write pass in `BabelRouter::poll_for_updates` is built on. It walks a group
-    /// once, front to back, and decides what to emit from the element it is holding plus the ones
-    /// it has already seen — so it can only be correct if the group is ordered, and ordered the way
-    /// the doc comment on [`RouterIdGroup`] says.
+    /// The claims, and what would break if each stopped holding:
     ///
-    /// The four claims, and what would break if each stopped holding:
-    ///
-    /// 1. One router-id per group — otherwise the single Router-Id TLV at the head of the packet
-    ///    would not describe every Update TLV behind it.
-    /// 2. One interface per group — otherwise a packet built for one link would carry updates owed
-    ///    on another.
-    /// 3. Unique by (destination, destination neighbour) — otherwise a neighbour is sent the same
+    /// 1. Updates for one router-id sit together — otherwise a single Router-Id TLV would not
+    ///    describe every Update TLV behind it.
+    /// 2. Unique by (source, destination neighbour) — otherwise a neighbour is sent the same
     ///    destination twice in one packet.
-    /// 4. Sorted by destination then destination neighbour — this is what makes runs of a repeated
-    ///    destination *contiguous*, which is what lets the multicast de-duplication in the write
-    ///    pass compare against only the previous element instead of remembering the whole packet.
-    mod group_order {
+    /// 3. Sorted by source then destination neighbour — this is what makes runs of a repeated
+    ///    source *contiguous*, which is what lets the multicast de-duplication in the write pass
+    ///    compare against only the previous element instead of remembering the whole packet.
+    mod table_order {
         use super::*;
 
-        /// The three fields the group is sorted by, in the order they break ties: the destination's
-        /// (prefix, plen), then the update's destination neighbour.
-        type SortKey = (Address<NoExtension>, u8, NeighbourIndex<NoExtension>);
+        /// The three fields the table is sorted by, in the order they break ties: the router-id,
+        /// the destination's (prefix, plen), then the update's destination neighbour.
+        type SortKey = (
+            RouterId,
+            Address<NoExtension>,
+            u8,
+            NeighbourIndex<NoExtension>,
+        );
 
-        fn sort_keys(group: &RouterIdGroup<'_, '_, '_, NoExtension>) -> Vec<SortKey> {
-            group
+        fn sort_keys(updates: &UpdateTable<'_, NoExtension>) -> Vec<SortKey> {
+            updates
+                .inner
                 .iter()
-                .map(|(update, _)| {
+                .map(|update| {
                     let key = update.key();
-                    (key.prefix, key.prefix_len, key.neighbour)
+                    (
+                        key.source.router_id,
+                        *key.source.destination.prefix(),
+                        *key.source.destination.prefix_len(),
+                        key.neighbour,
+                    )
                 })
                 .collect()
         }
@@ -786,15 +622,15 @@ mod test {
         /// Every tie-break in the key, exercised at once, from a table that was filled in an order
         /// deliberately unrelated to the one it must be read back in.
         ///
-        /// Reading the expectation top to bottom: `DEST_SUPER` sorts ahead of `DEST_A` on the
-        /// prefix; its two entries are separated only by `plen`; and inside every one of those, the
-        /// destination neighbour is what orders the pair.
+        /// Reading the expectation top to bottom: rtr-a's updates come first; within them
+        /// `DEST_SUPER` sorts ahead of `DEST_A` on the prefix, its two entries are separated only
+        /// by `plen`, and inside every one of those the destination neighbour orders the pair.
         ///
         /// `DEST_A` is reached through two neighbours, and appears once all the same: an update
-        /// names a destination, so the second route's updates land on the keys the first one's
-        /// already made rather than beside them.
+        /// names a source, so the second route's updates land on the keys the first one's already
+        /// made rather than beside them.
         #[test]
-        fn is_sorted_by_destination_then_destination_neighbour() {
+        fn is_sorted_by_source_then_destination_neighbour() {
             let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
             let mut updates = UpdateTable::new_with_storage(Vec::new());
 
@@ -802,25 +638,18 @@ mod test {
             // another router sorting into the middle of rtr-a's range. Only one route per
             // destination is selected, as the selection process guarantees.
             let fixture = [
-                (DEST_C, 64, "rtr-a", NEIGHBOUR_1, true),
-                (DEST_B, 64, "rtr-b", NEIGHBOUR_1, true),
-                (DEST_A, 64, "rtr-a", NEIGHBOUR_2, false),
-                (DEST_SUPER, 64, "rtr-a", NEIGHBOUR_1, true),
-                (DEST_A, 64, "rtr-a", NEIGHBOUR_1, true),
-                (DEST_SUPER, 48, "rtr-a", NEIGHBOUR_1, true),
+                (DEST_C, 64, "rtr-a", NEIGHBOUR_1),
+                (DEST_B, 64, "rtr-b", NEIGHBOUR_1),
+                (DEST_A, 64, "rtr-a", NEIGHBOUR_2),
+                (DEST_SUPER, 64, "rtr-a", NEIGHBOUR_1),
+                (DEST_A, 64, "rtr-a", NEIGHBOUR_1),
+                (DEST_SUPER, 48, "rtr-a", NEIGHBOUR_1),
             ];
             // Inserted back to front, and each route's two updates with the higher-sorting
             // destination first, so nothing in the expectation below can be insertion order.
-<<<<<<< HEAD
             for (prefix, plen, id, advertised_by) in fixture {
                 let route = route_with(prefix, plen, id, neighbour(advertised_by));
                 routes.inner.insert(route).expect("owned storage grows");
-=======
-            for (prefix, plen, id, advertised_by, selected) in fixture {
-                let mut route = route_with(prefix, plen, id, neighbour(advertised_by));
-                route.selected = selected;
-                routes.insert(route).expect("owned storage grows");
->>>>>>> b0379f1 (chore: PR review comments)
                 for send_to in [NEIGHBOUR_2, NEIGHBOUR_1] {
                     updates
                         .add_update(update(&route, send_to))
@@ -828,36 +657,35 @@ mod test {
                 }
             }
 
-            let iface = iface_handle(IFACE_1);
-            let mut cursor = updates.router_id_groups_mut(&iface, &routes);
-            let group = cursor.next_group().expect("rtr-a should have a group");
-            assert_eq!(*group.router_id(), router_id("rtr-a"));
-
+            let (a, b) = (router_id("rtr-a"), router_id("rtr-b"));
             let (n1, n2) = (neighbour(NEIGHBOUR_1), neighbour(NEIGHBOUR_2));
             assert_eq!(
-                sort_keys(&group),
+                sort_keys(&updates),
                 alloc::vec![
                     // Same prefix as the next pair, shorter, so `plen` decides.
-                    (DEST_SUPER.into(), 48, n1),
-                    (DEST_SUPER.into(), 48, n2),
-                    (DEST_SUPER.into(), 64, n1),
-                    (DEST_SUPER.into(), 64, n2),
+                    (a, DEST_SUPER.into(), 48, n1),
+                    (a, DEST_SUPER.into(), 48, n2),
+                    (a, DEST_SUPER.into(), 64, n1),
+                    (a, DEST_SUPER.into(), 64, n2),
                     // One pair, not two, for the destination two routes lead to.
-                    (DEST_A.into(), 64, n1),
-                    (DEST_A.into(), 64, n2),
-                    // rtr-b's DEST_B sorts in here and is not part of this group.
-                    (DEST_C.into(), 64, n1),
-                    (DEST_C.into(), 64, n2),
+                    (a, DEST_A.into(), 64, n1),
+                    (a, DEST_A.into(), 64, n2),
+                    (a, DEST_C.into(), 64, n1),
+                    (a, DEST_C.into(), 64, n2),
+                    // rtr-b's DEST_B would sort between DEST_A and DEST_C on the prefix alone; the
+                    // router-id leads the key, so it lands behind all of rtr-a's instead.
+                    (b, DEST_B.into(), 64, n1),
+                    (b, DEST_B.into(), 64, n2),
                 ],
             );
         }
 
-        /// The de-duplication the write pass does is only sound because a repeated destination is a
-        /// *contiguous* run: it compares the element it is holding against the one before it, and
-        /// never looks further back. A group that merely contained the right elements in some other
-        /// order would silently emit the same destination twice.
+        /// The de-duplication the write pass does is only sound because a repeated source is a
+        /// *contiguous* run: it compares the update it is holding against the one before it, and
+        /// never looks further back. A table that merely held the right entries in some other order
+        /// would silently emit the same source twice.
         #[test]
-        fn repeated_destinations_form_contiguous_runs() {
+        fn repeated_sources_form_contiguous_runs() {
             let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
             let mut updates = UpdateTable::new_with_storage(Vec::new());
 
@@ -871,68 +699,20 @@ mod test {
                 }
             }
 
-            let iface = iface_handle(IFACE_1);
-            let mut cursor = updates.router_id_groups_mut(&iface, &routes);
-            let group = cursor.next_group().expect("rtr-a should have a group");
-
-            let destinations: Vec<(Address<NoExtension>, u8)> = group
-                .iter()
-                .map(|(update, _)| {
-                    let key = update.key();
-                    (key.prefix, key.prefix_len)
-                })
-                .collect();
-            let mut runs = destinations.clone();
+            let sources: Vec<SourceIndex<NoExtension>> =
+                updates.inner.iter().map(|u| *u.source()).collect();
+            let mut runs = sources.clone();
             runs.dedup();
             assert_eq!(
                 runs.len(),
                 2,
-                "each of the two destinations should appear as one unbroken run, got \
-                 {destinations:?}"
+                "each of the two sources should appear as one unbroken run, got {sources:?}"
             );
         }
 
-        /// A packet is built for one link, so a group must not carry an update owed on a different
-        /// one — the interface is the first thing `router_id_groups_mut` is given.
-        ///
-        /// The same route is owed to a neighbour on each interface here, which is exactly what a
-        /// periodic update produces: `poll_tick` queues every selected route to every neighbour on
-        /// every interface.
-        #[test]
-        fn contains_only_updates_owed_on_the_polled_interface() {
-            let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
-            let mut updates = UpdateTable::new_with_storage(Vec::new());
-
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            for send_to in [nbr(IFACE_1, NEIGHBOUR_1), nbr(IFACE_2, NEIGHBOUR_1)] {
-                updates
-                    .add_update(update_to(&route, send_to))
-                    .expect("owned storage grows");
-            }
-
-            for iface in [IFACE_1, IFACE_2] {
-                let handle = iface_handle(iface);
-                let mut cursor = updates.router_id_groups_mut(&handle, &routes);
-                let group = cursor
-                    .next_group()
-                    .expect("rtr-a owes this interface an update");
-
-                let destinations: Vec<NeighbourIndex<NoExtension>> = group
-                    .iter()
-                    .map(|(update, _)| *update.neighbour())
-                    .collect();
-                assert_eq!(
-                    destinations,
-                    alloc::vec![nbr(iface, NEIGHBOUR_1)],
-                    "polling {iface} should not yield the update owed on the other interface"
-                );
-            }
-        }
-
-        /// Uniqueness is what stops one neighbour being told the same route twice in one packet.
-        /// It comes from the table key rather than from the group, so re-queueing an update that is
-        /// already pending has to overwrite the entry, not sit beside it.
+        /// Uniqueness is what stops one neighbour being told the same source twice in one packet.
+        /// It comes from the table key, so re-queueing an update that is already pending has to
+        /// refresh the entry, not sit beside it.
         #[test]
         fn re_queueing_the_same_route_and_neighbour_does_not_duplicate() {
             let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
@@ -946,12 +726,8 @@ mod test {
                     .expect("owned storage grows");
             }
 
-            let iface = iface_handle(IFACE_1);
-            let mut cursor = updates.router_id_groups_mut(&iface, &routes);
-            let group = cursor.next_group().expect("rtr-a should have a group");
-
             assert_eq!(
-                group.iter().count(),
+                updates.inner.iter().count(),
                 1,
                 "three queueings of one (route, neighbour) pair are one pending update"
             );
@@ -1042,9 +818,8 @@ mod test {
         ) -> Update<NoExtension> {
             Update::new(
                 t0(),
-                route.source().prefix,
-                route.source().prefix_len,
                 send_to,
+                route,
                 mcast,
                 false,
                 RETRY_INTERVAL,
@@ -1104,7 +879,6 @@ mod test {
         /// Runs one poll against an owned buffer, which grows, so no write can fail for space.
         fn poll_seeded(
             updates: &mut UpdateTable<'_, NoExtension>,
-            routes: &RouteTable<'_, NoExtension>,
             iface: &Interface<NoExtension>,
             now: Instant,
             mut dest: DestAddr<NoExtension>,
@@ -1121,7 +895,6 @@ mod test {
                 .poll_for_updates::<NoState>(
                     now,
                     iface,
-                    routes,
                     &mut empty_sources(),
                     UPDATE_INTERVAL,
                     &mut dest,
@@ -1147,11 +920,10 @@ mod test {
         /// [`poll_seeded`] starting from a free destination and nothing else scheduled.
         fn poll(
             updates: &mut UpdateTable<'_, NoExtension>,
-            routes: &RouteTable<'_, NoExtension>,
             iface: &Interface<NoExtension>,
             now: Instant,
         ) -> Polled {
-            poll_seeded(updates, routes, iface, now, DestAddr::default(), NEVER)
+            poll_seeded(updates, iface, now, DestAddr::default(), NEVER)
         }
 
         /// The `(send_count, timer is pending)` of every update left in the table, in table order.
@@ -1171,38 +943,13 @@ mod test {
         /// No groups at all: the loop body never runs and the writer comes back untouched.
         #[test]
         fn an_empty_table_writes_nothing() {
-            let routes = empty_routes();
             let mut updates = empty_updates();
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             assert!(out.tlv_types().is_empty());
             assert_eq!(out.dest, DestAddr::None, "nothing claimed the packet");
             assert_eq!(out.next_poll, NEVER, "nothing asked for a wake-up");
-        }
-
-        /// An update whose route has been flushed has no router-id, so it opens no group and the
-        /// write pass never reaches it. There is nothing left to render its TLV from and nothing
-        /// that will ever advance its send state, so the purge takes it instead — otherwise it
-        /// would hold a table slot for the life of the router.
-        #[test]
-        fn an_update_whose_route_is_gone_writes_nothing() {
-            let routes = empty_routes();
-            let mut updates = empty_updates();
-
-            // Built from a route that is never inserted, standing in for one since flushed.
-            let orphan = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            updates
-                .add_update(update(&orphan, NEIGHBOUR_1))
-                .expect("owned storage grows");
-
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
-
-            assert!(out.tlv_types().is_empty());
-            assert!(
-                send_state(&updates, t0()).is_empty(),
-                "the orphan is purged, not left inert"
-            );
         }
 
         /// An update owed on another interface is not in this interface's group, so the pass has
@@ -1218,7 +965,7 @@ mod test {
                 .add_update(update_to(&route, nbr(IFACE_2, NEIGHBOUR_1)))
                 .expect("owned storage grows");
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             assert!(out.tlv_types().is_empty());
             assert_eq!(send_state(&updates, t0()), alloc::vec![(1, false)]);
@@ -1244,7 +991,7 @@ mod test {
             pending.send_timer.restart(t0());
             updates.add_update(pending).expect("owned storage grows");
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             assert!(out.tlv_types().is_empty(), "nothing was due");
             assert_eq!(out.next_poll, RETRY_INTERVAL, "woken when the timer fires");
@@ -1271,7 +1018,6 @@ mod test {
             let sooner = RETRY_INTERVAL / 2;
             let out = poll_seeded(
                 &mut updates,
-                &routes,
                 &interface(IFACE_1),
                 t0(),
                 DestAddr::default(),
@@ -1301,7 +1047,6 @@ mod test {
 
             let out = poll_seeded(
                 &mut updates,
-                &routes,
                 &interface(IFACE_1),
                 t0(),
                 DestAddr::Multicast,
@@ -1330,7 +1075,6 @@ mod test {
 
             let out = poll_seeded(
                 &mut updates,
-                &routes,
                 &interface(IFACE_1),
                 t0(),
                 DestAddr::Unicast(NEIGHBOUR_2.into()),
@@ -1356,7 +1100,6 @@ mod test {
 
             let out = poll_seeded(
                 &mut updates,
-                &routes,
                 &interface(IFACE_1),
                 t0(),
                 DestAddr::Unicast(NEIGHBOUR_1.into()),
@@ -1387,7 +1130,7 @@ mod test {
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), false, 1))
                 .expect("owned storage grows");
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             assert_eq!(out.dest, DestAddr::Unicast(NEIGHBOUR_1.into()));
         }
@@ -1405,7 +1148,7 @@ mod test {
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), true, 1))
                 .expect("owned storage grows");
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             assert_eq!(out.dest, DestAddr::Multicast);
         }
@@ -1429,7 +1172,7 @@ mod test {
                 .add_update(update(&route, NEIGHBOUR_1))
                 .expect("owned storage grows");
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             assert_eq!(
                 out.tlv_types(),
@@ -1460,7 +1203,7 @@ mod test {
                     .expect("owned storage grows");
             }
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             // rtr-a's two updates behind one Router-Id TLV, then rtr-b's one behind its own.
             assert_eq!(
@@ -1493,7 +1236,7 @@ mod test {
                 .add_update(update(&route, NEIGHBOUR_1))
                 .expect("owned storage grows");
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             assert!(
                 !out.tlv_types().contains(&NextHopSlice::TYPE_ID),
@@ -1514,7 +1257,7 @@ mod test {
                 .add_update(update(&route, NEIGHBOUR_1))
                 .expect("owned storage grows");
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             assert_eq!(
                 out.tlv_types(),
@@ -1564,7 +1307,7 @@ mod test {
                 .add_update(update(&route, NEIGHBOUR_1))
                 .expect("owned storage grows");
 
-            let out = poll(&mut updates, &routes, &v6_only_interface(IFACE_1), t0());
+            let out = poll(&mut updates, &v6_only_interface(IFACE_1), t0());
 
             assert!(
                 out.tlv_types().is_empty(),
@@ -1594,7 +1337,7 @@ mod test {
             }
 
             // IFACE_1 has no IPv4 address, so its update is dropped.
-            let out = poll(&mut updates, &routes, &v6_only_interface(IFACE_1), t0());
+            let out = poll(&mut updates, &v6_only_interface(IFACE_1), t0());
             assert!(out.tlv_types().is_empty());
             assert_eq!(
                 send_state(&updates, t0()),
@@ -1604,7 +1347,7 @@ mod test {
 
             // IFACE_2 is dual stack, so the survivor still goes out — with the Next-Hop TLV that
             // names the v4 address the other link did not have.
-            let out = poll(&mut updates, &routes, &interface(IFACE_2), t0());
+            let out = poll(&mut updates, &interface(IFACE_2), t0());
             assert_eq!(
                 out.tlv_types(),
                 alloc::vec![
@@ -1632,7 +1375,7 @@ mod test {
                 .add_update(update(&route, NEIGHBOUR_1))
                 .expect("owned storage grows");
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             assert_eq!(
                 out.tlv_types(),
@@ -1659,7 +1402,7 @@ mod test {
                     .expect("owned storage grows");
             }
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             let next_hops = out
                 .tlv_types()
@@ -1695,7 +1438,7 @@ mod test {
                     .expect("owned storage grows");
             }
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             assert_eq!(
                 out.tlv_types(),
@@ -1727,7 +1470,7 @@ mod test {
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), true, 2))
                 .expect("owned storage grows");
 
-            let out = poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            let out = poll(&mut updates, &interface(IFACE_1), t0());
 
             assert!(out.tlv_types().contains(&UpdateSlice::TYPE_ID));
             assert_eq!(
@@ -1750,7 +1493,7 @@ mod test {
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), true, 1))
                 .expect("owned storage grows");
 
-            poll(&mut updates, &routes, &interface(IFACE_1), t0());
+            poll(&mut updates, &interface(IFACE_1), t0());
 
             assert!(
                 send_state(&updates, t0()).is_empty(),
@@ -1773,7 +1516,6 @@ mod test {
             // Claimed for multicast, which a unicast-only update may not ride.
             poll_seeded(
                 &mut updates,
-                &routes,
                 &interface(IFACE_1),
                 t0(),
                 DestAddr::Multicast,
@@ -1822,7 +1564,6 @@ mod test {
                 .poll_for_updates::<NoState>(
                     t0(),
                     &interface(IFACE_1),
-                    &routes,
                     &mut empty_sources(),
                     UPDATE_INTERVAL,
                     &mut dest,

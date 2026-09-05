@@ -16,6 +16,8 @@ where
 {
     type Error: Error + MaybeDefmt;
     type Encoding: AddressEncodingExt;
+    /// Return a human readable name for this address type.
+    fn address_type(&self) -> &'static str;
     /// Return the big endian byte representation of the address.
     fn as_octets(&self) -> &[u8];
     /// Create the address type from un-compressed bytes.
@@ -34,6 +36,9 @@ impl AddressExt for NoExtension {
         unreachable!("The NoExtension struct should not be constructable.")
     }
     fn encoding(&self) -> Self::Encoding {
+        unreachable!("The NoExtension struct should not be constructable.")
+    }
+    fn address_type(&self) -> &'static str {
         unreachable!("The NoExtension struct should not be constructable.")
     }
 }

@@ -3,6 +3,7 @@ use crate::data_structures::neighbour::{Neighbour, NeighbourIndex};
 use crate::data_structures::route::RouteError;
 use crate::data_structures::source::SourceIndex;
 use crate::data_types::address::Address;
+use crate::data_types::destination::RouteDestination;
 use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
@@ -66,8 +67,7 @@ pub struct Route<A: AddressExt> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct RouteIndex<A: AddressExt> {
-    pub(crate) prefix: Address<A>,
-    pub(crate) prefix_len: u8,
+    pub(crate) destination: RouteDestination<A>,
     pub(crate) neighbour: NeighbourIndex<A>,
 }
 
@@ -75,18 +75,10 @@ impl<A: AddressExt> InternallyKeyed for Route<A> {
     type Key = RouteIndex<A>;
     fn key(&self) -> Self::Key {
         RouteIndex {
-            prefix: self.source.prefix,
-            prefix_len: self.source.prefix_len,
+            destination: self.source().destination,
             neighbour: self.neighbour,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub(crate) struct Destination<A: AddressExt> {
-    pub(crate) prefix: Address<A>,
-    pub(crate) prefix_len: u8,
 }
 
 impl<A: AddressExt> Route<A> {
@@ -117,11 +109,8 @@ impl<A: AddressExt> Route<A> {
         })
     }
 
-    pub(crate) fn destination(&self) -> Destination<A> {
-        Destination {
-            prefix: self.source.prefix,
-            prefix_len: self.source.prefix_len,
-        }
+    pub(crate) fn destination(&self) -> &RouteDestination<A> {
+        &self.source().destination
     }
 
     pub(crate) fn source(&self) -> &SourceIndex<A> {

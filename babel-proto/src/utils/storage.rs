@@ -238,9 +238,6 @@ where
         self.0.get_mut(idx)?.value_mut()
     }
 
-<<<<<<< HEAD
-    pub(crate) fn iter<'a>(&'a self) -> impl Iterator<Item = &'a S::Value>
-=======
     /// The number of slots the table holds, occupied or not.
     ///
     /// Paired with [`Self::get_mut_slot_at`] to walk the table by position, which a caller needs
@@ -249,17 +246,17 @@ where
         self.0.len()
     }
 
-    /// Mutably borrows the entry in slot `idx`, or `None` if that slot is free or out of range.
+    /// Mutably borrows the value in slot `idx`, or `None` if that slot holds no value or is out of
+    /// range.
     ///
     /// Positions are not stable across an insert or a remove — both re-sort the table — so this is
     /// only for a walk that does not modify the table's shape.
-    pub(crate) fn get_mut_slot_at(&mut self, idx: usize) -> Option<&mut V> {
+    pub(crate) fn get_mut_slot_at(&mut self, idx: usize) -> Option<&mut S::Value> {
         check_sorted!(self);
-        self.0.get_mut(idx)?.as_mut()
+        self.0.get_mut(idx)?.value_mut()
     }
 
-    pub(crate) fn iter<'a>(&'a self) -> impl Iterator<Item = &'a V>
->>>>>>> 1c9f987 (feature: Modifying when computed metrics are done)
+    pub(crate) fn iter<'a>(&'a self) -> impl Iterator<Item = &'a S::Value>
     where
         S::Value: 'a,
     {

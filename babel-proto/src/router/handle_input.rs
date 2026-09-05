@@ -4,6 +4,7 @@ use crate::data_structures::route::{Route, RouteIndex};
 use crate::data_structures::source::{SourceIndex, SourceTable};
 use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
+use crate::data_types::destination::RouteDestination;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -14,7 +15,7 @@ use crate::packet::parser::Parser;
 use crate::packet::tlv::reader::TlvReader;
 use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, UpdateSlice};
 use crate::router::BabelRouter;
-use crate::utils::{Instant, InternallyKeyed};
+use crate::utils::{Duration, Instant, InternallyKeyed, Timer};
 
 impl<'storage, A, P> BabelRouter<'storage, P, A>
 where
@@ -230,6 +231,10 @@ where
             update
         );
 
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // The following seactions marked with ~ are direct quotes from section 3.5.3:
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
         // Fetch the neighbour the update is from.
         let idx = NeighbourIndex {
             iface: *interface.handle(),
@@ -240,6 +245,16 @@ where
             .inner
             .get_by_key(&idx)
             .ok_or(BabelError::TlvFromUnknownNeighbour("update_tlv", idx))?;
+
+        //  ___ _      _   _  _ _  _____ _____
+        // | _ ) |    /_\ | \| | |/ / __|_   _|
+        // | _ \ |__ / _ \| .` | ' <| _|  | |
+        // |___/____/_/ \_\_|\_|_|\_\___| |_|
+        //
+        //  ___ ___ _____ ___    _   ___ _____ ___ ___  _  _
+        // | _ \ __|_   _| _ \  /_\ / __|_   _|_ _/ _ \| \| |
+        // |   / _|  | | |   / / _ \ (__  | |  | | (_) | .` |
+        // |_|_\___| |_| |_|_\/_/ \_\___| |_| |___\___/|_|\_|
 
         if update.is_blanket_retraction() {
             // Section 4.6.9: "If the metric is infinite and AE is 0, Plen and Omitted MUST both be
@@ -265,7 +280,7 @@ where
                         now,
                         &self.iface_table,
                         &self.neighbor_table,
-                        route.key(),
+                        route,
                         None,
                     )?;
                 }
@@ -273,6 +288,11 @@ where
             }
             return Ok(neighbour.key());
         }
+
+        //  ___ ___ _____ ___    _   ___ _____ ___ ___  _  _
+        // | _ \ __|_   _| _ \  /_\ / __|_   _|_ _/ _ \| \| |
+        // |   / _|  | | |   / / _ \ (__  | |  | | (_) | .` |
+        // |_|_\___| |_| |_|_\/_/ \_\___| |_| |___\___/|_|\_|
 
         if update.is_retraction() {
             // A retraction only has to name the entry it retracts. Section 4.6.9: "the router-id,
@@ -281,8 +301,7 @@ where
             let prefix = parser.resolve_address(&update)?;
 
             if let Some(route) = self.route_table.inner.get_mut_by_key(&RouteIndex {
-                prefix,
-                prefix_len: update.plen(),
+                destination: RouteDestination::new(prefix, update.plen())?,
                 neighbour: neighbour.key(),
             }) {
                 // Only send an update if the route is selected.
@@ -291,49 +310,205 @@ where
                         now,
                         &self.iface_table,
                         &self.neighbor_table,
-                        route.key(),
+                        route,
                         None,
                     )?;
                 }
                 route.retract();
                 self.route_selection_due = true;
+            } else {
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                // if the metric is infinite (the update is a retraction of a route we do not know
+                // about), the update is ignored;
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
             }
+
             return Ok(neighbour.key());
         }
 
         // Resolve the update (this also updates the parser state)
         let resolved_update = parser.handle_update(update)?;
 
+        let source = SourceIndex {
+            router_id: resolved_update.router_id,
+            destination: resolved_update.destination,
+        };
+
         // Check if the update is feasible against the source table.
         let feasible = self.source_table.is_feasible(
-            &SourceIndex {
-                router_id: resolved_update.router_id,
-                prefix: resolved_update.address,
-                prefix_len: resolved_update.slice.plen(),
-            },
+            &source,
             &resolved_update.slice.metric(),
             &resolved_update.slice.seqno(),
         );
 
-        // Aquire the route
-        let send_update =
-            self.route_table
-                .aquire_route(now, interface, neighbour, feasible, &resolved_update)?;
+        //    _   ___ ___  _   _ ___ ___ ___
+        //   /_\ / __/ _ \| | | |_ _| _ \ __|
+        //  / _ \ (_| (_) | |_| || ||   / _|
+        // /_/ \_\___\__\_\\___/|___|_|_\___|
 
-        // If route aquisition requires an update, send it.
-        if send_update {
-            self.update_table.broadcast_route_update(
-                now,
-                &self.iface_table,
-                &self.neighbor_table,
-                RouteIndex {
-                    prefix: resolved_update.address,
-                    prefix_len: resolved_update.slice.plen(),
-                    neighbour: neighbour.key(),
-                },
-                None,
-            )?;
-        }
+        // Aquire the route
+        match self.route_table.inner.get_mut_by_key(&RouteIndex {
+            destination: resolved_update.destination,
+            neighbour: neighbour.key(),
+        }) {
+            // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            // When a Babel node receives an update (prefix, plen, router-id, seqno, metric) from
+            // a neighbour neigh, it checks whether it already has a route table entry indexed by
+            // (prefix, plen, neigh).
+            // If no such entry exists:
+            // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            None => {
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                // if the update is unfeasible, it **MAY** be ignored
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                if !feasible {
+                    // TODO: Local setting?
+                }
+
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                // otherwise, a new entry is created in the route table, indexed by (prefix, plen,
+                // neigh), with source equal to (prefix, plen, router-id), seqno equal to seqno,
+                // and an advertised metric equal to the metric carried by the update.
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+                if let Err(err) = self.route_table.inner.insert(Route::new(
+                    now,
+                    SourceIndex {
+                        destination: resolved_update.destination,
+                        router_id: resolved_update.router_id,
+                    },
+                    neighbour.key(),
+                    resolved_update.slice.seqno(),
+                    resolved_update.slice.metric(),
+                    // The advertised metric is given as the computed metric for now, Metric
+                    // computation for this neightbour is deferred to the end of `handle_intput()`.
+                    resolved_update.slice.metric(),
+                    resolved_update.next_hop,
+                    // Never add new routes as selected as route selection will be run after each
+                    // update.
+                    false,
+                    resolved_update.slice.interval(),
+                    self.route_table.route_expiry_time,
+                )?) {
+                    b_debug!("Route table full - Discarded: {:?}", err);
+                }
+                self.route_selection_due = true;
+            }
+            // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            // If such an entry exists:
+            // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            Some(route) => {
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                // if the entry is currently selected, the update is unfeasible, and the router-id
+                // of the update is equal to the router-id of the entry, then the update **MAY**
+                // be ignored
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                if route.selected
+                    && !feasible
+                    && route.source().router_id == resolved_update.router_id
+                {
+                    // TODO: Local setting?
+                } else {
+                    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                    // otherwise, the entry's sequence number, advertised metric, metric, and
+                    // router-id are updated,
+                    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+                    // ANALYSIS:
+                    // The inverse of the if statement above is worth stating and examining
+                    // (condition by condition) what would cause this block to execute in order to
+                    // understand the implicit behaviors of this block.
+
+                    // The inverse of the statement is:
+
+                    // If the route is NOT selected
+                    //   OR the update is feasible
+                    //   OR the route does not match the update router ID.
+
+                    // 1. IF the route is selected THEN the update is either feasible OR the router
+                    // id has changed.
+                    //   a. In the case that it is only feasible, then you want to update your
+                    //   metric because this is the entire premise the Babel algorithm is based on.
+                    //   Only update your metric when feasibility is better.
+                    //   b. In the case that it is a router ID change, that means the originator of
+                    //     the Seqno is no longer the same as the previous Seqno. So this node MUST
+                    //     update its metric.
+                    //   c. Since both of those cases require an update to the route, they are
+                    //     collapsed into one.
+
+                    // 2. IF the update is NOT feasible THEN the route is not selected OR the
+                    // router id has changed.
+                    //   d. In the case the route is not selected, we want to unconditionally keep
+                    //     track of it. This is a method for keeping track of unselected routes to
+                    //     allow for fast failover if a route fails.
+                    //   e. The router ID change case is covered by b. above.
+                    //   f. The union case is covered by c. above.
+
+                    // 3. IF the router ID has NOT changed.
+                    //   g. The case of the route not being selected is covered by d. above.
+                    //   h. The case of a feasible update is covered by a. above.
+                    //   i. The union case is covered by c. above.
+
+                    // TL;DR:
+                    // - Only update selected routes when update is feasible.
+                    // - The premise of feasibility relies on the source of Seqno, which is tracked
+                    // by router-id, if this changes then Seqno and metric require a hard reset.
+                    // - Keep track of all non-selected routes (without regard to feasibility) for
+                    // fast failover.
+
+                    // The new hold time is built before the entry is touched. An Interval the
+                    // timer rejects has to leave the entry exactly as it was, rather than
+                    // half-updated with a new metric under the old expiry and the deselect below
+                    // never reached.
+                    let expiry = Timer::from_duration(
+                        now,
+                        Duration::from(resolved_update.slice.interval())
+                            * self.route_table.route_expiry_time,
+                    )?;
+
+                    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                    // and if the advertised metric is not infinite, the route's expiry
+                    // timer is reset to a small multiple of the interval value included in the
+                    // update (see "Route Expiry time" in Appendix B for
+                    // suggested values).
+                    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                    route.expiry = expiry;
+
+                    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                    // If the update is unfeasible, then the (now unfeasible) entry MUST be
+                    // immediately unselected.
+                    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                    if !feasible {
+                        route.selected = false;
+                    }
+
+                    if route.source().router_id != resolved_update.router_id {
+                        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                        // If the update caused the router-id of the entry to change, an update
+                        // (possibly a retraction) MUST be sent in a timely manner as described in
+                        // Section 3.7.2.
+                        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                        route.set_router_id(resolved_update.router_id);
+
+                        // If the router ID for this route was changed and it was selected, an
+                        // update MUST be sent.
+                        if route.selected {
+                            self.update_table.broadcast_route_update(
+                                now,
+                                &self.iface_table,
+                                &self.neighbor_table,
+                                route,
+                                None,
+                            )?;
+                        }
+                    }
+
+                    route.seqno = resolved_update.slice.seqno();
+
+                    route.set_advertised_metric(resolved_update.slice.metric());
+                }
+            }
+        };
 
         Ok(neighbour.key())
     }
@@ -341,8 +516,6 @@ where
     /// The recommended route selection procedure as defined in
     /// [Section 3.6](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection)
     /// and [Appendix A.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection)
-    ///
-    /// Returns `true` if the selection process triggered an update.
     pub(super) fn select_routes(&mut self, now: Instant) {
         // A shared borrow of one field while `route_table` is borrowed mutably below.
         let source_table = &self.source_table;
@@ -418,7 +591,7 @@ where
                         now,
                         &self.iface_table,
                         &self.neighbor_table,
-                        winner.key(),
+                        &winner,
                         None,
                     )
                 {
@@ -791,17 +964,26 @@ mod test {
         }
     }
 
-    /// The update table key an update for `prefix` owed to `send_to` lands under.
+    fn dest(prefix: Ipv6Addr, plen: u8) -> RouteDestination<NoExtension> {
+        RouteDestination::new(prefix.into(), plen).expect("bad destination")
+    }
+
+    /// The update table key an update for `prefix`, originated by `origin`, owed to `send_to`
+    /// lands under.
     ///
-    /// A queued update names a *destination*, not one neighbour's route to it — which route the
-    /// TLV is rendered from is decided when the packet is written, not when the update is queued.
+    /// A queued update names a *source* — the destination plus the router-id that originated it —
+    /// not one neighbour's route to it. Which route the TLV is rendered from is decided when the
+    /// packet is written, not when the update is queued.
     fn update_key(
+        origin: [u8; 8],
         prefix: Ipv6Addr,
         send_to: NeighbourIndex<NoExtension>,
     ) -> UpdateIndex<NoExtension> {
         UpdateIndex {
-            prefix: prefix.into(),
-            prefix_len: PLEN,
+            source: SourceIndex {
+                router_id: RouterId::from(&origin),
+                destination: dest(prefix, PLEN),
+            },
             neighbour: send_to,
         }
     }
@@ -815,8 +997,7 @@ mod test {
         plen: u8,
     ) -> Option<Route<NoExtension>> {
         let idx = RouteIndex {
-            prefix: prefix.into(),
-            prefix_len: plen,
+            destination: dest(prefix, plen),
             neighbour: NeighbourIndex {
                 iface,
                 addr: neighbour.into(),
@@ -1165,8 +1346,7 @@ mod test {
         let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
             .expect("the update should have created a route");
 
-        assert_eq!(route.source().prefix, PREFIX_A.into());
-        assert_eq!(route.source().prefix_len, PLEN);
+        assert_eq!(route.source().destination, dest(PREFIX_A, PLEN));
         assert_eq!(
             route.source().router_id,
             RouterId::from(&ORIGIN_1),
@@ -1414,7 +1594,7 @@ mod test {
             .expect("the link-local host route should have been acquired");
 
             assert_eq!(
-                route.source().prefix_len,
+                *route.source().destination.prefix_len(),
                 128,
                 "the entry records the whole prefix, not the part that reached the wire"
             );
@@ -1449,7 +1629,7 @@ mod test {
         )
         .expect("fe80::/64 should have been acquired");
 
-        assert_eq!(route.source().prefix_len, 64);
+        assert_eq!(*route.source().destination.prefix_len(), 64);
     }
 
     //  ___  ___  _   _ _____ ___   ___ ___ ___ ___ ___ ___ _  _
@@ -2373,17 +2553,14 @@ mod test {
     fn selection_triggers(
         r: &mut BabelRouter<'static>,
         now: Instant,
-    ) -> Vec<(Address<NoExtension>, u8)> {
+    ) -> Vec<RouteDestination<NoExtension>> {
         r.update_table.inner.retain(|_| false);
         r.select_routes(now);
-        let mut destinations: Vec<(Address<NoExtension>, u8)> = r
+        let mut destinations: Vec<RouteDestination<NoExtension>> = r
             .update_table
             .inner
             .iter()
-            .map(|update| {
-                let key = update.key();
-                (key.prefix, key.prefix_len)
-            })
+            .map(|update| update.key().source.destination)
             .collect();
         destinations.dedup();
         destinations
@@ -2489,8 +2666,7 @@ mod test {
                 .inner
                 .get_by_key(&SourceIndex {
                     router_id: RouterId::from(&ORIGIN_1),
-                    prefix: PREFIX_A.into(),
-                    prefix_len: PLEN,
+                    destination: dest(PREFIX_A, PLEN),
                 })
                 .is_some(),
             "sending the update should have recorded the feasibility distance"
@@ -2815,7 +2991,7 @@ mod test {
 
         assert_eq!(
             selection_triggers(&mut r, t0),
-            alloc::vec![(PREFIX_A.into(), PLEN)],
+            alloc::vec![dest(PREFIX_A, PLEN)],
             "the destination moved to a different route, which is what triggers an update"
         );
         assert!(
@@ -2926,7 +3102,7 @@ mod test {
 
         assert_eq!(
             selection_triggers(&mut r, t0),
-            alloc::vec![(PREFIX_A.into(), PLEN)],
+            alloc::vec![dest(PREFIX_A, PLEN)],
             "a destination going from nothing to a route is a change worth an update"
         );
         assert!(
@@ -3138,7 +3314,7 @@ mod test {
 
         assert_eq!(
             selection_triggers(&mut r, t1),
-            alloc::vec![(PREFIX_A.into(), PLEN)],
+            alloc::vec![dest(PREFIX_A, PLEN)],
             "the destination moves off the incumbent, which is what triggers an update"
         );
         assert!(
@@ -3305,9 +3481,9 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
                 "the newly selected route, owed to every neighbour on the link"
             );
@@ -3332,9 +3508,9 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
                 "the route neighbour 1 advertised, owed to the whole link including neighbour 1"
             );
@@ -3457,9 +3633,10 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    // The update names the *new* router-id: the entry's source moved with it.
+                    update_key(ORIGIN_2, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(ORIGIN_2, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(ORIGIN_2, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
             );
         }
@@ -3494,9 +3671,9 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
             );
         }
@@ -3552,12 +3729,12 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
-                    update_key(PREFIX_B, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(PREFIX_B, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(PREFIX_B, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_B, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_B, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_B, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
                 "both destinations owed to the whole link, once each — the failover selection \
                  queued for PREFIX_A lands on the same key the relay already made"
@@ -3614,9 +3791,9 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
             );
         }
@@ -3655,9 +3832,9 @@ mod test {
             assert_eq!(
                 pending(&r),
                 alloc::vec![
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
                 "only the route that held the destination is retracted onwards"
             );
