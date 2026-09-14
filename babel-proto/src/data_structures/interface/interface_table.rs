@@ -2,7 +2,7 @@ use crate::data_structures::interface::{
     Interface, InterfaceConfig, InterfaceError, InterfaceHandle,
 };
 use crate::extension::address::AddressExt;
-use crate::utils::storage::Table;
+use crate::utils::storage::{InsertError, Table};
 use crate::utils::{Instant, ManagedSlice};
 
 pub struct InterfaceTable<'storage, A: AddressExt> {
@@ -39,13 +39,13 @@ impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {
 
         // Insert into the interface table
         match self.inner.insert(interface) {
-            Ok(v) if v.is_some() => {
-                // This should be unreachable.
+            Ok(()) => Ok(handle),
+            Err(InsertError::Duplicate(_)) => {
+                // This should be unreachable, the handle was checked above.
                 b_debug!("Duplicate interface registered");
                 Err(InterfaceError::DuplicateInterfaceId(handle))
             }
-            Ok(_) => Ok(handle),
-            Err(_err) => {
+            Err(InsertError::Full(_)) => {
                 b_debug!("Interface table is full");
                 Err(InterfaceError::Full)
             }

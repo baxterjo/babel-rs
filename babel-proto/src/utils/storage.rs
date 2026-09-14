@@ -66,6 +66,17 @@ impl<V: InternallyKeyed> TableSlot for Option<V> {
     }
 }
 
+/// Why a value could not be placed into a [`Table`].
+///
+/// Both variants return the value that was NOT inserted.
+#[derive(Debug)]
+pub(crate) enum InsertError<V> {
+    /// Every slot is occupied and the storage cannot grow.
+    Full(V),
+    /// An entry with this key is already present.
+    Duplicate(V),
+}
+
 /// A value that is built from pre-allocated memory and can give it back.
 pub(crate) trait Recycle: Sized {
     type Storage: Default;
@@ -200,47 +211,45 @@ where
         Self(storage.into())
     }
 
-    pub(crate) fn insert(&mut self, value: S::Value) -> Result<Option<S::Value>, S::Value> {
+    /// Places a value in a vacant slot, keyed by the value itself.
+    pub(crate) fn insert(&mut self, value: S::Value) -> Result<(), InsertError<S::Value>> {
         check_sorted!(self);
         // Look for an existing matching element in the slice.
-        let old_opt = match locate(&self.0[..], &value.key()) {
-            Some(_idx) => {
-                // If it exists, return the new value as an error.
-                return Err(value);
-            }
-            None => {
-                // If it does not exist
-                match &mut self.0 {
-                    ManagedSlice::Borrowed(borrowed) => {
-                        // If the slice is borrowed, find the first vacant slot in the slice.
-                        let idx_opt = borrowed.iter().position(|x| x.is_vacant());
-                        match idx_opt {
-                            Some(idx) => {
-                                // If there is space in the slice, insert the value.
-                                borrowed[idx].occupy(value);
-                            }
-                            None => {
-                                // If the slice is borrowed then it has pre-allocated capacity, so
-                                // we cannot insert.
+        if locate(&self.0[..], &value.key()).is_some() {
+            // If it exists, hand the new value back rather than displacing the old one.
+            return Err(InsertError::Duplicate(value));
+        }
 
-                                // If it is full, there will be no elements that contain `None`,
-                                // return the value that would have been put in.
-                                return Err(value);
-                            }
-                        }
+        // If it does not exist
+        match &mut self.0 {
+            ManagedSlice::Borrowed(borrowed) => {
+                // If the slice is borrowed, find the first vacant slot in the slice.
+                let idx_opt = borrowed.iter().position(|x| x.is_vacant());
+                match idx_opt {
+                    Some(idx) => {
+                        // If there is space in the slice, insert the value.
+                        borrowed[idx].occupy(value);
                     }
-                    #[cfg(any(feature = "std", feature = "alloc"))]
-                    ManagedSlice::Owned(owned) => {
-                        // If the slice is owned push the item.
-                        owned.push(S::new_occupied(value));
+                    None => {
+                        // If the slice is borrowed then it has pre-allocated capacity, so
+                        // we cannot insert.
+
+                        // If it is full, there will be no vacant elements, return the value
+                        // that would have been put in.
+                        return Err(InsertError::Full(value));
                     }
                 }
-                None
             }
-        };
+            #[cfg(any(feature = "std", feature = "alloc"))]
+            ManagedSlice::Owned(owned) => {
+                // If the slice is owned push the item.
+                owned.push(S::new_occupied(value));
+            }
+        }
+
         // Ensure the slice is sorted after modifying it.
         my_sort(&mut self.0[..]);
-        Ok(old_opt)
+        Ok(())
     }
 
     pub(crate) fn free(&mut self, key: &<S::Value as InternallyKeyed>::Key) {
@@ -343,6 +352,7 @@ where
     }
 
     pub(crate) fn flush(&mut self) {
+        // If the slice is owned, then some memory can be reclaimed.
         #[cfg(any(feature = "std", feature = "alloc"))]
         if let ManagedSlice::Owned(owned) = &mut self.0 {
             owned.retain(|e| e.value().is_some());

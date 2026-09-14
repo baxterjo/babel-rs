@@ -4,7 +4,7 @@ use crate::data_structures::neighbour::{NeighbourConfig, NeighbourError, Neighbo
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
-use crate::utils::storage::Table;
+use crate::utils::storage::{InsertError, Table};
 use crate::utils::{Instant, InternallyKeyed, ManagedSlice};
 
 pub struct NeighbourTable<'storage, A>
@@ -92,12 +92,12 @@ where
         b_debug!("Registering neighbour: {:?}", index);
 
         match self.inner.insert(neighbour) {
-            Ok(v) if v.is_some() => {
+            Ok(()) => Ok(()),
+            Err(InsertError::Duplicate(_)) => {
                 b_debug!("Duplicate neighbour registered");
                 Err(NeighbourError::DuplicateNeighbour(index))
             }
-            Ok(_) => Ok(()),
-            Err(_err) => {
+            Err(InsertError::Full(_)) => {
                 b_debug!("Neighbour table is full");
                 Err(NeighbourError::Full)
             }
@@ -164,5 +164,91 @@ where
             ihu
         );
         neighbour.handle_ihu(now, ihu, interface.ihu_hold_time_multiple)
+    }
+}
+
+#[cfg(all(test, any(feature = "std", feature = "alloc")))]
+mod test {
+    use alloc::vec::Vec;
+    use core::net::Ipv6Addr;
+
+    use super::*;
+    use crate::data_types::Interval;
+    use crate::extension::NoExtension;
+    use crate::utils::Duration;
+
+    const NEIGHBOUR_1: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
+
+    fn iface_handle() -> InterfaceHandle {
+        InterfaceHandle::try_from("eth0").expect("bad interface handle")
+    }
+
+    fn index(addr: Ipv6Addr) -> NeighbourIndex<NoExtension> {
+        NeighbourIndex {
+            iface: iface_handle(),
+            addr: addr.into(),
+        }
+    }
+
+    fn config(addr: Ipv6Addr) -> NeighbourConfig<NoExtension> {
+        NeighbourConfig::spec_default(iface_handle(), addr.into())
+    }
+
+    /// Registering an index the table already holds is a duplicate, not a full table.
+    ///
+    /// The two are worth keeping apart: `Full` says the deployment under-sized its storage, while
+    /// `DuplicateNeighbour` says the caller asked for something it already has and hands back the
+    /// index it can use to reach it. [`Table::insert`] reports both through the same `Err`, so
+    /// nothing but this mapping stops a duplicate from being blamed on capacity.
+    ///
+    /// [`Table::insert`]: crate::utils::storage::Table::insert
+    #[test]
+    fn registering_the_same_neighbour_twice_is_a_duplicate_not_a_full_table() {
+        let mut table: NeighbourTable<'_, NoExtension> =
+            NeighbourTable::new_with_storage(Vec::new());
+        let now = Instant::from_secs(0);
+
+        table
+            .add_neighbour(now, config(NEIGHBOUR_1))
+            .expect("the first registration should succeed");
+
+        let err = table
+            .add_neighbour(now, config(NEIGHBOUR_1))
+            .expect_err("the second registration should be rejected");
+
+        assert!(
+            matches!(err, NeighbourError::DuplicateNeighbour(idx) if idx == index(NEIGHBOUR_1)),
+            "a duplicate on owned storage, which can always grow, must not report Full: {err:?}"
+        );
+    }
+
+    /// A rejected duplicate leaves the table exactly as it was.
+    ///
+    /// The incoming config is dropped rather than written over the entry already there, so the
+    /// live neighbour keeps the state it has accumulated — hello history, costs, timers — instead
+    /// of being silently reset by a stray re-registration.
+    #[test]
+    fn a_rejected_duplicate_leaves_the_existing_neighbour_untouched() {
+        let mut table: NeighbourTable<'_, NoExtension> =
+            NeighbourTable::new_with_storage(Vec::new());
+        let now = Instant::from_secs(0);
+
+        // The spec default asks for no unicast hellos, so the entry starts without that timer.
+        table
+            .add_neighbour(now, config(NEIGHBOUR_1))
+            .expect("the first registration should succeed");
+
+        // Re-register the same index asking for unicast hellos. If the duplicate were to
+        // overwrite, the surviving entry would carry this timer.
+        let mut ucast_config = config(NEIGHBOUR_1);
+        ucast_config.ucast_hello_interval = Some(Interval::from_duration(Duration::from_secs(600)));
+        let _ = table.add_neighbour(now, ucast_config);
+
+        assert_eq!(table.iter().count(), 1, "the duplicate must not add a row");
+        let neighbour = table.get(&index(NEIGHBOUR_1)).expect("registered above");
+        assert!(
+            neighbour.pending.ucast_hello.is_none(),
+            "the original entry should have survived, not been replaced by the incoming config"
+        );
     }
 }

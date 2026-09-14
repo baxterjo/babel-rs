@@ -29,19 +29,30 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
     }
 
     /// Adds an update destined to a neibour.
+    ///
+    /// An update already pending for the same (route, neighbour) pair is refreshed in place rather
+    /// than duplicated, since the pair is the table's key. Periodic updates lean on this: every
+    /// poll re-queues every selected route to every neighbour, so most of what arrives here is
+    /// already pending.
     pub(crate) fn add_update(&mut self, update: Update<A>) -> Result<(), UpdateError> {
-        if let Some(existing_update) = self.inner.get_by_key(&update.key())
-            && existing_update.send_count > update.send_count
-        {
-            // If the exising send count is higher than the incoming send count then we can
-            // assume a higher priority update is in progress.
+        if let Some(existing_update) = self.inner.get_mut_by_key(&update.key()) {
+            if existing_update.send_count > update.send_count {
+                // If the exising send count is higher than the incoming send count then we can
+                // assume a higher priority update is in progress.
+                return Ok(());
+            }
+
+            // Otherwise the pending update is superseded by this one.
+            existing_update.refresh_from(update);
             return Ok(());
-        } else {
-            // Otherwise either the update didn't exist or can be overwritten.
-            self.inner
-                .insert(update)
-                .map_err(|_| UpdateError::UpdateTableFull)?;
         }
+
+        // The update is not pending yet, so it needs a slot of its own. A duplicate is
+        // unreachable, the key was just looked up above.
+        self.inner.insert(update).map_err(|_| {
+            b_debug!("Update table is full");
+            UpdateError::UpdateTableFull
+        })?;
 
         Ok(())
     }
@@ -528,7 +539,7 @@ mod test {
 
         for (prefix, id) in [(DEST_A, "rtr-a"), (DEST_B, "rtr-b"), (DEST_C, "rtr-a")] {
             let route = route(prefix, id, NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update(&route, NEIGHBOUR_1))
                 .expect("owned storage grows");
@@ -566,7 +577,7 @@ mod test {
         let mut updates = UpdateTable::new_with_storage(Vec::new());
 
         let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-        routes.insert(route).expect("owned storage grows");
+        routes.inner.insert(route).expect("owned storage grows");
         for send_to in [NEIGHBOUR_1, NEIGHBOUR_2] {
             updates
                 .add_update(update(&route, send_to))
@@ -594,7 +605,7 @@ mod test {
         let live = route(DEST_A, "rtr-a", NEIGHBOUR_1);
         // Never inserted into the route table, standing in for a route that has been flushed.
         let gone = route(DEST_B, "rtr-b", NEIGHBOUR_1);
-        routes.insert(live).expect("owned storage grows");
+        routes.inner.insert(live).expect("owned storage grows");
         for route in [&live, &gone] {
             updates
                 .add_update(update(route, NEIGHBOUR_1))
@@ -634,7 +645,7 @@ mod test {
 
         for (prefix, id) in [(DEST_A, "rtr-a"), (DEST_B, "rtr-b"), (DEST_C, "rtr-a")] {
             let route = route(prefix, id, NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update(&route, NEIGHBOUR_1))
                 .expect("owned storage grows");
@@ -747,7 +758,7 @@ mod test {
             // destination first, so nothing in the expectation below can be insertion order.
             for (prefix, plen, id, advertised_by) in fixture {
                 let route = route_with(prefix, plen, id, neighbour(advertised_by));
-                routes.insert(route).expect("owned storage grows");
+                routes.inner.insert(route).expect("owned storage grows");
                 for send_to in [NEIGHBOUR_2, NEIGHBOUR_1] {
                     updates
                         .add_update(update(&route, send_to))
@@ -792,7 +803,7 @@ mod test {
 
             for prefix in [DEST_A, DEST_C] {
                 let route = route(prefix, "rtr-a", NEIGHBOUR_1);
-                routes.insert(route).expect("owned storage grows");
+                routes.inner.insert(route).expect("owned storage grows");
                 for send_to in [NEIGHBOUR_1, NEIGHBOUR_2] {
                     updates
                         .add_update(update(&route, send_to))
@@ -827,7 +838,7 @@ mod test {
             let mut updates = UpdateTable::new_with_storage(Vec::new());
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             for send_to in [nbr(IFACE_1, NEIGHBOUR_1), nbr(IFACE_2, NEIGHBOUR_1)] {
                 updates
                     .add_update(update_to(&route, send_to))
@@ -862,7 +873,7 @@ mod test {
             let mut updates = UpdateTable::new_with_storage(Vec::new());
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             for _ in 0..3 {
                 updates
                     .add_update(update(&route, NEIGHBOUR_1))
@@ -1135,7 +1146,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update_to(&route, nbr(IFACE_2, NEIGHBOUR_1)))
                 .expect("owned storage grows");
@@ -1159,7 +1170,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             // `Update::new` builds an eager timer, so this one would be due immediately. Restarting
             // it puts a full retry interval back on the clock.
             let mut pending = update(&route, NEIGHBOUR_1);
@@ -1185,7 +1196,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             let mut pending = update(&route, NEIGHBOUR_1);
             pending.send_timer.restart(t0());
             updates.add_update(pending).expect("owned storage grows");
@@ -1216,7 +1227,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), false, 1))
                 .expect("owned storage grows");
@@ -1245,7 +1256,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), false, 1))
                 .expect("owned storage grows");
@@ -1271,7 +1282,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), false, 1))
                 .expect("owned storage grows");
@@ -1304,7 +1315,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), false, 1))
                 .expect("owned storage grows");
@@ -1322,7 +1333,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), true, 1))
                 .expect("owned storage grows");
@@ -1346,7 +1357,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update(&route, NEIGHBOUR_1))
                 .expect("owned storage grows");
@@ -1376,7 +1387,7 @@ mod test {
 
             for (prefix, id) in [(DEST_A, "rtr-a"), (DEST_B, "rtr-b"), (DEST_C, "rtr-a")] {
                 let route = route(prefix, id, NEIGHBOUR_1);
-                routes.insert(route).expect("owned storage grows");
+                routes.inner.insert(route).expect("owned storage grows");
                 updates
                     .add_update(update(&route, NEIGHBOUR_1))
                     .expect("owned storage grows");
@@ -1410,7 +1421,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update(&route, NEIGHBOUR_1))
                 .expect("owned storage grows");
@@ -1431,7 +1442,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route_with(DEST_V4, 24, "rtr-a", neighbour(NEIGHBOUR_1));
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update(&route, NEIGHBOUR_1))
                 .expect("owned storage grows");
@@ -1481,7 +1492,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route_with(DEST_V4, 24, "rtr-a", neighbour(NEIGHBOUR_1));
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update(&route, NEIGHBOUR_1))
                 .expect("owned storage grows");
@@ -1508,7 +1519,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route_with(DEST_V4, 24, "rtr-a", neighbour(NEIGHBOUR_1));
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             for send_to in [nbr(IFACE_1, NEIGHBOUR_1), nbr(IFACE_2, NEIGHBOUR_1)] {
                 updates
                     .add_update(update_to(&route, send_to))
@@ -1549,7 +1560,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update(&route, NEIGHBOUR_1))
                 .expect("owned storage grows");
@@ -1575,7 +1586,7 @@ mod test {
                 (core::net::Ipv4Addr::new(10, 0, 1, 0), 24),
             ] {
                 let route = route_with(prefix, plen, "rtr-a", neighbour(NEIGHBOUR_1));
-                routes.insert(route).expect("owned storage grows");
+                routes.inner.insert(route).expect("owned storage grows");
                 updates
                     .add_update(update(&route, NEIGHBOUR_1))
                     .expect("owned storage grows");
@@ -1610,7 +1621,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             for send_to in [NEIGHBOUR_1, NEIGHBOUR_2] {
                 updates
                     .add_update(update_with(&route, neighbour(send_to), true, 1))
@@ -1644,7 +1655,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), true, 2))
                 .expect("owned storage grows");
@@ -1667,7 +1678,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), true, 1))
                 .expect("owned storage grows");
@@ -1687,7 +1698,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), false, 1))
                 .expect("owned storage grows");
@@ -1723,7 +1734,7 @@ mod test {
             let mut updates = empty_updates();
 
             let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.insert(route).expect("owned storage grows");
+            routes.inner.insert(route).expect("owned storage grows");
             updates
                 .add_update(update_with(&route, neighbour(NEIGHBOUR_1), true, 2))
                 .expect("owned storage grows");

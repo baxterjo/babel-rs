@@ -1,5 +1,5 @@
 use crate::data_structures::neighbour::NeighbourIndex;
-use crate::data_structures::route::{Route, RouteIndex};
+use crate::data_structures::route::RouteIndex;
 use crate::data_structures::updates::{UpdateError, UpdateIndex};
 use crate::extension::address::AddressExt;
 use crate::utils::destination::DestAddr;
@@ -60,6 +60,25 @@ impl<A: AddressExt> Update<A> {
         })
     }
 
+    /// Takes over the send state of a newly queued update for the same (route, neighbour) pair.
+    pub(crate) fn refresh_from(&mut self, incoming: Self) {
+        // Destructured so that a new field on `Update` is a compile error here rather than a
+        // silently stale value.
+        let Self {
+            route: _,
+            neighbour: _,
+            mcast_allowed,
+            _ack,
+            send_timer,
+            send_count,
+        } = incoming;
+
+        self.mcast_allowed = mcast_allowed;
+        self._ack = _ack;
+        self.send_timer = send_timer;
+        self.send_count = send_count;
+    }
+
     pub(crate) fn route(&self) -> &RouteIndex<A> {
         &self.route
     }
@@ -85,9 +104,9 @@ impl<A: AddressExt> Update<A> {
         sent_update: &Option<RouteIndex<A>>,
     ) -> bool {
         // Mcast is allowed for this update
-        self.mcast_allowed 
+        self.mcast_allowed
             // The destination is mcast
-            && dest.is_multicast() 
+            && dest.is_multicast()
                 // The update has been writen into the packet.
                 && sent_update.is_some_and(|idx| &idx == self.route())
     }
