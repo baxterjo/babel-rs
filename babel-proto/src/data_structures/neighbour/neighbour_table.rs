@@ -11,7 +11,7 @@ pub struct NeighbourTable<'storage, A>
 where
     A: AddressExt,
 {
-    inner: Table<'storage, NeighbourIndex<A>, Neighbour<A>>,
+    inner: Table<'storage, Option<Neighbour<A>>>,
 }
 
 impl<'storage, A> NeighbourTable<'storage, A>

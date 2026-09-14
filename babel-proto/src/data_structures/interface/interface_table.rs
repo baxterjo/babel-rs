@@ -6,7 +6,7 @@ use crate::utils::storage::Table;
 use crate::utils::{Instant, ManagedSlice};
 
 pub struct InterfaceTable<'storage, A: AddressExt> {
-    pub(crate) inner: Table<'storage, InterfaceHandle, Interface<A>>,
+    pub(crate) inner: Table<'storage, Option<Interface<A>>>,
 }
 
 impl<'storage, A: AddressExt> InterfaceTable<'storage, A> {

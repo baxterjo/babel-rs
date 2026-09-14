@@ -20,7 +20,7 @@ pub struct RouteTable<'storage, A: AddressExt> {
     /// This should never be made public in any way as the insert/remove functions guarantee:
     /// * The table contents are unique by key
     /// * The table is sorted after any addition / removal of the keys.
-    inner: Table<'storage, RouteIndex<A>, Route<A>>,
+    inner: Table<'storage, Option<Route<A>>>,
 
     pub(crate) route_expiry_time: DurationMultiplier,
     /// Multiple of the hello timer of a given route that should be used to generate the time

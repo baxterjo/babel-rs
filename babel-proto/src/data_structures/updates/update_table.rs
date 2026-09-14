@@ -1,7 +1,7 @@
 use crate::data_structures::interface::{Interface, InterfaceHandle};
 use crate::data_structures::route::{Route, RouteIndex, RouteTable};
 use crate::data_structures::source::SourceTable;
-use crate::data_structures::updates::{Update, UpdateError, UpdateIndex};
+use crate::data_structures::updates::{Update, UpdateError};
 use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -15,7 +15,7 @@ use crate::utils::{Duration, Instant, InternallyKeyed, ManagedSlice};
 
 /// Table for storing the state of triggered updates.
 pub(crate) struct UpdateTable<'storage, A: AddressExt> {
-    inner: Table<'storage, UpdateIndex<A>, Update<A>>,
+    inner: Table<'storage, Option<Update<A>>>,
 }
 
 impl<'storage, A: AddressExt> UpdateTable<'storage, A> {

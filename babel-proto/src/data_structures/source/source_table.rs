@@ -12,7 +12,7 @@ pub struct SourceTable<'storage, A>
 where
     A: AddressExt,
 {
-    pub(crate) inner: Table<'storage, SourceIndex<A>, Source<A>>,
+    pub(crate) inner: Table<'storage, Option<Source<A>>>,
 }
 
 impl<'storage, A> SourceTable<'storage, A>
