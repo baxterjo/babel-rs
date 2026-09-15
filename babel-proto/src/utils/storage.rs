@@ -38,7 +38,6 @@ pub(crate) trait TableSlot {
 
     /// True when the slot holds nothing, no value and no resource.
     fn is_vacant(&self) -> bool;
-    fn is_free(&self) -> bool;
 }
 
 impl<V: InternallyKeyed> TableSlot for Option<V> {
@@ -59,9 +58,6 @@ impl<V: InternallyKeyed> TableSlot for Option<V> {
         *self = None;
     }
     fn is_vacant(&self) -> bool {
-        self.is_none()
-    }
-    fn is_free(&self) -> bool {
         self.is_none()
     }
 }
@@ -98,6 +94,10 @@ impl<V: Recycle> MaybeInUse<V> {
             MaybeInUse::Free(s) => Some(s),
             _ => None,
         }
+    }
+
+    fn is_free(&self) -> bool {
+        matches!(self, MaybeInUse::Free(_))
     }
 }
 
@@ -138,10 +138,6 @@ impl<V: Recycle + InternallyKeyed> TableSlot for MaybeInUse<V> {
     fn is_vacant(&self) -> bool {
         matches!(self, MaybeInUse::Vacant)
     }
-
-    fn is_free(&self) -> bool {
-        matches!(self, MaybeInUse::Free(_))
-    }
 }
 
 /// A type that knows how to be located within a slice containing itself and can derive its own key.
@@ -162,43 +158,6 @@ where
 /// IMPORTANT: The entries of this table are internally keyed, that means they are looked up and
 /// sorted by information inside of the entries. Table entries should **NEVER** be able to mutate
 /// their keys after initial creation.
-///
-/// ## Example of good implementation
-///
-/// This example is `ignore`d rather than run because everything it names is crate private, and a
-/// doctest compiles as a downstream crate.
-///
-/// ```ignore
-/// #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
-/// pub(crate) struct MyKey {
-///     key_val_1: u32,
-///     key_val_2: u64,
-/// }
-///
-/// #[derive(Debug)]
-/// pub(crate) struct MyItem {
-///     // Fully private keys
-///     key_val_1: u32,
-///     // Fully private keys
-///     key_val_2: u64,
-///     pub(crate) other_val_1: bool,
-///     pub other_val_2: [u8; 16],
-/// }
-///
-/// impl InternallyKeyed for MyItem {
-///     type Key = MyKey;
-///     fn key(&self) -> Self::Key {
-///         MyKey {
-///             key_val_1: self.key_val_1,
-///             key_val_2: self.key_val_2,
-///         }
-///     }
-/// }
-///
-/// pub(crate) struct MyTable<'storage> {
-///     inner: Table<'storage, MyKey, MyItem>,
-/// }
-/// ```
 pub(crate) struct Table<'storage, S>(ManagedSlice<'storage, S>)
 where
     S: TableSlot;
@@ -212,6 +171,9 @@ where
     }
 
     /// Places a value in a vacant slot, keyed by the value itself.
+    ///
+    /// This will only insert into slots designated vacant by the [`TableSlot::is_vacant`] method.
+    /// Slots that have some other value in them will be considered "taken".
     pub(crate) fn insert(&mut self, value: S::Value) -> Result<(), InsertError<S::Value>> {
         check_sorted!(self);
         // Look for an existing matching element in the slice.
@@ -334,16 +296,11 @@ where
         F: FnMut(&mut S::Value) -> bool,
     {
         check_sorted!(self);
-        // This can be naive compared to the std library version because there is no dropping in
-        // place, Instead it changes the slot to None and flushes after iterating.
         for slot in self.iter_mut_slots() {
-            match slot.value_mut() {
-                Some(item) => {
-                    if !f(item) {
-                        slot.free();
-                    }
+            if let Some(item) = slot.value_mut() {
+                if !f(item) {
+                    slot.free();
                 }
-                None => {}
             }
         }
 
@@ -355,7 +312,7 @@ where
         // If the slice is owned, then some memory can be reclaimed.
         #[cfg(any(feature = "std", feature = "alloc"))]
         if let ManagedSlice::Owned(owned) = &mut self.0 {
-            owned.retain(|e| e.value().is_some());
+            owned.retain(|e| !e.is_vacant());
         }
         // Ensure the slice is sorted after modifying it.
         my_sort(&mut self.0[..]);
@@ -366,25 +323,42 @@ where
 ///
 /// Only implemented if the table contains a type that is created from a resource.
 impl<'storage, V: InternallyKeyed + Recycle> Table<'storage, MaybeInUse<V>> {
+    /// Gets storage from the table for creating a new item.
+    ///
+    /// MEMORY DRAIN: If the storage returned here is dropped, it will be gone from the table
+    /// forever. Use [`Self::return_storage`] to return free storage to the table.
     pub(crate) fn get_storage(&mut self) -> Option<V::Storage> {
         let out = match &mut self.0 {
             // If the slice is borrowed, look for a free spot.
             ManagedSlice::Borrowed(borrowed) => {
                 let item = borrowed.iter_mut().find(|s| s.is_free())?;
-                let out = mem::replace(item, MaybeInUse::Vacant).storage();
-                out
+                mem::replace(item, MaybeInUse::Vacant).storage()
             }
             // If the slice is owned, push a new slot.
             #[cfg(any(feature = "std", feature = "alloc"))]
-            ManagedSlice::Owned(v) => {
+            ManagedSlice::Owned(_) => {
                 // If we have access to alloc, then alloc.
-                v.push(MaybeInUse::Vacant);
                 Some(V::Storage::default())
             }
         };
         // Sort after mutating.
         my_sort(&mut self.0[..]);
         out
+    }
+
+    pub(crate) fn return_storage(&mut self, store: V::Storage) {
+        match &mut self.0 {
+            ManagedSlice::Borrowed(borrowed) => {
+                if let Some(item) = borrowed.iter_mut().find(|s| s.is_vacant()) {
+                    let _ = mem::replace(item, MaybeInUse::Free(store));
+                }
+                b_trace!("Tried to return storage to a borrowed buffer that couldn't accept it.")
+            }
+            _other => {
+                b_trace!("Tried to return storage that was uneeded.")
+                // Nothing to be done
+            }
+        }
     }
 }
 
@@ -454,7 +428,12 @@ mod test {
         }
     }
 
-    #[cfg(not(any(feature = "std", feature = "alloc")))]
+    /// Pins the borrowed-storage `Full` path.
+    ///
+    /// The capacity check only exists on the [`ManagedSlice::Borrowed`] arm of
+    /// [`Table::insert`], but a borrowed slice is available in every feature configuration, so
+    /// this test is deliberately not gated on `no_std`. Gating it there means the only path that
+    /// can report [`InsertError::Full`] never runs under a default `cargo test`.
     #[test]
     fn insert_until_full_fails() {
         let _ = env_logger::try_init();
@@ -471,9 +450,34 @@ mod test {
                 .unwrap_or_else(|_| panic!("Insert {} should have succeeded", i));
         }
 
-        table
+        // The table is full, so the fourth value is handed back rather than stored.
+        let err = table
             .insert(TestValue { a: 3, b: 3, _c: 3 })
             .expect_err("Insert 3 should have failed.");
+        match err {
+            InsertError::Full(value) => assert_eq!(
+                value.key(),
+                TestKey { key_a: 3, key_b: 3 },
+                "Full should return the value that was not inserted."
+            ),
+            InsertError::Duplicate(_) => {
+                panic!("A full table should report Full, not Duplicate.")
+            }
+        }
+
+        // None of the occupied slots were displaced by the failed insert.
+        for i in 0..=2u8 {
+            table
+                .get_by_key(&TestKey {
+                    key_a: i,
+                    key_b: i as u16,
+                })
+                .unwrap_or_else(|| panic!("Entry {} should still be in the table", i));
+        }
+        assert!(
+            table.get_by_key(&TestKey { key_a: 3, key_b: 3 }).is_none(),
+            "The rejected value should not be in the table."
+        );
     }
 
     #[cfg(any(feature = "std", feature = "alloc"))]
@@ -514,13 +518,11 @@ mod test {
 
         // Insert 100 random values into the slice.
         for _ in 0..100 {
-            table
-                .insert(TestValue {
-                    a: rand::random(),
-                    b: rand::random(),
-                    _c: rand::random(),
-                })
-                .unwrap_or_else(|_| panic!("Insert should have succeeded for owned slice."));
+            let _ = table.insert(TestValue {
+                a: rand::random(),
+                b: rand::random(),
+                _c: rand::random(),
+            });
         }
 
         table
@@ -560,17 +562,9 @@ mod test {
     }
 
     /// Pins down the `check_sorted!` guard, including the type it names in the panic message.
-    ///
-    /// `locate` binary searches, so an out-of-order table returns wrong answers rather than
-    /// failing. The guard is what turns that into a panic, and it only exists in non-optimized
-    /// builds, which is where tests run.
-    ///
-    /// The exact rendering of `type_name_of_val` is not a stability guarantee of `core`, so a
-    /// toolchain bump may reformat the type (the `'_`, for instance) and require the expected
-    /// string below to be updated. That is the cost of pinning that the type is named at all.
     #[cfg(any(feature = "std", feature = "alloc"))]
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Table was not sorted on access")]
     fn access_of_unsorted_table_panics() {
         use alloc::vec::Vec;
         let _ = env_logger::try_init();

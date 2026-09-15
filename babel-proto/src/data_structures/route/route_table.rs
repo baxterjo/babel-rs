@@ -7,7 +7,7 @@ use crate::data_types::address::Address;
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::packet::parser::ResolvedUpdate;
-use crate::utils::storage::Table;
+use crate::utils::storage::{InsertError, Table};
 use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, ManagedSlice, Timer};
 
 pub const DEFAULT_SMOOTHING_MULTIPLE: DurationMultiplier = DurationMultiplier::new(3, 1);
@@ -16,10 +16,6 @@ pub const DEFAULT_SMOOTHING_MULTIPLE: DurationMultiplier = DurationMultiplier::n
 /// [Section 3.2.6](https://datatracker.ietf.org/doc/html/rfc8966#name-the-route-table)
 pub struct RouteTable<'storage, A: AddressExt> {
     /// The inner slice for the table.
-    ///
-    /// This should never be made public in any way as the insert/remove functions guarantee:
-    /// * The table contents are unique by key
-    /// * The table is sorted after any addition / removal of the keys.
     pub(crate) inner: Table<'storage, Option<Route<A>>>,
 
     pub(crate) route_expiry_time: DurationMultiplier,
@@ -129,7 +125,9 @@ where
                 );
                 let computed_metric = interface.cost_calc.metric(update.slice.metric(), link_cost);
 
-                let _ = self.inner.insert(Route::new(
+                // NOTE: Ignore the return value if the table is not full as we just checked above
+                // if there would be a duplicate.
+                let _ = match self.inner.insert(Route::new(
                     now,
                     SourceIndex {
                         prefix: update.address,
@@ -146,7 +144,13 @@ where
                     false,
                     update.slice.interval(),
                     self.route_expiry_time,
-                )?);
+                )?) {
+                    // The only error that matters is if the table is full.
+                    Err(InsertError::Full(_)) => {
+                        return Err(RouteError::Full);
+                    }
+                    other => other,
+                };
             }
             // If such an entry exists:
             Some(route) => {

@@ -17,4 +17,6 @@ use crate::utils::TimerError;
 pub enum RouteError {
     #[error(transparent)]
     Timer(#[from] TimerError),
+    #[error("Route table is full")]
+    Full,
 }

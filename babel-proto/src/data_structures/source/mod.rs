@@ -15,4 +15,6 @@ use crate::utils::TimerError;
 pub enum SourceError {
     #[error(transparent)]
     Timer(#[from] TimerError),
+    #[error("Source table is full")]
+    Full,
 }
