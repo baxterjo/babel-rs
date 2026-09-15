@@ -5,14 +5,14 @@ use crate::data_types::seqno::SeqNo;
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::metric::distance::Feasibility;
-use crate::utils::storage::Table;
+use crate::utils::storage::{InsertError, Table};
 use crate::utils::{Instant, ManagedSlice};
 
 pub struct SourceTable<'storage, A>
 where
     A: AddressExt,
 {
-    pub(crate) inner: Table<'storage, SourceIndex<A>, Source<A>>,
+    pub(crate) inner: Table<'storage, Option<Source<A>>>,
 }
 
 impl<'storage, A> SourceTable<'storage, A>
@@ -67,8 +67,9 @@ impl<A: AddressExt> SourceTable<'_, A> {
 
         let Some(source) = self.inner.get_mut_by_key(route.source()) else {
             b_trace!("Route not in source table, adding.");
-            // Just checked if there was something in the table.
-            let _ = self.inner.insert(Source::new(
+            // NOTE: Ignore return value that is not "Full" as we just checked if the item already
+            // existed.
+            let _ = match self.inner.insert(Source::new(
                 now,
                 route.source().prefix,
                 route.source().prefix_len,
@@ -76,7 +77,10 @@ impl<A: AddressExt> SourceTable<'_, A> {
                 route.seqno,
                 route.computed_metric,
                 SPEC_DEFAULT_SOURCE_GC_TIME,
-            )?);
+            )?) {
+                Err(InsertError::Full(_)) => return Err(SourceError::Full),
+                other => other,
+            };
             return Ok(());
         };
 

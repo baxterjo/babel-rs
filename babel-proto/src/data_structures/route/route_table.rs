@@ -7,7 +7,7 @@ use crate::data_types::address::Address;
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::packet::parser::ResolvedUpdate;
-use crate::utils::storage::Table;
+use crate::utils::storage::{InsertError, Table};
 use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, ManagedSlice, Timer};
 
 pub const DEFAULT_SMOOTHING_MULTIPLE: DurationMultiplier = DurationMultiplier::new(3, 1);
@@ -16,11 +16,7 @@ pub const DEFAULT_SMOOTHING_MULTIPLE: DurationMultiplier = DurationMultiplier::n
 /// [Section 3.2.6](https://datatracker.ietf.org/doc/html/rfc8966#name-the-route-table)
 pub struct RouteTable<'storage, A: AddressExt> {
     /// The inner slice for the table.
-    ///
-    /// This should never be made public in any way as the insert/remove functions guarantee:
-    /// * The table contents are unique by key
-    /// * The table is sorted after any addition / removal of the keys.
-    inner: Table<'storage, RouteIndex<A>, Route<A>>,
+    pub(crate) inner: Table<'storage, Option<Route<A>>>,
 
     pub(crate) route_expiry_time: DurationMultiplier,
     /// Multiple of the hello timer of a given route that should be used to generate the time
@@ -66,16 +62,6 @@ where
     /// The route an index names, if it is still in the table.
     pub(crate) fn get_by_key(&self, key: &RouteIndex<A>) -> Option<&Route<A>> {
         self.inner.get_by_key(key)
-    }
-
-    /// Test-only door into the table's storage.
-    ///
-    /// Production code only ever gains a route through [`Self::aquire_route`], which needs an
-    /// interface, a neighbour and a parsed update to build one. Tests in other modules need a
-    /// table with known contents without staging all of that.
-    #[cfg(test)]
-    pub(crate) fn insert(&mut self, route: Route<A>) -> Result<Option<Route<A>>, Route<A>> {
-        self.inner.insert(route)
     }
 
     pub(crate) fn retain_mut<F>(&mut self, f: F)
@@ -139,7 +125,9 @@ where
                 );
                 let computed_metric = interface.cost_calc.metric(update.slice.metric(), link_cost);
 
-                let _ = self.inner.insert(Route::new(
+                // NOTE: Ignore the return value if the table is not full as we just checked above
+                // if there would be a duplicate.
+                let _ = match self.inner.insert(Route::new(
                     now,
                     SourceIndex {
                         prefix: update.address,
@@ -156,7 +144,13 @@ where
                     false,
                     update.slice.interval(),
                     self.route_expiry_time,
-                )?);
+                )?) {
+                    // The only error that matters is if the table is full.
+                    Err(InsertError::Full(_)) => {
+                        return Err(RouteError::Full);
+                    }
+                    other => other,
+                };
             }
             // If such an entry exists:
             Some(route) => {
