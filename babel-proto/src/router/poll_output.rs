@@ -95,6 +95,13 @@ where
         // Poll time based state.
         let next_poll = self.poll_tick(now)?;
 
+        // This is the only place where route selection is done, so polling output is required to
+        // update the routing table.
+        if self.route_selection_due {
+            self.select_routes(now);
+            self.route_selection_due = false;
+        }
+
         let writer = PacketWriter::new_packet(self.magic_number, self.version_number, buf.into())?;
 
         // Poll the body of the packet.
@@ -184,9 +191,9 @@ where
                 };
             }
 
-            // Reached for by field rather than through `self`: the loop above still holds
-            // `self.iface_table` mutably, and these are disjoint from it.
-            writer = ok_or_try_send!(self.update_table.poll_for_updates::<P>(
+            // Check for updates first so urgent updates are sent.
+            b_trace!("Polling for route updates");
+            writer = ok_or_try_send!(self.route_table.poll_for_updates::<P>(
                 now,
                 interface,
                 &mut self.source_table,
@@ -255,8 +262,9 @@ where
         let mut next_poll = None;
 
         // Check for missing hellos from neighbours.
-        // Walked by slots rather than iter_mut() beacuse the update_metrics_for_neighbour below
-        // needs to mutably borrow the whole router.
+        //
+        // Walked by slots rather than iter_mut() so that the mutable borrow of the neighbour table
+        // ends between entries.
         for slot in 0..self.neighbor_table.inner.slot_count() {
             let Some((needs_metrics, remaining, idx)) = self
                 .neighbor_table
@@ -295,14 +303,14 @@ where
         });
 
         // Check for expired routes.
-        self.route_table.inner.retain_mut(|route| {
+        self.route_table.retain_mut(|route| {
             // Check if there is time remaining in the route.
             if let Some(remaining) = route.expiry.time_remaining(now) {
                 next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
                 true
             } else if route.advertised_metric() != &Metric::INFINITY {
                 // If the route has expired and the advertised metric is not yet infinity, retract
-                // the route, reset the timer, and send an update.
+                // the route, reset the timer.
                 route.retract();
                 route.expiry.restart(now);
                 // Update next poll
@@ -311,13 +319,9 @@ where
                 }));
                 // If the route was selected, send an update and unselect it.
                 if route.selected {
-                    if let Err(err) = self.update_table.broadcast_route_update(
-                        now,
-                        &self.iface_table,
-                        &self.neighbor_table,
-                        route,
-                        None,
-                    ) {
+                    if let Err(err) =
+                        route.broadcast_update(now, &self.iface_table, &self.neighbor_table, None)
+                    {
                         b_debug!("Failed to broadcast update: {}", err);
                     }
 
@@ -332,11 +336,6 @@ where
             }
         });
 
-        if self.route_selection_due {
-            self.select_routes(now);
-            self.route_selection_due = false;
-        }
-
         // Check for periodic updates
         for interface in self.iface_table.iter_mut() {
             if let Some(remaining) = interface.update_timer.time_remaining(now) {
@@ -348,17 +347,17 @@ where
                 self.update_timer.restart(now);
 
                 // And queue an update for every selected route to every neighbour.
-                for route in self.route_table.inner.iter().filter(|r| r.selected) {
+                for route in self.route_table.iter_mut().filter(|r| r.selected) {
                     for neighbour in self.neighbor_table.neighbours_for_iface(interface.handle()) {
-                        self.update_table.add_update(Update::new(
+                        let update = Update::new(
                             now,
                             neighbour.key(),
-                            route,
                             !interface.prefer_ucast,
                             interface.request_acks,
                             *interface.update_retry_interval,
                             1,
-                        )?)?;
+                        )?;
+                        route.add_update(update)?;
                     }
                 }
 

@@ -89,6 +89,10 @@ pub(crate) enum MaybeInUse<V: Recycle> {
 }
 
 impl<V: Recycle> MaybeInUse<V> {
+    pub(crate) const fn new_free(storage: V::Storage) -> Self {
+        Self::Free(storage)
+    }
+
     fn storage(self) -> Option<V::Storage> {
         match self {
             MaybeInUse::Free(s) => Some(s),
@@ -158,6 +162,7 @@ where
 /// IMPORTANT: The entries of this table are internally keyed, that means they are looked up and
 /// sorted by information inside of the entries. Table entries should **NEVER** be able to mutate
 /// their keys after initial creation.
+#[derive(Debug)]
 pub(crate) struct Table<'storage, S>(ManagedSlice<'storage, S>)
 where
     S: TableSlot;
@@ -168,6 +173,10 @@ where
 {
     pub(crate) fn new<T: Into<ManagedSlice<'storage, S>>>(storage: T) -> Self {
         Self(storage.into())
+    }
+
+    pub(crate) fn into_inner(self) -> ManagedSlice<'storage, S> {
+        self.0
     }
 
     /// Places a value in a vacant slot, keyed by the value itself.

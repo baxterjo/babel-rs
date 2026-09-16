@@ -74,6 +74,22 @@ impl<'a, T: 'a> From<&'a mut [T]> for ManagedSlice<'a, T> {
     }
 }
 
+impl<'a, T: 'a> Default for ManagedSlice<'a, T> {
+    /// An empty slice.
+    fn default() -> Self {
+        #[cfg(any(feature = "std", feature = "alloc"))]
+        {
+            // If allocation is available, then use it.
+            ManagedSlice::Owned(Vec::new())
+        }
+        #[cfg(not(any(feature = "std", feature = "alloc")))]
+        {
+            // Otherwise the best we can do is create a borrow with no capacity.
+            ManagedSlice::Borrowed(&mut [])
+        }
+    }
+}
+
 macro_rules! from_unboxed_slice {
     ($n:expr) => (
         impl<'a, T> From<[T; $n]> for ManagedSlice<'a, T> {

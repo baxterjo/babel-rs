@@ -1,20 +1,10 @@
-use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTable};
-use crate::data_structures::neighbour::NeighbourTable;
-use crate::data_structures::route::{Route, RouteTable};
-use crate::data_structures::source::{SourceIndex, SourceTable};
 use crate::data_structures::updates::{Update, UpdateError};
-use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
-use crate::extension::parser_state::ParserStateExt;
-use crate::packet::parser::Parser;
-use crate::packet::tlv::update_slice::UpdateFlags;
-use crate::packet::writer::ready::Ready;
-use crate::packet::writer::{PacketWriterError, PacketWriterStep};
-use crate::utils::destination::DestAddr;
 use crate::utils::storage::Table;
-use crate::utils::{Duration, Instant, InternallyKeyed, ManagedSlice};
+use crate::utils::{InternallyKeyed, ManagedSlice};
 
-/// Table for storing the state of triggered updates.
+/// The queue of updates one route owes its neighbours.
+#[derive(Debug)]
 pub(crate) struct UpdateTable<'storage, A: AddressExt> {
     pub(crate) inner: Table<'storage, Option<Update<A>>>,
 }
@@ -29,12 +19,22 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         }
     }
 
-    /// Adds an update destined to a neibour.
+    /// Hands the backing storage back so it can be returned to the route table's pool.
+    pub(crate) fn into_storage(self) -> ManagedSlice<'storage, Option<Update<A>>> {
+        self.inner.into_inner()
+    }
+
+    /// Empties the queue, dropping every update still owed.
+    pub(crate) fn clear(&mut self) {
+        self.inner.retain(|_| false);
+    }
+
+    /// Adds an update destined to a neighbour.
     ///
-    /// An update already pending for the same (route, neighbour) pair is refreshed in place rather
-    /// than duplicated, since the pair is the table's key. Periodic updates lean on this: every
-    /// poll re-queues every selected route to every neighbour, so most of what arrives here is
-    /// already pending.
+    /// An update already pending for the same neighbour is refreshed in place rather
+    /// than duplicated, neighbour is the table's key. Periodic updates lean on this: every
+    /// poll re-queues every selected route to every neighbour, some of those could already be
+    /// pending so this ensures there is no overwrite.
     pub(crate) fn add_update(&mut self, update: Update<A>) -> Result<(), UpdateError> {
         if let Some(existing_update) = self.inner.get_mut_by_key(&update.key()) {
             if existing_update.send_count > update.send_count {
@@ -58,351 +58,11 @@ impl<'storage, A: AddressExt> UpdateTable<'storage, A> {
         Ok(())
     }
 
-    pub(crate) fn broadcast_route_update(
-        &mut self,
-        now: Instant,
-        interfaces: &InterfaceTable<A>,
-        neighbours: &NeighbourTable<A>,
-        route: &Route<A>,
-        retry_override: Option<u8>,
-    ) -> Result<(), UpdateError> {
-        for interface in interfaces.iter() {
-            for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
-                let update = match Update::new(
-                    now,
-                    neighbour.key(),
-                    route,
-                    !interface.prefer_ucast,
-                    false,
-                    *interface.update_retry_interval,
-                    retry_override.unwrap_or(interface.update_retry_limit),
-                ) {
-                    Ok(u) => u,
-                    Err(err) => {
-                        // An error here might be a bad timer, so we can continue.
-                        b_debug!("Err creating udpate: {}", err);
-                        continue;
-                    }
-                };
-
-                // An error here is a true error
-                self.add_update(update)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Walks the updates in the table one router-id at a time, handing out each group with the
-    /// table still mutably borrowed, so the write pass can advance an update's state in place.
-    pub(crate) fn poll_for_updates<'output, P>(
-        &mut self,
-        now: Instant,
-        interface: &Interface<A>,
-        sources: &mut SourceTable<'_, A>,
-        update_interval: Interval,
-        active_dest: &mut DestAddr<A>,
-        next_poll: &mut Duration,
-        mut writer: PacketWriterStep<'output, Ready>,
-    ) -> Result<
-        PacketWriterStep<'output, Ready>,
-        (PacketWriterError, PacketWriterStep<'output, Ready>),
-    >
-    where
-        P: ParserStateExt<AddressEncoding = A::Encoding, Address = A>,
-    {
-        b_trace!("Polling for updates");
-
-        // Start the parser for the packet with the initial next hop equal to the address of the
-        // interface this packet will be sent on.
-        let mut parser: Parser<P> = Parser::new(interface.address);
-        // Group by router ID to reduce the number of router-id tlvs.
-        // Keep track of the last sent update, the below iterator is partially sorted by
-        // RouteIndex so this will have contiguous runs with the same idx.
-        let mut sent_update: Option<SourceIndex<A>> = None;
-        // Run through the updates in the list.
-        for update in self
-            .inner
-            .iter_mut()
-            .filter(|u| u.neighbour().iface == interface.key())
-        {
-            // If the timer still needs to fire then update the next poll value and continue.
-            if let Some(remaining) = update.send_timer.time_remaining(now) {
-                *next_poll = remaining.min(*next_poll);
-                continue;
-            }
-
-            // If the update cannot be sent to the current destination, then skip it.
-            if !update.can_send(active_dest) {
-                continue;
-            }
-
-            // If the update would be a duplicate TLV in the current packet, decrement the send
-            // counter and restart the send timer.
-            if update.would_duplicate(active_dest, &sent_update) {
-                update.send_count = update.send_count.saturating_sub(1);
-                update.send_timer.restart(now);
-                *next_poll = update.send_timer.duration().min(*next_poll);
-                continue;
-            }
-
-            // Get the address that should be the next hop for the address family advertised in
-            // this route. If this interface does not have an address of that family, then we
-            // cannot advertise the route.
-            let Some(next_hop) = update
-                .source()
-                .destination
-                .prefix()
-                .encoding()
-                .address_family()
-                .and_then(|family| interface.address_for_family(&family).copied())
-            else {
-                update.send_count = 0;
-                continue;
-            };
-
-            // A this point we know an update TLV needs to be sent.
-
-            b_trace!("Preparing Update TLV");
-
-            // Try to claim the active destination before doing anything.
-            if active_dest.is_free() {
-                let new_dest = if update.mcast_allowed {
-                    DestAddr::Multicast
-                } else {
-                    DestAddr::Unicast(update.neighbour().addr)
-                };
-                if let Err(err) = active_dest.claim(new_dest) {
-                    b_debug!("Err - {}", err);
-                    continue;
-                };
-            }
-
-            // Perform source table maintenance for this update.
-
-            if let Err(err) = sources.perform_maintenance(now, update) {
-                b_debug!("Source Err: {}", err);
-                continue;
-            };
-
-            // Check to see if the parser has a next_hop for this address family, a hit means
-            // the route's family is already covered and its Update TLV can simply inherit it. A
-            // miss means we have to state one, and we can only state an address we actually
-            // have.
-            if parser
-                .get_next_hop(&update.source().destination.prefix().encoding())
-                .is_none()
-            {
-                // State the next hop this route's family is missing, resolved above.
-                b_debug!(
-                    "[SEND] NextHop - iface: {:?}, dest: {:?} - next_hop: {:?}",
-                    interface,
-                    active_dest,
-                    next_hop
-                );
-
-                writer = writer
-                    .write_next_hop(next_hop.encoding().into(), next_hop.as_wire())?
-                    .finish_tlv()?;
-                // Mirror the TLV into our copy of the receiver's state. Without this the
-                // same Next-Hop TLV is re-emitted ahead of every
-                // update in the family.
-                parser.set_next_hop(next_hop);
-            }
-
-            // If the packet's router-id context is not this route's, write a router-id TLV.
-            // A fresh packet has no context at all, so the first update in one always gets a
-            // Router-Id TLV — without it the receiver cannot attribute the Updates behind it.
-            if parser
-                .router_id()
-                .is_none_or(|id| id != &update.source().router_id)
-            {
-                let router_id = update.source().router_id;
-                b_debug!(
-                    "[SEND] RouterId - iface: {:?}, dest: {:?}, - router_id: {:?}",
-                    interface,
-                    active_dest,
-                    router_id
-                );
-
-                writer = writer.write_router_id(router_id)?.finish_tlv()?;
-                parser.set_router_id(router_id);
-            }
-
-            // TODO: Address compression. To keep things simple I am going to bikeshed outgoing
-            // address compression. This is still compliant with the spec as this router can
-            // still RECEIVE compressed addresses, it just doesn't send them yet.
-            //
-            // TODO: Router ID optimization in update flags.
-            let flags = UpdateFlags::new(false, false);
-            let ae = update.source().destination.prefix().encoding();
-            let omitted = 0;
-            let trim = update.source().destination.prefix_len().div_ceil(8);
-            b_debug!(
-                "[SEND] Update - iface: {:?}, dest: {:?}, - \
-                    {:?}, {:?}, plen: {}, omitted: {}, interval: {}, \
-                    {:?}, {:?}, prefix: {:?}",
-                interface,
-                active_dest,
-                ae,
-                flags,
-                update.source().destination.prefix(),
-                omitted,
-                Duration::from(update_interval).as_centis(),
-                update.seqno,
-                update.metric,
-                update.source().destination.prefix()
-            );
-
-            writer = writer
-                .write_update(
-                    ae.into(),
-                    flags,
-                    *update.source().destination.prefix_len(),
-                    omitted,
-                    update_interval,
-                    update.seqno,
-                    update.metric,
-                    &update.source().destination.prefix().as_wire()[..trim.into()],
-                )?
-                .finish_tlv()?;
-
-            sent_update = Some(*update.source());
-            update.send_count = update.send_count.saturating_sub(1);
-            update.send_timer.restart(now);
-        }
-
-        // Purge the updates that are finished sending, plus the ones there is no longer anything
-        // to send.
+    /// Drops every update that has nothing left to send.
+    pub(crate) fn purge_finished(&mut self) {
         self.inner.retain(|u| u.send_count != 0);
-        Ok(writer)
     }
 }
-
-///// A cursor over the update table's router-id groups, returned by
-///// [`UpdateTable::router_id_groups_mut`].
-/////
-///// This is not an `Iterator`, and cannot be one: every group borrows the update table mutably, so
-///// two of them may not exist at once, which is exactly what `Iterator::next` would have to allow.
-///// [`Self::next_group`] is that same iteration minus the promise — a group must be dropped before
-///// the next one is asked for, and that is what lets the write pass mutate updates in place.
-/////
-///// Groups come out in ascending router-id order, and the cursor remembers only the last router-id
-///// it handed out rather than any position in the table. So the table may be re-sorted, or have
-///// entries removed, between groups without the cursor losing its place or repeating a group; the
-///// one thing it cannot see is an update *added* under a router-id it has already gone past.
-//pub(crate) struct RouterIdGroups<'table, 'updates, 'routes, A: AddressExt> {
-//    updates: &'table mut UpdateTable<'updates, A>,
-//    routes: &'table RouteTable<'routes, A>,
-//    interface: &'table InterfaceHandle,
-//    /// The router-id of the group handed out last, which the next one has to sort after.
-//    last: Option<RouterId>,
-//}
-//
-//impl<'updates, 'routes, A: AddressExt> RouterIdGroups<'_, 'updates, 'routes, A> {
-//    /// The next group, or `None` once every router-id in the table has been handed out.
-//    ///
-//    /// An update whose route has since left the route table has no router-id to be grouped under,
-//    /// so it neither opens a group nor joins one.
-//    pub(crate) fn next_group(&mut self) -> Option<RouterIdGroup<'_, 'updates, 'routes, A>> {
-//        let (last, routes) = (self.last, self.routes);
-//        // The lowest router-id in the table that has not been handed out yet. Finding it costs a
-//        // pass over the table per group and nothing in memory, which is the trade this crate
-//        // wants — the alternative is a second copy of the table indexed by router-id.
-//        let router_id = self
-//            .updates
-//            .inner
-//            .iter()
-//            // Only look for updates with the given interface.
-//            .filter(|u| &u.neighbour().iface == self.interface)
-//            // Fetch the router id for the given route.
-//            .filter_map(|update| router_id_of(routes, update))
-//            // Filter all router ID's greater than the last or all if last is None
-//            .filter(|id| last.is_none_or(|last| *id > last))
-//            // Take the minimum router ID of the remainder
-//            .min()?;
-//
-//        // Ratchet up the minimum.
-//        self.last = Some(router_id);
-//        Some(RouterIdGroup {
-//            router_id,
-//            interface: self.interface,
-//            updates: self.updates,
-//            routes,
-//        })
-//    }
-//}
-//
-///// The updates that advertise routes originated by one router-id, which are not necessarily
-///// adjacent in the update table.
-/////
-///// Yielded by [`RouterIdGroups::next_group`].
-//pub(crate) struct RouterIdGroup<'table, 'updates, 'routes, A: AddressExt> {
-//    router_id: RouterId,
-//    /// The interface being polled. A group is one packet's worth of updates, and a packet goes
-// out    /// one link, so this narrows the group the same way the router-id does.
-//    interface: &'table InterfaceHandle,
-//    updates: &'table mut UpdateTable<'updates, A>,
-//    routes: &'table RouteTable<'routes, A>,
-//}
-//
-///// An iterator that yields a group of updates with the same router id.
-/////
-///// In this iterator:
-///// * All elements have the same router-id
-///// * All elements are going to the same interface
-///// * All elements are unique by (route, neighbour) pairs
-///// * All elements are sorted by:
-/////   * Route Index: (prefix, plen, advertising neighbour)
-/////   * Neighbour Index of the Destination Neighbour: (iface, address)
-//impl<A: AddressExt> RouterIdGroup<'_, '_, '_, A> {
-//    /// The router-id that originated every route in this group.
-//    pub(crate) fn router_id(&self) -> &RouterId {
-//        &self.router_id
-//    }
-//
-//    /// The updates in this group, each paired with the route it advertises.
-//    ///
-//    /// The route rides along because the grouping had to look it up anyway, and writing the
-//    /// Update TLV needs it: prefix, seqno, metric and next hop all live on the route rather than
-//    /// on the update.
-//    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Update<A>, &Route<A>)> {
-//        let (router_id, interface, routes) = (self.router_id, self.interface, self.routes);
-//        self.updates
-//            .inner
-//            .iter()
-//            .filter(move |update| &update.neighbour().iface == interface)
-//            .filter_map(move |update| {
-//                let route = routes.get_for_udpate(update.key())?;
-//                (route.source().router_id == router_id).then_some((update, route))
-//            })
-//    }
-//
-//    /// [`Self::iter`], with the update mutable so that the state which may only advance on a
-//    /// successful write — [`Update::send_count`] and [`Update::send_timer`] — can be advanced at
-//    /// the point the TLV lands in the packet, and left untouched when the buffer fills first.
-//    ///
-//    /// The route stays shared: it is what the TLV is rendered from, and the update's own key is
-//    /// derived from it, so nothing on this path may change it.
-//    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (&mut Update<A>, &Route<A>)> {
-//        let (router_id, interface, routes) = (self.router_id, self.interface, self.routes);
-//        self.updates
-//            .inner
-//            .iter_mut()
-//            .filter(move |update| &update.neighbour().iface == interface)
-//            .filter_map(move |update| {
-//                let route = routes.get_for_udpate(update.key())?;
-//                (route.source().router_id == router_id).then_some((update, route))
-//            })
-//    }
-//}
-//
-///// The router-id of the route an update advertises, or `None` if that route has left the route
-///// table since the update was queued.
-//fn router_id_of<A: AddressExt>(routes: &RouteTable<'_, A>, update: &Update<A>) ->
-// Option<RouterId> {    routes
-//        .get_for_udpate(update.key())
-//        .map(|route| route.source().router_id)
-//}
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod test {
@@ -410,15 +70,18 @@ mod test {
     use core::net::Ipv6Addr;
 
     use super::*;
-    use crate::data_structures::interface::InterfaceHandle;
+    use crate::data_structures::interface::{Interface, InterfaceHandle};
     use crate::data_structures::neighbour::NeighbourIndex;
-    use crate::data_structures::source::SourceIndex;
+    use crate::data_structures::route::{RouteIndex, RouteTable};
+    use crate::data_structures::source::{SourceIndex, SourceTable};
+    use crate::data_structures::updates::UpdateIndex;
     use crate::data_types::destination::RouteDestination;
     use crate::data_types::seqno::SeqNo;
-    use crate::data_types::{Address, Interval};
+    use crate::data_types::{Address, Interval, RouterId};
     use crate::extension::NoExtension;
     use crate::metric::Metric;
     use crate::router::config::DEFAULT_ROUTE_EXPIRY_TIME;
+    use crate::utils::destination::DestAddr;
     use crate::utils::{Duration, Instant};
 
     /// Long enough that nothing expires mid-test, still inside the Timer bound.
@@ -471,100 +134,166 @@ mod test {
         RouteDestination::new(prefix.into(), prefix_len).expect("bad destination")
     }
 
+    fn empty_routes() -> RouteTable<'static, NoExtension> {
+        RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME)
+    }
+
     /// [`route`], with the prefix length and the advertising neighbour — the two parts of the
     /// route key that sit between the prefix and the destination — chosen by the caller.
+    ///
+    /// The route is created inside the table, because its update queue is drawn from the table's
+    /// pool; the key comes back so the queue can be reached again.
     fn route_with(
+        routes: &mut RouteTable<'_, NoExtension>,
         prefix: impl Into<Address<NoExtension>>,
         prefix_len: u8,
         router_id: &str,
         learned_from: NeighbourIndex<NoExtension>,
-    ) -> Route<NoExtension> {
-        Route::new(
-            t0(),
-            SourceIndex {
-                router_id: RouterId::try_from(router_id).expect("bad router id"),
-                destination: dest(prefix, prefix_len),
-            },
-            learned_from,
-            SeqNo(0),
-            Metric::from(10),
-            Metric::from(10),
-            learned_from.addr,
-            true,
-            INTERVAL,
-            DEFAULT_ROUTE_EXPIRY_TIME,
-        )
-        .expect("bad expiry")
+    ) -> RouteIndex<NoExtension> {
+        let source = SourceIndex {
+            router_id: RouterId::try_from(router_id).expect("bad router id"),
+            destination: dest(prefix, prefix_len),
+        };
+        routes
+            .add_route(
+                t0(),
+                source,
+                learned_from,
+                SeqNo(0),
+                Metric::from(10),
+                Metric::from(10),
+                learned_from.addr,
+                INTERVAL,
+            )
+            .expect("owned storage grows");
+        RouteIndex {
+            destination: source.destination,
+            neighbour: learned_from,
+        }
     }
 
-    fn route(prefix: Ipv6Addr, router_id: &str, learned_from: Ipv6Addr) -> Route<NoExtension> {
-        route_with(prefix, 64, router_id, neighbour(learned_from))
+    fn route(
+        routes: &mut RouteTable<'_, NoExtension>,
+        prefix: Ipv6Addr,
+        router_id: &str,
+        learned_from: Ipv6Addr,
+    ) -> RouteIndex<NoExtension> {
+        route_with(routes, prefix, 64, router_id, neighbour(learned_from))
     }
 
     /// [`update`], with the destination neighbour — including its interface — chosen by the caller.
     fn update_to(
-        route: &Route<NoExtension>,
+        routes: &mut RouteTable<'_, NoExtension>,
+        route: &RouteIndex<NoExtension>,
         send_to: NeighbourIndex<NoExtension>,
-    ) -> Update<NoExtension> {
-        Update::new(t0(), send_to, route, true, false, RETRY_INTERVAL, 1)
-            .expect("bad retry interval")
+    ) {
+        update_with(routes, route, send_to, true, 1)
     }
 
-    fn update(route: &Route<NoExtension>, send_to: Ipv6Addr) -> Update<NoExtension> {
-        update_to(route, neighbour(send_to))
+    fn update(
+        routes: &mut RouteTable<'_, NoExtension>,
+        route: &RouteIndex<NoExtension>,
+        send_to: Ipv6Addr,
+    ) {
+        update_to(routes, route, neighbour(send_to))
+    }
+
+    /// An update with the two knobs the write pass branches on: whether it may ride a multicast
+    /// packet, and how many more times it is owed.
+    fn update_with(
+        routes: &mut RouteTable<'_, NoExtension>,
+        route: &RouteIndex<NoExtension>,
+        send_to: NeighbourIndex<NoExtension>,
+        mcast: bool,
+        send_count: u8,
+    ) {
+        let route = routes.get_mut_by_key(route).expect("route is in the table");
+        let update = Update::new(t0(), send_to, mcast, false, RETRY_INTERVAL, send_count)
+            .expect("bad retry interval");
+        route.add_update(update).expect("owned storage grows");
+    }
+
+    /// Every update the router is holding, paired with the source of the route that holds it, in
+    /// the order a poll walks them: the route table's order — (prefix, plen, advertising neighbour)
+    /// — and then each route's own queue.
+    ///
+    /// The source rides along because an update no longer carries one: what it will advertise is
+    /// only knowable from the route it hangs off.
+    fn pending(
+        routes: &mut RouteTable<'_, NoExtension>,
+    ) -> Vec<(SourceIndex<NoExtension>, Update<NoExtension>)> {
+        routes
+            .iter_mut()
+            .flat_map(|route| {
+                let source = *route.source();
+                route
+                    .update_queue
+                    .inner
+                    .iter()
+                    .map(move |update| (source, *update))
+            })
+            .collect()
+    }
+
+    /// Restarts the send timer of every update owed, putting a full retry interval back on each
+    /// clock. [`Update::new`] builds an eager timer, so a freshly queued update is due immediately
+    /// and a test that wants to exercise the deferral branch has to push it out again.
+    fn defer_all(routes: &mut RouteTable<'_, NoExtension>, now: Instant) {
+        for route in routes.iter_mut() {
+            for update in route.update_queue.inner.iter_mut() {
+                update.send_timer.restart(now);
+            }
+        }
     }
 
     fn router_id(name: &str) -> RouterId {
         RouterId::try_from(name).expect("bad router id")
     }
 
-    /// One group per router-id, whatever the table order, and in ascending router-id order.
+    /// Updates come out in route table order, which is led by the destination rather than by the
+    /// router-id that originated it.
     ///
-    /// The update key leads with the router-id, so a router-id's updates do sit together in the
-    /// table today and the grouping is not leaning on that: it finds each group by scanning for the
-    /// lowest router-id it has not handed out yet, which is why an update whose route names another
-    /// router cannot split a group no matter where it lands.
+    /// This is what moving the queues onto the routes cost. While one table held every update it
+    /// was keyed by [`UpdateIndex`], which leads with the router-id, so a router-id's updates sat
+    /// together and one Router-Id TLV could cover the whole run. Queues now hang off routes, the
+    /// route table is keyed by (prefix, plen, advertising neighbour), and a router-id's updates are
+    /// interleaved with every other router's. Packets stay correct — the write pass compares each
+    /// update against the packet's Router-Id context exactly — but a router-id can now be restated
+    /// several times in one packet.
     #[test]
-    fn groups_every_update_under_the_router_id_that_originated_it() {
-        let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
-        let mut updates = UpdateTable::new_with_storage(Vec::new());
+    fn updates_come_out_in_destination_order_not_router_id_order() {
+        let mut routes = empty_routes();
 
         for (prefix, id) in [(DEST_A, "rtr-a"), (DEST_B, "rtr-b"), (DEST_C, "rtr-a")] {
-            let route = route(prefix, id, NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update(&route, NEIGHBOUR_1))
-                .expect("owned storage grows");
+            let route = route(&mut routes, prefix, id, NEIGHBOUR_1);
+            update(&mut routes, &route, NEIGHBOUR_1);
         }
 
-        // Inserted a, b, a; the table sorts them on the key, which leads with the router-id.
-        let in_table_order: Vec<RouterId> =
-            updates.inner.iter().map(|u| u.source().router_id).collect();
+        let in_table_order: Vec<RouterId> = pending(&mut routes)
+            .iter()
+            .map(|(source, _)| source.router_id)
+            .collect();
         assert_eq!(
             in_table_order,
-            alloc::vec![router_id("rtr-a"), router_id("rtr-a"), router_id("rtr-b")]
+            alloc::vec![router_id("rtr-a"), router_id("rtr-b"), router_id("rtr-a")],
+            "DEST_A, DEST_B, DEST_C — rtr-b splits rtr-a's two updates"
         );
     }
 
-    /// Updates are per (route, neighbour), so the same prefix owed to two neighbours is two
-    /// entries — both under the one router-id that originated the route.
+    /// Updates are per (route, neighbour), so the same route owed to two neighbours is two entries
+    /// in that route's own queue.
     #[test]
-    fn one_route_owed_to_two_neighbours_stays_in_one_group() {
-        let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
-        let mut updates = UpdateTable::new_with_storage(Vec::new());
+    fn one_route_owed_to_two_neighbours_holds_two_updates() {
+        let mut routes = empty_routes();
 
-        let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-        routes.inner.insert(route).expect("owned storage grows");
+        let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
         for send_to in [NEIGHBOUR_1, NEIGHBOUR_2] {
-            updates
-                .add_update(update(&route, send_to))
-                .expect("owned storage grows");
+            update(&mut routes, &route, send_to);
         }
 
-        let updates_vec: Vec<(RouterId, Address<NoExtension>)> = updates
-            .inner
+        let updates_vec: Vec<(RouterId, Address<NoExtension>)> = pending(&mut routes)
             .iter()
-            .map(|u| (u.source().router_id, *u.source().destination.prefix()))
+            .map(|(source, _)| (source.router_id, *source.destination.prefix()))
             .collect();
 
         assert_eq!(
@@ -584,18 +313,25 @@ mod test {
     ///
     /// The claims, and what would break if each stopped holding:
     ///
-    /// 1. Updates for one router-id sit together — otherwise a single Router-Id TLV would not
-    ///    describe every Update TLV behind it.
-    /// 2. Unique by (source, destination neighbour) — otherwise a neighbour is sent the same
-    ///    destination twice in one packet.
-    /// 3. Sorted by source then destination neighbour — this is what makes runs of a repeated
-    ///    source *contiguous*, which is what lets the multicast de-duplication in the write pass
-    ///    compare against only the previous element instead of remembering the whole packet.
+    /// 1. A repeated source is a *contiguous* run — this is what lets the multicast de-duplication
+    ///    in the write pass compare against only the previous update instead of remembering the
+    ///    whole packet. It survives the move onto the routes because a source names a destination
+    ///    and the route table is sorted by destination.
+    /// 2. Unique by (source, destination neighbour) *within one route's queue* — one route cannot
+    ///    tell one neighbour about itself twice in a packet.
+    ///
+    /// A third claim held while a single table carried every update and does not any more: updates
+    /// for one router-id sat together, so one Router-Id TLV covered the whole run. See
+    /// [`super::updates_come_out_in_destination_order_not_router_id_order`]. Uniqueness has also
+    /// narrowed from global to per-queue — see
+    /// [`two_routes_to_one_destination_each_queue_their_own_update`].
     mod table_order {
         use super::*;
 
-        /// The three fields the table is sorted by, in the order they break ties: the router-id,
-        /// the destination's (prefix, plen), then the update's destination neighbour.
+        /// The fields an update is ordered by, in the order they break ties: the destination's
+        /// (prefix, plen) — which is what the route table sorts on — then the update's destination
+        /// neighbour, which is what each route's own queue sorts on. The router-id rides along
+        /// because it is what the Router-Id TLVs are driven from.
         type SortKey = (
             RouterId,
             Address<NoExtension>,
@@ -603,40 +339,32 @@ mod test {
             NeighbourIndex<NoExtension>,
         );
 
-        fn sort_keys(updates: &UpdateTable<'_, NoExtension>) -> Vec<SortKey> {
-            updates
-                .inner
+        fn sort_keys(routes: &mut RouteTable<'_, NoExtension>) -> Vec<SortKey> {
+            pending(routes)
                 .iter()
-                .map(|update| {
-                    let key = update.key();
+                .map(|(source, update)| {
                     (
-                        key.source.router_id,
-                        *key.source.destination.prefix(),
-                        *key.source.destination.prefix_len(),
-                        key.neighbour,
+                        source.router_id,
+                        *source.destination.prefix(),
+                        *source.destination.prefix_len(),
+                        update.key().neighbour,
                     )
                 })
                 .collect()
         }
 
-        /// Every tie-break in the key, exercised at once, from a table that was filled in an order
-        /// deliberately unrelated to the one it must be read back in.
+        /// Every tie-break exercised at once, from tables that were filled in an order deliberately
+        /// unrelated to the one they must be read back in.
         ///
-        /// Reading the expectation top to bottom: rtr-a's updates come first; within them
-        /// `DEST_SUPER` sorts ahead of `DEST_A` on the prefix, its two entries are separated only
-        /// by `plen`, and inside every one of those the destination neighbour orders the pair.
-        ///
-        /// `DEST_A` is reached through two neighbours, and appears once all the same: an update
-        /// names a source, so the second route's updates land on the keys the first one's already
-        /// made rather than beside them.
+        /// Reading the expectation top to bottom: `DEST_SUPER` sorts ahead of everything on the
+        /// prefix, its two entries are separated only by `plen`, and inside every route the
+        /// destination neighbour orders the pair.
         #[test]
-        fn is_sorted_by_source_then_destination_neighbour() {
-            let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
-            let mut updates = UpdateTable::new_with_storage(Vec::new());
+        fn is_sorted_by_destination_then_destination_neighbour() {
+            let mut routes = empty_routes();
 
             // Every route below is originated by rtr-a except the decoy, which is a prefix from
-            // another router sorting into the middle of rtr-a's range. Only one route per
-            // destination is selected, as the selection process guarantees.
+            // another router sorting into the middle of rtr-a's range.
             let fixture = [
                 (DEST_C, 64, "rtr-a", NEIGHBOUR_1),
                 (DEST_B, 64, "rtr-b", NEIGHBOUR_1),
@@ -648,59 +376,57 @@ mod test {
             // Inserted back to front, and each route's two updates with the higher-sorting
             // destination first, so nothing in the expectation below can be insertion order.
             for (prefix, plen, id, advertised_by) in fixture {
-                let route = route_with(prefix, plen, id, neighbour(advertised_by));
-                routes.inner.insert(route).expect("owned storage grows");
+                let route = route_with(&mut routes, prefix, plen, id, neighbour(advertised_by));
                 for send_to in [NEIGHBOUR_2, NEIGHBOUR_1] {
-                    updates
-                        .add_update(update(&route, send_to))
-                        .expect("owned storage grows");
+                    update(&mut routes, &route, send_to);
                 }
             }
 
             let (a, b) = (router_id("rtr-a"), router_id("rtr-b"));
             let (n1, n2) = (neighbour(NEIGHBOUR_1), neighbour(NEIGHBOUR_2));
             assert_eq!(
-                sort_keys(&updates),
+                sort_keys(&mut routes),
                 alloc::vec![
                     // Same prefix as the next pair, shorter, so `plen` decides.
                     (a, DEST_SUPER.into(), 48, n1),
                     (a, DEST_SUPER.into(), 48, n2),
                     (a, DEST_SUPER.into(), 64, n1),
                     (a, DEST_SUPER.into(), 64, n2),
-                    // One pair, not two, for the destination two routes lead to.
+                    // Two pairs, not one, for the destination two routes lead to: the routes sit
+                    // side by side in the route table and each carries its own queue.
                     (a, DEST_A.into(), 64, n1),
                     (a, DEST_A.into(), 64, n2),
-                    (a, DEST_C.into(), 64, n1),
-                    (a, DEST_C.into(), 64, n2),
-                    // rtr-b's DEST_B would sort between DEST_A and DEST_C on the prefix alone; the
-                    // router-id leads the key, so it lands behind all of rtr-a's instead.
+                    (a, DEST_A.into(), 64, n1),
+                    (a, DEST_A.into(), 64, n2),
+                    // rtr-b's DEST_B sorts between DEST_A and DEST_C on the prefix, and the prefix
+                    // is now what leads, so it splits rtr-a's run rather than landing behind it.
                     (b, DEST_B.into(), 64, n1),
                     (b, DEST_B.into(), 64, n2),
+                    (a, DEST_C.into(), 64, n1),
+                    (a, DEST_C.into(), 64, n2),
                 ],
             );
         }
 
         /// The de-duplication the write pass does is only sound because a repeated source is a
         /// *contiguous* run: it compares the update it is holding against the one before it, and
-        /// never looks further back. A table that merely held the right entries in some other order
+        /// never looks further back. Queues that merely held the right entries in some other order
         /// would silently emit the same source twice.
         #[test]
         fn repeated_sources_form_contiguous_runs() {
-            let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
-            let mut updates = UpdateTable::new_with_storage(Vec::new());
+            let mut routes = empty_routes();
 
             for prefix in [DEST_A, DEST_C] {
-                let route = route(prefix, "rtr-a", NEIGHBOUR_1);
-                routes.inner.insert(route).expect("owned storage grows");
+                let route = route(&mut routes, prefix, "rtr-a", NEIGHBOUR_1);
                 for send_to in [NEIGHBOUR_1, NEIGHBOUR_2] {
-                    updates
-                        .add_update(update(&route, send_to))
-                        .expect("owned storage grows");
+                    update(&mut routes, &route, send_to);
                 }
             }
 
-            let sources: Vec<SourceIndex<NoExtension>> =
-                updates.inner.iter().map(|u| *u.source()).collect();
+            let sources: Vec<SourceIndex<NoExtension>> = pending(&mut routes)
+                .iter()
+                .map(|(source, _)| *source)
+                .collect();
             let mut runs = sources.clone();
             runs.dedup();
             assert_eq!(
@@ -711,25 +437,57 @@ mod test {
         }
 
         /// Uniqueness is what stops one neighbour being told the same source twice in one packet.
-        /// It comes from the table key, so re-queueing an update that is already pending has to
+        /// It comes from the queue's key, so re-queueing an update that is already pending has to
         /// refresh the entry, not sit beside it.
         #[test]
         fn re_queueing_the_same_route_and_neighbour_does_not_duplicate() {
-            let mut routes = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
-            let mut updates = UpdateTable::new_with_storage(Vec::new());
+            let mut routes = empty_routes();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
             for _ in 0..3 {
-                updates
-                    .add_update(update(&route, NEIGHBOUR_1))
-                    .expect("owned storage grows");
+                update(&mut routes, &route, NEIGHBOUR_1);
             }
 
             assert_eq!(
-                updates.inner.iter().count(),
+                pending(&mut routes).len(),
                 1,
                 "three queueings of one (route, neighbour) pair are one pending update"
+            );
+        }
+
+        /// The limit of that uniqueness: it is per queue, and two routes towards one destination
+        /// have two queues, so nothing at this level stops one destination being owed twice. One
+        /// shared table keyed by (source, neighbour) used to collapse these into a single update.
+        ///
+        /// Nothing in the router reaches this state — route selection keeps one queue per
+        /// destination by dropping the loser's when a destination changes hands, which
+        /// `a_destination_changing_hands_drops_what_the_loser_owed` pins. This is here to say that
+        /// the invariant is enforced up there rather than being a property of the queues.
+        #[test]
+        fn two_routes_to_one_destination_each_queue_their_own_update() {
+            let mut routes = empty_routes();
+
+            for advertised_by in [NEIGHBOUR_1, NEIGHBOUR_2] {
+                let route = route(&mut routes, DEST_A, "rtr-a", advertised_by);
+                update(&mut routes, &route, NEIGHBOUR_1);
+            }
+
+            // What the receiver would see: what the update advertises, which is the route's source,
+            // paired with who it is owed to.
+            let owed_to_n1: Vec<(SourceIndex<NoExtension>, UpdateIndex<NoExtension>)> =
+                pending(&mut routes)
+                    .iter()
+                    .map(|(source, update)| (*source, update.key()))
+                    .collect();
+            assert_eq!(
+                owed_to_n1.len(),
+                2,
+                "one destination, one destination neighbour, two pending updates: {owed_to_n1:?}"
+            );
+            assert_eq!(
+                owed_to_n1[0], owed_to_n1[1],
+                "and they advertise the same source to the same neighbour, so the receiver hears \
+                 the destination twice"
             );
         }
     }
@@ -764,7 +522,7 @@ mod test {
         use crate::packet::packet_header::PacketHeader;
         use crate::packet::packet_slice::PacketSlice;
         use crate::packet::tlv::{NextHopSlice, RouterIdSlice, Tlv, TypedTlv, UpdateSlice};
-        use crate::packet::writer::PacketWriter;
+        use crate::packet::writer::{PacketWriter, PacketWriterError};
 
         /// The parser state used when no address-encoding extension is in play.
         type NoState = NoStateExtension<NoExtension>;
@@ -806,34 +564,6 @@ mod test {
                 InterfaceConfig::new_wired(iface_handle(name), IFACE_ADDR.into()),
             )
             .expect("bad interface config")
-        }
-
-        /// An update with the two knobs the write pass branches on: whether it may ride a multicast
-        /// packet, and how many more times it is owed.
-        fn update_with(
-            route: &Route<NoExtension>,
-            send_to: NeighbourIndex<NoExtension>,
-            mcast: bool,
-            send_count: u8,
-        ) -> Update<NoExtension> {
-            Update::new(
-                t0(),
-                send_to,
-                route,
-                mcast,
-                false,
-                RETRY_INTERVAL,
-                send_count,
-            )
-            .expect("bad retry interval")
-        }
-
-        fn empty_routes() -> RouteTable<'static, NoExtension> {
-            RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME)
-        }
-
-        fn empty_updates() -> UpdateTable<'static, NoExtension> {
-            UpdateTable::new_with_storage(Vec::new())
         }
 
         /// A placeholder for the source table the write pass takes but does not yet read. Once the
@@ -878,7 +608,7 @@ mod test {
 
         /// Runs one poll against an owned buffer, which grows, so no write can fail for space.
         fn poll_seeded(
-            updates: &mut UpdateTable<'_, NoExtension>,
+            routes: &mut RouteTable<'_, NoExtension>,
             iface: &Interface<NoExtension>,
             now: Instant,
             mut dest: DestAddr<NoExtension>,
@@ -891,7 +621,7 @@ mod test {
             )
             .expect("an owned buffer always holds a header");
 
-            let writer = updates
+            let writer = routes
                 .poll_for_updates::<NoState>(
                     now,
                     iface,
@@ -919,19 +649,18 @@ mod test {
 
         /// [`poll_seeded`] starting from a free destination and nothing else scheduled.
         fn poll(
-            updates: &mut UpdateTable<'_, NoExtension>,
+            routes: &mut RouteTable<'_, NoExtension>,
             iface: &Interface<NoExtension>,
             now: Instant,
         ) -> Polled {
-            poll_seeded(updates, iface, now, DestAddr::default(), NEVER)
+            poll_seeded(routes, iface, now, DestAddr::default(), NEVER)
         }
 
-        /// The `(send_count, timer is pending)` of every update left in the table, in table order.
-        fn send_state(updates: &UpdateTable<'_, NoExtension>, now: Instant) -> Vec<(u8, bool)> {
-            updates
-                .inner
+        /// The `(send_count, timer is pending)` of every update still owed, in poll order.
+        fn send_state(routes: &mut RouteTable<'_, NoExtension>, now: Instant) -> Vec<(u8, bool)> {
+            pending(routes)
                 .iter()
-                .map(|u| (u.send_count, u.send_timer.time_remaining(now).is_some()))
+                .map(|(_, u)| (u.send_count, u.send_timer.time_remaining(now).is_some()))
                 .collect()
         }
 
@@ -940,35 +669,31 @@ mod test {
         // | .` | (_) || | | __ || || .` | (_ |  | |) | |_| | _|
         // |_|\_|\___/ |_| |_||_|___|_|\_|\___|  |___/ \___/|___|
 
-        /// No groups at all: the loop body never runs and the writer comes back untouched.
+        /// No routes at all: the loop body never runs and the writer comes back untouched.
         #[test]
         fn an_empty_table_writes_nothing() {
-            let mut updates = empty_updates();
+            let mut routes = empty_routes();
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             assert!(out.tlv_types().is_empty());
             assert_eq!(out.dest, DestAddr::None, "nothing claimed the packet");
             assert_eq!(out.next_poll, NEVER, "nothing asked for a wake-up");
         }
 
-        /// An update owed on another interface is not in this interface's group, so the pass has
-        /// nothing to write — the same filter [`group_order`] pins, seen from the write side.
+        /// An update owed on another interface is filtered out of this interface's pass, so there
+        /// is nothing to write.
         #[test]
         fn an_update_owed_on_another_interface_is_not_written() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update_to(&route, nbr(IFACE_2, NEIGHBOUR_1)))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update_to(&mut routes, &route, nbr(IFACE_2, NEIGHBOUR_1));
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             assert!(out.tlv_types().is_empty());
-            assert_eq!(send_state(&updates, t0()), alloc::vec![(1, false)]);
+            assert_eq!(send_state(&mut routes, t0()), alloc::vec![(1, false)]);
         }
 
         //  ___ ___ _  _ ___    _____ ___ __  __ ___ ___
@@ -981,22 +706,17 @@ mod test {
         #[test]
         fn a_pending_timer_defers_the_update_and_shortens_the_wake_up() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            // `Update::new` builds an eager timer, so this one would be due immediately. Restarting
-            // it puts a full retry interval back on the clock.
-            let mut pending = update(&route, NEIGHBOUR_1);
-            pending.send_timer.restart(t0());
-            updates.add_update(pending).expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update(&mut routes, &route, NEIGHBOUR_1);
+            defer_all(&mut routes, t0());
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             assert!(out.tlv_types().is_empty(), "nothing was due");
             assert_eq!(out.next_poll, RETRY_INTERVAL, "woken when the timer fires");
             assert_eq!(
-                send_state(&updates, t0()),
+                send_state(&mut routes, t0()),
                 alloc::vec![(1, true)],
                 "still owed, still pending"
             );
@@ -1007,17 +727,14 @@ mod test {
         #[test]
         fn a_pending_timer_further_out_than_the_running_minimum_leaves_it_alone() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            let mut pending = update(&route, NEIGHBOUR_1);
-            pending.send_timer.restart(t0());
-            updates.add_update(pending).expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update(&mut routes, &route, NEIGHBOUR_1);
+            defer_all(&mut routes, t0());
 
             let sooner = RETRY_INTERVAL / 2;
             let out = poll_seeded(
-                &mut updates,
+                &mut routes,
                 &interface(IFACE_1),
                 t0(),
                 DestAddr::default(),
@@ -1037,16 +754,12 @@ mod test {
         #[test]
         fn a_unicast_only_update_is_skipped_when_the_packet_is_multicast() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update_with(&route, neighbour(NEIGHBOUR_1), false, 1))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update_with(&mut routes, &route, neighbour(NEIGHBOUR_1), false, 1);
 
             let out = poll_seeded(
-                &mut updates,
+                &mut routes,
                 &interface(IFACE_1),
                 t0(),
                 DestAddr::Multicast,
@@ -1055,7 +768,7 @@ mod test {
 
             assert!(out.tlv_types().is_empty());
             assert_eq!(
-                send_state(&updates, t0()),
+                send_state(&mut routes, t0()),
                 alloc::vec![(1, false)],
                 "skipped, so still owed and still due"
             );
@@ -1065,16 +778,12 @@ mod test {
         #[test]
         fn a_unicast_only_update_is_skipped_when_the_packet_is_for_another_neighbour() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update_with(&route, neighbour(NEIGHBOUR_1), false, 1))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update_with(&mut routes, &route, neighbour(NEIGHBOUR_1), false, 1);
 
             let out = poll_seeded(
-                &mut updates,
+                &mut routes,
                 &interface(IFACE_1),
                 t0(),
                 DestAddr::Unicast(NEIGHBOUR_2.into()),
@@ -1082,7 +791,7 @@ mod test {
             );
 
             assert!(out.tlv_types().is_empty());
-            assert_eq!(send_state(&updates, t0()), alloc::vec![(1, false)]);
+            assert_eq!(send_state(&mut routes, t0()), alloc::vec![(1, false)]);
         }
 
         /// Branch 2, falling through: the packet is already addressed to exactly this update's
@@ -1090,16 +799,12 @@ mod test {
         #[test]
         fn a_unicast_only_update_rides_a_packet_already_addressed_to_its_neighbour() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update_with(&route, neighbour(NEIGHBOUR_1), false, 1))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update_with(&mut routes, &route, neighbour(NEIGHBOUR_1), false, 1);
 
             let out = poll_seeded(
-                &mut updates,
+                &mut routes,
                 &interface(IFACE_1),
                 t0(),
                 DestAddr::Unicast(NEIGHBOUR_1.into()),
@@ -1122,15 +827,11 @@ mod test {
         #[test]
         fn a_unicast_only_update_claims_the_packet_for_its_neighbour() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update_with(&route, neighbour(NEIGHBOUR_1), false, 1))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update_with(&mut routes, &route, neighbour(NEIGHBOUR_1), false, 1);
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             assert_eq!(out.dest, DestAddr::Unicast(NEIGHBOUR_1.into()));
         }
@@ -1140,15 +841,11 @@ mod test {
         #[test]
         fn a_multicast_update_claims_the_packet_for_multicast() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update_with(&route, neighbour(NEIGHBOUR_1), true, 1))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update_with(&mut routes, &route, neighbour(NEIGHBOUR_1), true, 1);
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             assert_eq!(out.dest, DestAddr::Multicast);
         }
@@ -1164,15 +861,11 @@ mod test {
         #[test]
         fn the_first_update_in_a_packet_is_preceded_by_a_router_id_tlv() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update(&route, NEIGHBOUR_1))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update(&mut routes, &route, NEIGHBOUR_1);
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             assert_eq!(
                 out.tlv_types(),
@@ -1188,22 +881,20 @@ mod test {
             }
         }
 
-        /// The point of grouping by router-id: several updates from one router share the single
-        /// Router-Id TLV at the head of their run, and a second router opens a new one.
+        /// A run of consecutive updates from one router shares the single Router-Id TLV at its
+        /// head, and the next router opens a new one.
         #[test]
-        fn each_router_id_emits_exactly_one_router_id_tlv() {
+        fn a_run_of_one_router_id_emits_one_router_id_tlv() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            for (prefix, id) in [(DEST_A, "rtr-a"), (DEST_B, "rtr-b"), (DEST_C, "rtr-a")] {
-                let route = route(prefix, id, NEIGHBOUR_1);
-                routes.inner.insert(route).expect("owned storage grows");
-                updates
-                    .add_update(update(&route, NEIGHBOUR_1))
-                    .expect("owned storage grows");
+            // Ordered by destination, so rtr-a's two prefixes are adjacent and rtr-b's sorts after
+            // both of them.
+            for (prefix, id) in [(DEST_A, "rtr-a"), (DEST_B, "rtr-a"), (DEST_C, "rtr-b")] {
+                let route = route(&mut routes, prefix, id, NEIGHBOUR_1);
+                update(&mut routes, &route, NEIGHBOUR_1);
             }
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             // rtr-a's two updates behind one Router-Id TLV, then rtr-b's one behind its own.
             assert_eq!(
@@ -1218,6 +909,39 @@ mod test {
             );
         }
 
+        /// What that run costs now that it is ordered by destination: a router-id whose prefixes
+        /// are separated by another router's is restated, and the packet carries one Router-Id TLV
+        /// per Update TLV.
+        ///
+        /// The packet is still correct — every Update inherits the router-id immediately in front
+        /// of it — but while one table carried every update, keyed by [`UpdateIndex`], the
+        /// router-id led the key and this could not happen. It is the density that regressed, not
+        /// the meaning.
+        #[test]
+        fn a_router_id_split_by_another_is_restated() {
+            let mut routes = empty_routes();
+
+            for (prefix, id) in [(DEST_A, "rtr-a"), (DEST_B, "rtr-b"), (DEST_C, "rtr-a")] {
+                let route = route(&mut routes, prefix, id, NEIGHBOUR_1);
+                update(&mut routes, &route, NEIGHBOUR_1);
+            }
+
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
+
+            assert_eq!(
+                out.tlv_types(),
+                alloc::vec![
+                    RouterIdSlice::TYPE_ID,
+                    UpdateSlice::TYPE_ID,
+                    RouterIdSlice::TYPE_ID,
+                    UpdateSlice::TYPE_ID,
+                    RouterIdSlice::TYPE_ID,
+                    UpdateSlice::TYPE_ID,
+                ],
+                "rtr-a is named twice because rtr-b's prefix sorts between its two"
+            );
+        }
+
         //  _  _ _____  _______ _  _  ___  ___
         // | \| | __\ \/ /_   _| || |/ _ \| _ \
         // | .` | _| >  <  | | | __ | (_) |  _/
@@ -1228,15 +952,11 @@ mod test {
         #[test]
         fn a_route_in_the_interfaces_address_family_needs_no_next_hop_tlv() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update(&route, NEIGHBOUR_1))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update(&mut routes, &route, NEIGHBOUR_1);
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             assert!(
                 !out.tlv_types().contains(&NextHopSlice::TYPE_ID),
@@ -1249,15 +969,11 @@ mod test {
         #[test]
         fn a_route_in_another_address_family_gets_a_next_hop_tlv_first() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route_with(DEST_V4, 24, "rtr-a", neighbour(NEIGHBOUR_1));
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update(&route, NEIGHBOUR_1))
-                .expect("owned storage grows");
+            let route = route_with(&mut routes, DEST_V4, 24, "rtr-a", neighbour(NEIGHBOUR_1));
+            update(&mut routes, &route, NEIGHBOUR_1);
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             assert_eq!(
                 out.tlv_types(),
@@ -1299,15 +1015,11 @@ mod test {
         #[test]
         fn a_route_in_a_family_the_interface_cannot_name_is_not_advertised() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route_with(DEST_V4, 24, "rtr-a", neighbour(NEIGHBOUR_1));
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update(&route, NEIGHBOUR_1))
-                .expect("owned storage grows");
+            let route = route_with(&mut routes, DEST_V4, 24, "rtr-a", neighbour(NEIGHBOUR_1));
+            update(&mut routes, &route, NEIGHBOUR_1);
 
-            let out = poll(&mut updates, &v6_only_interface(IFACE_1), t0());
+            let out = poll(&mut routes, &v6_only_interface(IFACE_1), t0());
 
             assert!(
                 out.tlv_types().is_empty(),
@@ -1315,39 +1027,36 @@ mod test {
                 out.tlv_types()
             );
             assert!(
-                send_state(&updates, t0()).is_empty(),
+                send_state(&mut routes, t0()).is_empty(),
                 "an update this link can never send is purged, not left pending"
             );
         }
 
         /// The drop is scoped to the update that could not be advertised, and to nothing else. The
-        /// same route owed on a dual-stack link is a separate table entry, and the poll that gives
-        /// up on the v6-only link must leave it alone for the poll of its own interface to send.
+        /// same route owed on a dual-stack link is a separate entry in the route's queue, and the
+        /// poll that gives up on the v6-only link must leave it alone for the poll of its own
+        /// interface to send.
         #[test]
         fn a_route_dropped_on_one_interface_is_still_owed_on_another() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route_with(DEST_V4, 24, "rtr-a", neighbour(NEIGHBOUR_1));
-            routes.inner.insert(route).expect("owned storage grows");
+            let route = route_with(&mut routes, DEST_V4, 24, "rtr-a", neighbour(NEIGHBOUR_1));
             for send_to in [nbr(IFACE_1, NEIGHBOUR_1), nbr(IFACE_2, NEIGHBOUR_1)] {
-                updates
-                    .add_update(update_to(&route, send_to))
-                    .expect("owned storage grows");
+                update_to(&mut routes, &route, send_to);
             }
 
             // IFACE_1 has no IPv4 address, so its update is dropped.
-            let out = poll(&mut updates, &v6_only_interface(IFACE_1), t0());
+            let out = poll(&mut routes, &v6_only_interface(IFACE_1), t0());
             assert!(out.tlv_types().is_empty());
             assert_eq!(
-                send_state(&updates, t0()),
+                send_state(&mut routes, t0()),
                 alloc::vec![(1, false)],
                 "only the v6-only link's update was purged"
             );
 
             // IFACE_2 is dual stack, so the survivor still goes out — with the Next-Hop TLV that
             // names the v4 address the other link did not have.
-            let out = poll(&mut updates, &interface(IFACE_2), t0());
+            let out = poll(&mut routes, &interface(IFACE_2), t0());
             assert_eq!(
                 out.tlv_types(),
                 alloc::vec![
@@ -1357,7 +1066,7 @@ mod test {
                 ]
             );
             assert!(
-                send_state(&updates, t0()).is_empty(),
+                send_state(&mut routes, t0()).is_empty(),
                 "and is purged for having been sent its full count"
             );
         }
@@ -1367,15 +1076,11 @@ mod test {
         #[test]
         fn a_dual_stack_interface_still_states_no_next_hop_for_ipv6_routes() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update(&route, NEIGHBOUR_1))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update(&mut routes, &route, NEIGHBOUR_1);
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             assert_eq!(
                 out.tlv_types(),
@@ -1389,20 +1094,16 @@ mod test {
         #[test]
         fn a_second_route_in_that_family_does_not_restate_the_next_hop() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
             for (prefix, plen) in [
                 (core::net::Ipv4Addr::new(10, 0, 0, 0), 24u8),
                 (core::net::Ipv4Addr::new(10, 0, 1, 0), 24),
             ] {
-                let route = route_with(prefix, plen, "rtr-a", neighbour(NEIGHBOUR_1));
-                routes.inner.insert(route).expect("owned storage grows");
-                updates
-                    .add_update(update(&route, NEIGHBOUR_1))
-                    .expect("owned storage grows");
+                let route = route_with(&mut routes, prefix, plen, "rtr-a", neighbour(NEIGHBOUR_1));
+                update(&mut routes, &route, NEIGHBOUR_1);
             }
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             let next_hops = out
                 .tlv_types()
@@ -1428,17 +1129,13 @@ mod test {
         #[test]
         fn one_route_owed_to_two_neighbours_is_written_once_on_a_multicast_packet() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
             for send_to in [NEIGHBOUR_1, NEIGHBOUR_2] {
-                updates
-                    .add_update(update_with(&route, neighbour(send_to), true, 1))
-                    .expect("owned storage grows");
+                update_with(&mut routes, &route, neighbour(send_to), true, 1);
             }
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             assert_eq!(
                 out.tlv_types(),
@@ -1447,7 +1144,7 @@ mod test {
             );
             assert_eq!(out.dest, DestAddr::Multicast);
             assert!(
-                updates.inner.iter().next().is_none(),
+                pending(&mut routes).is_empty(),
                 "both updates are satisfied by the one TLV and purged"
             );
         }
@@ -1462,42 +1159,34 @@ mod test {
         #[test]
         fn a_successful_write_decrements_the_send_count_and_restarts_the_timer() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update_with(&route, neighbour(NEIGHBOUR_1), true, 2))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update_with(&mut routes, &route, neighbour(NEIGHBOUR_1), true, 2);
 
-            let out = poll(&mut updates, &interface(IFACE_1), t0());
+            let out = poll(&mut routes, &interface(IFACE_1), t0());
 
             assert!(out.tlv_types().contains(&UpdateSlice::TYPE_ID));
             assert_eq!(
-                send_state(&updates, t0()),
+                send_state(&mut routes, t0()),
                 alloc::vec![(1, true)],
                 "one send left, and the timer holds it until the retry interval elapses"
             );
         }
 
         /// Branch 7: an update that has been sent its full count is finished, and leaving it in the
-        /// table would resend it forever.
+        /// queue would resend it forever.
         #[test]
         fn an_update_is_purged_once_its_send_count_reaches_zero() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update_with(&route, neighbour(NEIGHBOUR_1), true, 1))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update_with(&mut routes, &route, neighbour(NEIGHBOUR_1), true, 1);
 
-            poll(&mut updates, &interface(IFACE_1), t0());
+            poll(&mut routes, &interface(IFACE_1), t0());
 
             assert!(
-                send_state(&updates, t0()).is_empty(),
-                "the table is empty once the last send lands"
+                send_state(&mut routes, t0()).is_empty(),
+                "the queue is empty once the last send lands"
             );
         }
 
@@ -1505,17 +1194,13 @@ mod test {
         #[test]
         fn a_skipped_update_survives_the_purge() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update_with(&route, neighbour(NEIGHBOUR_1), false, 1))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update_with(&mut routes, &route, neighbour(NEIGHBOUR_1), false, 1);
 
             // Claimed for multicast, which a unicast-only update may not ride.
             poll_seeded(
-                &mut updates,
+                &mut routes,
                 &interface(IFACE_1),
                 t0(),
                 DestAddr::Multicast,
@@ -1523,7 +1208,7 @@ mod test {
             );
 
             assert_eq!(
-                send_state(&updates, t0()),
+                send_state(&mut routes, t0()),
                 alloc::vec![(1, false)],
                 "still owed after being skipped"
             );
@@ -1540,13 +1225,9 @@ mod test {
         #[test]
         fn a_buffer_that_fills_leaves_the_send_state_untouched() {
             let mut routes = empty_routes();
-            let mut updates = empty_updates();
 
-            let route = route(DEST_A, "rtr-a", NEIGHBOUR_1);
-            routes.inner.insert(route).expect("owned storage grows");
-            updates
-                .add_update(update_with(&route, neighbour(NEIGHBOUR_1), true, 2))
-                .expect("owned storage grows");
+            let route = route(&mut routes, DEST_A, "rtr-a", NEIGHBOUR_1);
+            update_with(&mut routes, &route, neighbour(NEIGHBOUR_1), true, 2);
 
             // 4 bytes of packet header and 2 bytes of slack — enough to start a TLV, nowhere near
             // enough for a Router-Id or an Update.
@@ -1560,7 +1241,7 @@ mod test {
 
             let mut dest = DestAddr::default();
             let mut next_poll = NEVER;
-            let err = updates
+            let err = routes
                 .poll_for_updates::<NoState>(
                     t0(),
                     &interface(IFACE_1),
@@ -1576,7 +1257,7 @@ mod test {
 
             assert!(matches!(err, PacketWriterError::BufferTooSmall { .. }));
             assert_eq!(
-                send_state(&updates, t0()),
+                send_state(&mut routes, t0()),
                 alloc::vec![(2, false)],
                 "nothing was written, so nothing was advanced"
             );

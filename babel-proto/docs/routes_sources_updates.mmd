@@ -1,0 +1,38 @@
+---
+title: Routes, Sources, and Updates
+---
+%%{init: {"layout": "elk"}}%%
+classDiagram
+class SourceIndex {
+  +RouterId router_id
+  +RouteDestination destination
+}
+class RouteDestination {
+  +Address prefix
+  +u8 prefix_len
+}
+class RouteIndex {
++RouteDestination destination
++NeighbourIndex neighbour
+}
+class NeighbourIndex {
+  +InterfaceHandle iface
+  +Address addr
+}
+class UpdateIndex {
+  +NeighbourIndex dest_neighbour
+}
+class Route {
+  +SourceIndex source
+  +NeighbourIndex neighbour
+  +OrderedSet~UpdateIndex~
+  +key() RouteIndex
+}
+  RouteDestination --* SourceIndex: copy
+  RouteDestination --* RouteIndex: copy
+  NeighbourIndex --* RouteIndex: Neighbour that advertised route
+  NeighbourIndex --* UpdateIndex: Update destination
+  SourceIndex --* Route
+  RouteIndex <|.. Route: Unique by
+  UpdateIndex --* Route
+  

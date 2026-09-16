@@ -1,6 +1,6 @@
 use crate::data_structures::interface::Interface;
 use crate::data_structures::neighbour::NeighbourIndex;
-use crate::data_structures::route::{Route, RouteIndex};
+use crate::data_structures::route::{Route, RouteError, RouteIndex};
 use crate::data_structures::source::{SourceIndex, SourceTable};
 use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
@@ -232,7 +232,7 @@ where
         );
 
         // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        // The following seactions marked with ~ are direct quotes from section 3.5.3:
+        // The following sections fenced with ~ are direct quotes from section 3.5.3:
         // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
         // Fetch the neighbour the update is from.
@@ -267,22 +267,11 @@ where
             }
             // A blanket retraction triggers an update to be sent for all routes this neighbour has
             // advertised.
-            for route in self
-                .route_table
-                .inner
-                .iter_mut()
-                .filter(|r| r.neigbour() == &idx)
-            {
+            for route in self.route_table.iter_mut().filter(|r| r.neigbour() == &idx) {
                 route.retract();
                 // Send an update if the route was selected
                 if route.selected {
-                    self.update_table.broadcast_route_update(
-                        now,
-                        &self.iface_table,
-                        &self.neighbor_table,
-                        route,
-                        None,
-                    )?;
+                    route.broadcast_update(now, &self.iface_table, &self.neighbor_table, None)?;
                 }
                 self.route_selection_due = true;
             }
@@ -300,19 +289,13 @@ where
             // state for router-id or next hop in this branch.
             let prefix = parser.resolve_address(&update)?;
 
-            if let Some(route) = self.route_table.inner.get_mut_by_key(&RouteIndex {
+            if let Some(route) = self.route_table.get_mut_by_key(&RouteIndex {
                 destination: RouteDestination::new(prefix, update.plen())?,
                 neighbour: neighbour.key(),
             }) {
                 // Only send an update if the route is selected.
                 if route.selected {
-                    self.update_table.broadcast_route_update(
-                        now,
-                        &self.iface_table,
-                        &self.neighbor_table,
-                        route,
-                        None,
-                    )?;
+                    route.broadcast_update(now, &self.iface_table, &self.neighbor_table, None)?;
                 }
                 route.retract();
                 self.route_selection_due = true;
@@ -346,8 +329,11 @@ where
         //  / _ \ (_| (_) | |_| || ||   / _|
         // /_/ \_\___\__\_\\___/|___|_|_\___|
 
+        // Read out before the lookup below, which borrows the whole route table.
+        let route_expiry_time = self.route_table.route_expiry_time;
+
         // Aquire the route
-        match self.route_table.inner.get_mut_by_key(&RouteIndex {
+        match self.route_table.get_mut_by_key(&RouteIndex {
             destination: resolved_update.destination,
             neighbour: neighbour.key(),
         }) {
@@ -371,7 +357,22 @@ where
                 // and an advertised metric equal to the metric carried by the update.
                 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-                if let Err(err) = self.route_table.inner.insert(Route::new(
+                // Link cost must be calculated for new routes as the smooth metric must be seeded
+                // with the computed metric at this moment. If computation is deffered until the
+                // end of packet processing then the smoothed metric will be incorrectly biased
+                // toward zero.
+                let link_cost = interface.cost_calc.link_cost(
+                    interface.cost_calc.rx_cost(
+                        neighbour.mcast_hello_info.history,
+                        neighbour.ucast_hello_info.history,
+                    ),
+                    neighbour.tx_cost,
+                );
+                let computed_metric = interface
+                    .cost_calc
+                    .metric(resolved_update.slice.metric(), link_cost);
+
+                match self.route_table.add_route(
                     now,
                     SourceIndex {
                         destination: resolved_update.destination,
@@ -380,17 +381,25 @@ where
                     neighbour.key(),
                     resolved_update.slice.seqno(),
                     resolved_update.slice.metric(),
-                    // The advertised metric is given as the computed metric for now, Metric
-                    // computation for this neightbour is deferred to the end of `handle_intput()`.
-                    resolved_update.slice.metric(),
+                    computed_metric,
                     resolved_update.next_hop,
-                    // Never add new routes as selected as route selection will be run after each
-                    // update.
-                    false,
                     resolved_update.slice.interval(),
-                    self.route_table.route_expiry_time,
-                )?) {
-                    b_debug!("Route table full - Discarded: {:?}", err);
+                ) {
+                    Ok(()) => {}
+
+                    Err(
+                        err @ (RouteError::Full
+                        | RouteError::Duplicate
+                        | RouteError::NoStorageAvaliable),
+                    ) => {
+                        // Running out of room is a local capacity limit, not a protocol error: the
+                        // route is dropped and the sender will re-advertise it.
+                        // TODO(#21): User defined full storage handline.
+                        b_debug!("Route not added - Discarded: {:?}", err);
+                    }
+                    // An interval the expiry timer will not take, on the other hand, came out of
+                    // the TLV and is the sender's problem.
+                    Err(err) => return Err(err.into()),
                 }
                 self.route_selection_due = true;
             }
@@ -462,8 +471,7 @@ where
                     // never reached.
                     let expiry = Timer::from_duration(
                         now,
-                        Duration::from(resolved_update.slice.interval())
-                            * self.route_table.route_expiry_time,
+                        Duration::from(resolved_update.slice.interval()) * route_expiry_time,
                     )?;
 
                     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -493,11 +501,10 @@ where
                         // If the router ID for this route was changed and it was selected, an
                         // update MUST be sent.
                         if route.selected {
-                            self.update_table.broadcast_route_update(
+                            route.broadcast_update(
                                 now,
                                 &self.iface_table,
                                 &self.neighbor_table,
-                                route,
                                 None,
                             )?;
                         }
@@ -523,79 +530,85 @@ where
         for mut destination_group in self.route_table.destination_groups_mut() {
             // The route this destination was pointing at before this run, whether or not it is
             // still usable. Only the change detection at the bottom cares about that distinction.
-            let previous: Option<Route<A>> = destination_group
+            let previous: Option<RouteIndex<A>> = destination_group
                 .iter()
                 .find(|route| route.selected)
-                .copied();
+                .map(|route| route.key());
 
-            // The incumbent for hysteresis purposes: the previously selected route, but only
-            // while it still passes the hard rules. One that has been retracted or has gone
-            // unfeasible has no claim on the destination at all.
-            let incumbent = previous.filter(|route| is_eligible(source_table, route));
+            // The previously selected route, but only while it still passes the hard rules. One
+            // that has been retracted or has gone unfeasible cannot be used.
+            let incumbent = destination_group
+                .iter()
+                .find(|route| route.selected && is_eligible(source_table, route))
+                .map(|route| {
+                    (
+                        route.key(),
+                        *route.computed_metric(),
+                        *route.smoothed_metric(),
+                    )
+                });
 
             let winner = match incumbent {
                 // A still-eligible incumbent keeps the destination unless some route beats it on
-                // the real metric *and* on the smoothed one. Requiring both is what stops a route
-                // whose metric is briefly flapping from taking over.
-                Some(incumbent) => Some(
+                // the real metric *and* on the smoothed one.
+                Some((incumbent, incumbent_computed, incumbent_smoothed)) => Some(
                     destination_group
                         .iter()
                         // A set of potential winners must be eligible
                         .filter(|route| is_eligible(source_table, route))
                         // A set of potential winners must have a computed and smoothed metric
-                        // better than the incombent. If there are any items in the iterator at
+                        // better than the incumbent. If there are any items in the iterator at
                         // this point, they are better than the incumbent.
                         .filter(|route| {
-                            route.computed_metric() < incumbent.computed_metric()
-                                && route.smoothed_metric() < incumbent.smoothed_metric()
+                            route.computed_metric() < &incumbent_computed
+                                && route.smoothed_metric() < &incumbent_smoothed
                         })
                         // Take the route that is the minimum of the routes better than the
                         // incumbent. Breaking ties on the route index.
                         .min_by_key(|route| (route.computed_metric(), route.key()))
-                        .copied()
+                        .map(|route| route.key())
                         // If none of these conditions are met, then the incumbent wins.
                         .unwrap_or(incumbent),
                 ),
                 // Nothing to defend the destination, so the best route takes it outright, with the
                 // smoothed metric ignored entirely. This is also the path a destination whose
                 // selected route was just retracted takes.
-                //
-                // Ties break on the route index so that the winner does not depend on where the
-                // entries happen to sit in the table.
                 None => destination_group
                     .iter()
+                    // Potential winners must be eligible
                     .filter(|route| is_eligible(source_table, route))
+                    // Take the route with the minimum metric. Breaking ties on the route index.
                     .min_by_key(|route| (route.computed_metric(), route.key()))
-                    .copied(),
+                    .map(|route| route.key()),
             };
 
-            // Deselect everything, then switch the winner back on. Doing it in that order means a
-            // destination that no longer has an eligible route ends up with nothing selected.
             for route in destination_group.iter_mut() {
+                // Deselect everything, then switch the winner back on. Doing it in that order means
+                // a destination that no longer has an eligible route ends up with
+                // nothing selected.
                 route.selected = false;
-            }
-            if let Some(winner) = winner {
-                destination_group
-                    .iter_mut()
-                    .find(|route| route.key() == winner.key())
-                    .expect("the winner was picked out of this same group")
-                    .selected = true;
 
-                // The destination changed hands, which is 3.7.2's second trigger. Every neighbour
-                // hears it, including the one that advertised the winning route: Babel does not
-                // lean on split horizon to stay loop-free — the feasibility condition does that —
-                // so the advertising neighbour is simply another node that should learn what this
-                // node settled on.
-                if previous.is_none_or(|p| p.key() != winner.key())
-                    && let Err(err) = self.update_table.broadcast_route_update(
-                        now,
-                        &self.iface_table,
-                        &self.neighbor_table,
-                        &winner,
-                        None,
-                    )
-                {
-                    b_debug!("Err adding Update: {}", err);
+                if let Some(win_route) = winner {
+                    if win_route != route.key() {
+                        // If there is a definititive winner and there are other routes to this
+                        // destination, then their update queues should be cleared so they don't
+                        // generate noise.
+                        route.clear_updates();
+                    } else {
+                        route.selected = true;
+
+                        // The destination changed hands, which is 3.7.2's second trigger.
+                        if previous != winner
+                            && let Err(err) = route.broadcast_update(
+                                now,
+                                &self.iface_table,
+                                &self.neighbor_table,
+                                None,
+                            )
+                        {
+                            b_debug!("Err adding Update: {}", err);
+                        }
+                    }
                 }
             }
         }
@@ -645,7 +658,7 @@ mod test {
     use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_structures::route::route_table::DEFAULT_SMOOTHING_MULTIPLE;
     use crate::data_structures::route::{Route, RouteIndex};
-    use crate::data_structures::updates::UpdateIndex;
+    use crate::data_structures::updates::{Update, UpdateIndex};
     use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Interval, RouterId};
     use crate::extension::NoExtension;
@@ -968,34 +981,102 @@ mod test {
         RouteDestination::new(prefix.into(), plen).expect("bad destination")
     }
 
-    /// The update table key an update for `prefix`, originated by `origin`, owed to `send_to`
-    /// lands under.
+    /// What a queued update for `prefix`, originated by `origin`, owed to `send_to` amounts to:
+    /// the source it will advertise paired with the key it sits under in its route's queue.
     ///
-    /// A queued update names a *source* — the destination plus the router-id that originated it —
-    /// not one neighbour's route to it. Which route the TLV is rendered from is decided when the
-    /// packet is written, not when the update is queued.
+    /// An update names only the neighbour it is owed to. What it will *say* — the destination and
+    /// the router-id that originated it — is read off the route holding it at the moment the packet
+    /// is written, so the two have to be looked at together to identify what is actually owed.
     fn update_key(
         origin: [u8; 8],
         prefix: Ipv6Addr,
         send_to: NeighbourIndex<NoExtension>,
-    ) -> UpdateIndex<NoExtension> {
-        UpdateIndex {
-            source: SourceIndex {
+    ) -> (SourceIndex<NoExtension>, UpdateIndex<NoExtension>) {
+        (
+            SourceIndex {
                 router_id: RouterId::from(&origin),
                 destination: dest(prefix, PLEN),
             },
-            neighbour: send_to,
+            UpdateIndex { neighbour: send_to },
+        )
+    }
+
+    /// A `Copy` snapshot of a route table entry.
+    ///
+    /// A [`Route`] owns its update queue, so an entry cannot be lifted out of the table and held on
+    /// to while the router is driven further — which is exactly what these tests do when they take
+    /// a "before" and an "after". Everything the assertions reach for is `Copy`, so this carries
+    /// those and nothing else, under the names [`Route`] gives them.
+    #[derive(Debug, Clone, Copy)]
+    struct RouteSnapshot {
+        source: SourceIndex<NoExtension>,
+        neighbour: NeighbourIndex<NoExtension>,
+        pub(crate) seqno: SeqNo,
+        advertised_metric: Metric,
+        computed_metric: Metric,
+        smoothed_metric: Metric,
+        pub(crate) smoothed_metric_time: Instant,
+        pub(crate) next_hop: Address<NoExtension>,
+        pub(crate) selected: bool,
+        pub(crate) expiry: Timer,
+        /// Whether this route's own update queue is empty. The queue itself cannot come along —
+        /// the route owns it — but whether there is anything in it is what the tests ask.
+        pub(crate) owes_nothing: bool,
+    }
+
+    impl RouteSnapshot {
+        fn of(route: &Route<'_, NoExtension>) -> Self {
+            Self {
+                source: *route.source(),
+                neighbour: *route.neigbour(),
+                seqno: route.seqno,
+                advertised_metric: *route.advertised_metric(),
+                computed_metric: *route.computed_metric(),
+                smoothed_metric: *route.smoothed_metric(),
+                smoothed_metric_time: route.smoothed_metric_time,
+                next_hop: route.next_hop,
+                selected: route.selected,
+                expiry: route.expiry,
+                owes_nothing: route.update_queue.inner.iter().next().is_none(),
+            }
+        }
+
+        fn source(&self) -> &SourceIndex<NoExtension> {
+            &self.source
+        }
+
+        fn neigbour(&self) -> &NeighbourIndex<NoExtension> {
+            &self.neighbour
+        }
+
+        fn advertised_metric(&self) -> &Metric {
+            &self.advertised_metric
+        }
+
+        fn computed_metric(&self) -> &Metric {
+            &self.computed_metric
+        }
+
+        fn smoothed_metric(&self) -> &Metric {
+            &self.smoothed_metric
+        }
+
+        fn key(&self) -> RouteIndex<NoExtension> {
+            RouteIndex {
+                destination: self.source.destination,
+                neighbour: self.neighbour,
+            }
         }
     }
 
-    /// Copies out the route table entry indexed by (prefix, plen, neighbour), if it exists.
+    /// Snapshots the route table entry indexed by (prefix, plen, neighbour), if it exists.
     fn route_for(
         r: &mut BabelRouter<'static>,
         iface: InterfaceHandle,
         neighbour: Ipv6Addr,
         prefix: Ipv6Addr,
         plen: u8,
-    ) -> Option<Route<NoExtension>> {
+    ) -> Option<RouteSnapshot> {
         let idx = RouteIndex {
             destination: dest(prefix, plen),
             neighbour: NeighbourIndex {
@@ -1003,11 +1084,62 @@ mod test {
                 addr: neighbour.into(),
             },
         };
-        r.route_table.inner.get_by_key(&idx).copied()
+        r.route_table
+            .get_mut_by_key(&idx)
+            .map(|r| RouteSnapshot::of(r))
+    }
+
+    /// [`is_eligible`] applied to the entry still sitting in the table, which a [`RouteSnapshot`]
+    /// cannot stand in for: eligibility is asked of a real route.
+    fn is_eligible_in_table(r: &mut BabelRouter<'static>, key: &RouteIndex<NoExtension>) -> bool {
+        let source_table = &r.source_table;
+        r.route_table
+            .get_mut_by_key(key)
+            .is_some_and(|route| is_eligible(source_table, route))
     }
 
     fn route_count(r: &mut BabelRouter<'static>) -> usize {
-        r.route_table.inner.iter().count()
+        r.route_table.iter_mut().count()
+    }
+
+    /// The keys of every route currently holding a destination.
+    fn selected_route_keys(r: &mut BabelRouter<'static>) -> Vec<RouteIndex<NoExtension>> {
+        r.route_table
+            .iter_mut()
+            .filter(|route| route.selected)
+            .map(|route| route.key())
+            .collect()
+    }
+
+    /// Every update the router still owes, paired with the source of the route that holds it, in
+    /// the order a poll would walk them.
+    ///
+    /// Queues hang off the routes, so this is the route table's order — (prefix, plen, advertising
+    /// neighbour) — and then each route's own queue, which is keyed by the neighbour owed. The
+    /// source rides along because an update no longer carries one: what it will advertise is only
+    /// knowable from the route it hangs off.
+    fn pending_updates(
+        r: &mut BabelRouter<'static>,
+    ) -> Vec<(SourceIndex<NoExtension>, Update<NoExtension>)> {
+        r.route_table
+            .iter_mut()
+            .flat_map(|route| {
+                let source = *route.source();
+                route
+                    .update_queue
+                    .inner
+                    .iter()
+                    .map(move |update| (source, *update))
+            })
+            .collect()
+    }
+
+    /// Drops every update the router is holding, so what a later step queues is measured on its
+    /// own.
+    fn drain_updates(r: &mut BabelRouter<'static>) {
+        for route in r.route_table.iter_mut() {
+            route.update_queue.clear();
+        }
     }
 
     /// Brings a neighbour to the state an Update needs to yield a finite route metric: enough
@@ -2554,13 +2686,11 @@ mod test {
         r: &mut BabelRouter<'static>,
         now: Instant,
     ) -> Vec<RouteDestination<NoExtension>> {
-        r.update_table.inner.retain(|_| false);
+        drain_updates(r);
         r.select_routes(now);
-        let mut destinations: Vec<RouteDestination<NoExtension>> = r
-            .update_table
-            .inner
+        let mut destinations: Vec<RouteDestination<NoExtension>> = pending_updates(r)
             .iter()
-            .map(|update| update.key().source.destination)
+            .map(|(source, _)| source.destination)
             .collect();
         destinations.dedup();
         destinations
@@ -2683,21 +2813,15 @@ mod test {
             &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 200).seqno(5)],
         );
 
-        let selected: Vec<Route<NoExtension>> = r
-            .route_table
-            .inner
-            .iter()
-            .filter(|r| r.selected)
-            .copied()
-            .collect();
+        let selected = selected_route_keys(&mut r);
         assert!(
             !selected.is_empty(),
             "the destination should still be held by something"
         );
-        for route in &selected {
+        for key in &selected {
             assert!(
-                is_eligible(&r.source_table, route),
-                "a selected route must satisfy the feasibility condition, {route:?} does not"
+                is_eligible_in_table(&mut r, key),
+                "a selected route must satisfy the feasibility condition, {key:?} does not"
             );
         }
 
@@ -2782,7 +2906,7 @@ mod test {
             "and the unfeasible metric was recorded with it"
         );
         assert!(
-            !is_eligible(&r.source_table, &route),
+            !is_eligible_in_table(&mut r, &route.key()),
             "which leaves the entry unfeasible — the state the deselect below exists for"
         );
         assert!(
@@ -2790,10 +2914,10 @@ mod test {
             "so selection must have taken the destination off it"
         );
 
-        for route in r.route_table.inner.iter().filter(|r| r.selected) {
+        for key in &selected_route_keys(&mut r) {
             assert!(
-                is_eligible(&r.source_table, route),
-                "a selected route must satisfy the feasibility condition, {route:?} does not"
+                is_eligible_in_table(&mut r, key),
+                "a selected route must satisfy the feasibility condition, {key:?} does not"
             );
         }
     }
@@ -2980,12 +3104,7 @@ mod test {
 
         // Drive the selected route to infinity behind selection's back, the way an expiry sweep
         // would, so the next run has a real change to report.
-        for route in r
-            .route_table
-            .inner
-            .iter_mut()
-            .filter(|route| route.selected)
-        {
+        for route in r.route_table.iter_mut().filter(|route| route.selected) {
             route.retract();
         }
 
@@ -3074,7 +3193,7 @@ mod test {
             iface,
             addr: neighbour.into(),
         };
-        for route in r.route_table.inner.iter_mut() {
+        for route in r.route_table.iter_mut() {
             route.selected = *route.neigbour() == idx;
         }
     }
@@ -3096,7 +3215,7 @@ mod test {
 
         // Clear the selection the updates left behind. This is the state a destination is in when
         // every route towards it has just come back from having been retracted.
-        for route in r.route_table.inner.iter_mut() {
+        for route in r.route_table.iter_mut() {
             route.selected = false;
         }
 
@@ -3377,16 +3496,18 @@ mod test {
         /// difference and an advertised move of this size is a computed move of this size.
         const SIGNIFICANT_MOVE: u16 = METRIC_DIFFERENCE_THRESHOLD.raw() + 1;
 
-        /// The (destination, destination neighbour) keys the update table is holding.
+        /// The (destination, destination neighbour) keys the router is holding updates for.
         ///
-        /// In table order, which is sorted by the destination — (prefix, plen) — and then by the
-        /// neighbour the update is owed to. Note that a queued update names the destination only:
-        /// two routes to the same prefix cannot each queue their own update.
-        fn pending(r: &BabelRouter<'static>) -> Vec<UpdateIndex<NoExtension>> {
-            r.update_table
-                .inner
+        /// In poll order, which walks the route table — sorted by (prefix, plen, advertising
+        /// neighbour) — and then each route's own queue, sorted by the neighbour the update is
+        /// owed to. Two routes towards one prefix now each carry their own queue, so a destination
+        /// can appear more than once here where the single shared table would have collapsed it.
+        fn pending(
+            r: &mut BabelRouter<'static>,
+        ) -> Vec<(SourceIndex<NoExtension>, UpdateIndex<NoExtension>)> {
+            pending_updates(r)
                 .iter()
-                .map(|update| update.key())
+                .map(|(source, update)| (*source, update.key()))
                 .collect()
         }
 
@@ -3438,7 +3559,7 @@ mod test {
                 is_selected(r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
                 "the only route to the destination should hold it"
             );
-            r.update_table.inner.retain(|_| false);
+            drain_updates(r);
             iface
         }
 
@@ -3471,7 +3592,7 @@ mod test {
 
             assert_eq!(route_count(&mut r), 1, "the route itself was still created");
             assert_eq!(
-                pending(&r),
+                pending(&mut r),
                 alloc::vec![],
                 "acquisition sees neither of its triggers, so it queues nothing"
             );
@@ -3479,7 +3600,7 @@ mod test {
             r.poll_tick(t0).expect("poll should succeed");
 
             assert_eq!(
-                pending(&r),
+                pending(&mut r),
                 alloc::vec![
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
@@ -3506,7 +3627,7 @@ mod test {
             );
 
             assert_eq!(
-                pending(&r),
+                pending(&mut r),
                 alloc::vec![
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
@@ -3535,7 +3656,7 @@ mod test {
             );
 
             assert_eq!(
-                pending(&r).len(),
+                pending(&mut r).len(),
                 3,
                 "an improvement past the threshold is relayed to the whole link"
             );
@@ -3572,7 +3693,7 @@ mod test {
                 !is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
                 "neighbour 2's route is the one that lost"
             );
-            r.update_table.inner.retain(|_| false);
+            drain_updates(&mut r);
 
             // Move the loser's metric well past the threshold, but not far enough to win.
             send_updates(
@@ -3592,7 +3713,7 @@ mod test {
                 !is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
                 "it still holds nothing, so the move is nobody's business"
             );
-            assert!(pending(&r).is_empty());
+            assert!(pending(&mut r).is_empty());
         }
 
         /// The other side of the threshold. Metrics drift constantly, and relaying every wobble
@@ -3616,7 +3737,7 @@ mod test {
                 SETTLED_METRIC + METRIC_DIFFERENCE_THRESHOLD.raw(),
             );
 
-            assert!(pending(&r).is_empty());
+            assert!(pending(&mut r).is_empty());
         }
 
         /// 3.7.2's one MUST: "if the router-id of the selected route for a given prefix changes, a
@@ -3631,13 +3752,110 @@ mod test {
             advertise(&mut r, t0, iface, ORIGIN_2, &PREFIX_A_WIRE, SETTLED_METRIC);
 
             assert_eq!(
-                pending(&r),
+                pending(&mut r),
                 alloc::vec![
                     // The update names the *new* router-id: the entry's source moved with it.
                     update_key(ORIGIN_2, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
                     update_key(ORIGIN_2, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
                     update_key(ORIGIN_2, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
+            );
+        }
+
+        /// Queues hang off routes, so a destination that changes hands would otherwise be owed
+        /// twice — once by the route that was holding it and once by the route that just took it.
+        /// Selection drops the loser's queue for exactly that reason: whatever it still had to say
+        /// about the destination is superseded by the winner's update.
+        ///
+        /// The move is driven by retracting the incumbent, which queues a relay on it first — so at
+        /// the moment selection runs, the loser really is holding something. A worsened metric
+        /// would not do: hysteresis holds the destination against a challenger that has not also
+        /// won on the smoothed metric, and at a single instant no smoothing has happened.
+        #[test]
+        fn a_destination_changing_hands_drops_what_the_loser_owed() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = three_neighbours(&mut r, t0);
+
+            // Neighbour 1 takes the destination on the lower metric, leaving neighbour 2's route
+            // tracked and ready to take over.
+            advertise(&mut r, t0, iface, ORIGIN_1, &PREFIX_A_WIRE, SETTLED_METRIC);
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, SETTLED_METRIC + 1)],
+            );
+            assert!(
+                is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+                "the lower metric holds the destination to begin with"
+            );
+            drain_updates(&mut r);
+
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE)],
+            );
+
+            assert!(
+                is_selected(&mut r, iface, NEIGHBOUR_2_ADDR, PREFIX_A, PLEN),
+                "which hands the destination to neighbour 2's route"
+            );
+            assert_eq!(
+                pending(&mut r),
+                alloc::vec![
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                ],
+                "one update per neighbour, from the winner — the relay the loser queued for its \
+                 own retraction went with the destination"
+            );
+            assert!(
+                route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+                    .expect("the loser is still in the table")
+                    .owes_nothing,
+                "and the loser's queue is empty rather than holding a second, infinite copy"
+            );
+        }
+
+        /// The limit of that clearing: it is sound only because a winner's update supersedes what
+        /// the loser owed. A destination that has just lost its *last* eligible route has no winner
+        /// to supersede anything, so the retraction its previous holder queued has to survive —
+        /// that retraction is the only thing telling the neighbours the destination is gone.
+        #[test]
+        fn a_destination_with_nothing_to_fail_over_to_keeps_its_retraction() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = settled(&mut r, t0);
+
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE)],
+            );
+
+            assert!(
+                !is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+                "the only route to the destination was retracted, so nothing holds it"
+            );
+            assert_eq!(
+                pending(&mut r),
+                alloc::vec![
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                ],
+                "the retraction is still owed to the whole link"
             );
         }
 
@@ -3669,7 +3887,7 @@ mod test {
                 &Metric::INFINITY,
             );
             assert_eq!(
-                pending(&r),
+                pending(&mut r),
                 alloc::vec![
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
@@ -3687,11 +3905,12 @@ mod test {
         ///
         /// * neighbour 1 held both destinations, so both are relayed to every neighbour on the
         ///   link;
-        /// * `PREFIX_A` fails over to neighbour 2's route, which selection advertises to the whole
-        ///   link as well — but an update names a destination, not one neighbour's route to it, so
-        ///   the failover lands on the keys the relay already queued rather than beside them. That
-        ///   is what stops a retraction and its own failover from both reaching the wire;
-        /// * `PREFIX_B` has nothing to fail over to, so selection queues nothing for it.
+        /// * `PREFIX_A` fails over to neighbour 2's route, and selection advertises that to the
+        ///   whole link — dropping the retraction neighbour 1's route had queued as it goes, since
+        ///   the winner's update supersedes it. That is what stops a retraction and its own
+        ///   failover from both reaching the wire;
+        /// * `PREFIX_B` has nothing to fail over to, so its retraction stays queued and selection
+        ///   adds nothing.
         #[test]
         fn a_blanket_retraction_relays_every_route_that_neighbour_advertised() {
             let mut r = router("node_1");
@@ -3715,7 +3934,7 @@ mod test {
             );
             // Everything the setup queued is selection advertising the three new routes, which is
             // not what this test is measuring.
-            r.update_table.inner.retain(|_| false);
+            drain_updates(&mut r);
 
             send_updates(
                 &mut r,
@@ -3727,7 +3946,7 @@ mod test {
             );
 
             assert_eq!(
-                pending(&r),
+                pending(&mut r),
                 alloc::vec![
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
@@ -3764,7 +3983,7 @@ mod test {
                 &[UpdateTlv::blanket_retraction().plen(64)],
             );
 
-            assert!(pending(&r).is_empty());
+            assert!(pending(&mut r).is_empty());
         }
 
         /// The fourth way a route can go away, and the only one no neighbour announces: its hold
@@ -3789,7 +4008,7 @@ mod test {
             assert_eq!(*route.computed_metric(), Metric::INFINITY);
             assert!(!route.selected, "and it gives up the destination");
             assert_eq!(
-                pending(&r),
+                pending(&mut r),
                 alloc::vec![
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
@@ -3824,13 +4043,13 @@ mod test {
                 is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
                 "the lower route key holds the destination"
             );
-            r.update_table.inner.retain(|_| false);
+            drain_updates(&mut r);
 
             let expired = t0 + expected_expiry(UPDATE_INTERVAL_CENTIS) + Duration::from_secs(1);
             r.poll_tick(expired).expect("poll should succeed");
 
             assert_eq!(
-                pending(&r),
+                pending(&mut r),
                 alloc::vec![
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
@@ -3859,11 +4078,9 @@ mod test {
                 SETTLED_METRIC + SIGNIFICANT_MOVE,
             );
 
-            let policy: Vec<(u8, bool)> = r
-                .update_table
-                .inner
+            let policy: Vec<(u8, bool)> = pending_updates(&mut r)
                 .iter()
-                .map(|update| (update.send_count, update.mcast_allowed))
+                .map(|(_, update)| (update.send_count, update.mcast_allowed))
                 .collect();
             assert_eq!(
                 policy,
