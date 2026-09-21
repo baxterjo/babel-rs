@@ -328,16 +328,20 @@ impl<A: AddressExt> Neighbour<A> {
         let (mcast_update, mcast_dur) = self.mcast_hello_info.poll_tick(now);
         let (ucast_update, ucast_dur) = self.ucast_hello_info.poll_tick(now);
         // If the IHU expires, set tx_cost to infinity, this requires an update.
-        let expiry_update = if self.ihu_hold_timer.is_finished(now) {
-            self.tx_cost = TxCost::INFINITY;
-            true
-        } else {
-            false
-        };
+        let (expiry_update, expiry_dur) =
+            if let Some(remaining) = self.ihu_hold_timer.time_remaining(now) {
+                (false, Some(remaining))
+            } else {
+                self.tx_cost = TxCost::INFINITY;
+                (true, None)
+            };
 
         (
             mcast_update || ucast_update || expiry_update,
-            [mcast_dur, ucast_dur].into_iter().flatten().min(),
+            [mcast_dur, ucast_dur, expiry_dur]
+                .into_iter()
+                .flatten()
+                .min(),
         )
     }
     //  ___  ___  _    _      _   _  ___   _   ___ _____   _  _ ___ _    _    ___

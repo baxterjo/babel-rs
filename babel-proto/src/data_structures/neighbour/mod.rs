@@ -84,7 +84,7 @@ impl<A: AddressExt> NeighbourConfig<A> {
             // sensible defualt.
             inbound_ihu_interval: (DEFAULT_LOSSLESS_IHU_RATIO
                 .apply(*DEFAULT_MULTICAST_HELLO_INTERVAL)
-                * DEFAULT_HOLD_TIME_MULTIPLIER)
+                * interface.ihu_hold_time_multiple)
                 .into(),
             // This is set as a ratio of mcast hellos to outbound IHUs
             outbound_ihu_interval: (DEFAULT_LOSSLESS_IHU_RATIO
