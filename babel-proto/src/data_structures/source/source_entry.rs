@@ -50,13 +50,13 @@ impl<A: AddressExt> Source<A> {
         seqno: SeqNo,
         metric: Metric,
         gc_interval: Duration,
-    ) -> Result<Self, SourceError<A>> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             destination: index.destination,
             router_id: index.router_id,
             feasibility: Feasibility::new(seqno, metric),
-            gc_timer: Timer::from_duration(now, gc_interval)?,
-        })
+            gc_timer: Timer::from_duration(now, gc_interval),
+        }
     }
     pub(crate) fn destination(&self) -> &RouteDestination<A> {
         &self.destination

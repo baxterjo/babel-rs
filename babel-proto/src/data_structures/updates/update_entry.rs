@@ -43,16 +43,16 @@ impl<A: AddressExt> Update<A> {
         _ack: bool,
         retry_interval: Duration,
         send_count: u8,
-    ) -> Result<Self, UpdateError> {
+    ) -> Self {
         // Retry count cannot be more than 5
         let send_count = send_count.min(5);
-        Ok(Self {
+        Self {
             neighbour,
             mcast_allowed,
             _ack: None,
-            send_timer: Timer::eager_from_duration(now, retry_interval)?,
+            send_timer: Timer::eager_from_duration(now, retry_interval),
             send_count,
-        })
+        }
     }
 
     /// Takes over the send state of a newly queued update for the same (source, neighbour) pair.

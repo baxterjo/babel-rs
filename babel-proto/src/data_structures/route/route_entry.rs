@@ -1,6 +1,5 @@
 use crate::data_structures::interface::{Interface, InterfaceTable};
 use crate::data_structures::neighbour::{Neighbour, NeighbourIndex, NeighbourTable};
-use crate::data_structures::route::RouteError;
 use crate::data_structures::source::{SourceIndex, SourceTable};
 use crate::data_structures::updates::{Update, UpdateError, UpdateTable};
 use crate::data_types::address::Address;
@@ -115,9 +114,9 @@ impl<'storage, A: AddressExt> Route<'storage, A> {
         interval: Interval,
         hold_time: DurationMultiplier,
         update_storage: ManagedSlice<'storage, Option<Update<A>>>,
-    ) -> Result<Self, RouteError> {
-        let expiry = Timer::from_duration(now, Duration::from(interval) * hold_time)?;
-        Ok(Self {
+    ) -> Self {
+        let expiry = Timer::from_duration(now, Duration::from(interval) * hold_time);
+        Self {
             source,
             neighbour,
             seqno,
@@ -129,7 +128,7 @@ impl<'storage, A: AddressExt> Route<'storage, A> {
             selected,
             expiry,
             update_queue: UpdateTable::new_with_storage(update_storage),
-        })
+        }
     }
 
     /// Queues an update for this route to one neighbour.
@@ -155,26 +154,14 @@ impl<'storage, A: AddressExt> Route<'storage, A> {
     ) -> Result<(), UpdateError> {
         for interface in interfaces.iter() {
             for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
-                // An update names the neighbour it is owed to and the terms it goes out on;
-                // what it will say about the route is read off this route when it is written.
-                let update = match Update::new(
+                self.add_update(Update::new(
                     now,
                     neighbour.key(),
                     !interface.prefer_ucast,
                     false,
                     *interface.update_retry_interval,
                     retry_override.unwrap_or(interface.update_retry_limit),
-                ) {
-                    Ok(u) => u,
-                    Err(err) => {
-                        // An error here might be a bad timer, so we can continue.
-                        b_debug!("Err creating udpate: {}", err);
-                        continue;
-                    }
-                };
-
-                // An error here is a true error
-                self.add_update(update)?;
+                ))?;
             }
         }
         Ok(())

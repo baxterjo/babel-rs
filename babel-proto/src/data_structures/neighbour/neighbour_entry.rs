@@ -131,13 +131,13 @@ impl<A: AddressExt> InternallyKeyed for Neighbour<A> {
 }
 
 impl<A: AddressExt> Neighbour<A> {
-    pub(crate) fn new(now: Instant, config: NeighbourConfig<A>) -> Result<Self, NeighbourError<A>> {
+    pub(crate) fn new(now: Instant, config: NeighbourConfig<A>) -> Self {
         let ucast_hello_timer = match config.ucast_hello_interval {
-            Some(interval) => Some(Timer::eager_from_interval(now, interval)?),
+            Some(interval) => Some(Timer::eager_from_interval(now, interval)),
             None => None,
         };
 
-        Ok(Self {
+        Self {
             iface: config.iface,
             address: config.address,
             // When a neighbour is new, this router has never received a hello from it. This
@@ -149,16 +149,16 @@ impl<A: AddressExt> Neighbour<A> {
             tx_cost: TxCost::INFINITY,
             // When a neighbour is new, this router has never received an IHU from it, so it's IHU
             // timer is set to the spec default.
-            ihu_hold_timer: Timer::from_interval(now, config.inbound_ihu_interval)?,
+            ihu_hold_timer: Timer::from_interval(now, config.inbound_ihu_interval),
             pending: NeighbourPending {
                 ucast_hello: ucast_hello_timer.map(|t| TxHelloInfo {
                     seqno: SeqNo(0),
                     timer: t,
                 }),
                 // When a neighbour is new, send an immediate IHU to speed up convergence.
-                outbound_ihu_timer: Timer::eager_from_interval(now, config.outbound_ihu_interval)?,
+                outbound_ihu_timer: Timer::eager_from_interval(now, config.outbound_ihu_interval),
             },
-        })
+        }
     }
 
     pub(crate) fn interface(&self) -> &InterfaceHandle {
@@ -272,13 +272,11 @@ impl<A: AddressExt> Neighbour<A> {
 
         if flags.is_unicast() {
             self.ucast_hello_info.expected_seqno = Some(seqno + 1);
-            self.ucast_hello_info.timer =
-                Timer::from_interval(now, hello_interval).expect("Timer duration checked above");
+            self.ucast_hello_info.timer = Timer::from_interval(now, hello_interval);
             self.ucast_hello_info.history.record(true);
         } else {
             self.mcast_hello_info.expected_seqno = Some(seqno + 1);
-            self.mcast_hello_info.timer =
-                Timer::from_interval(now, hello_interval).expect("Timer duration checked above");
+            self.mcast_hello_info.timer = Timer::from_interval(now, hello_interval);
             self.mcast_hello_info.history.record(true);
         }
     }
@@ -300,9 +298,17 @@ impl<A: AddressExt> Neighbour<A> {
         let rx_cost = ihu.rx_cost();
         let interval = ihu.interval();
 
+        // Section 4.6.6: the Interval "MUST NOT be 0". It is the only thing an IHU says about how
+        // long to hold the txcost it carries, so without one there is no hold time to apply it
+        // under. Checked before anything is touched so a rejected IHU leaves the neighbour exactly
+        // as it was.
+        if interval.is_zero() {
+            return Err(NeighbourError::ZeroIhuInterval);
+        }
+
         let timer_dur: Duration = interval.into();
 
-        self.ihu_hold_timer = Timer::from_duration(now, timer_dur * hold_time)?;
+        self.ihu_hold_timer = Timer::from_duration(now, timer_dur * hold_time);
 
         let run_selection = self.tx_cost != rx_cost.into();
 
@@ -594,8 +600,7 @@ impl RxHelloInfo {
         // A hello with a non-zero interval is scheduled.
         if !new_interval.is_zero() {
             self.timer
-                .set_tick_duration(*new_interval * HELLO_INTERVAL_MULTIPLIER)
-                .expect("Just checked that interval is not zero");
+                .set_tick_duration(*new_interval * HELLO_INTERVAL_MULTIPLIER);
             // Timer only restarts on scheduled hellos.
             self.timer.restart(now);
         }
@@ -682,7 +687,7 @@ mod test {
     fn neighbour(now: Instant) -> Neighbour<NoExtension> {
         let handle = InterfaceHandle::try_from("iface_1").expect("bad interface handle");
         let config = NeighbourConfig::spec_default(handle, core::net::Ipv6Addr::LOCALHOST.into());
-        Neighbour::new(now, config).expect("bad neighbour")
+        Neighbour::new(now, config)
     }
 
     fn mcast_history(n: &Neighbour<NoExtension>) -> BitHistory {

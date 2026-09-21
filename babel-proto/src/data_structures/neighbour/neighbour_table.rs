@@ -1,6 +1,6 @@
 use crate::data_structures::interface::{Interface, InterfaceHandle};
 use crate::data_structures::neighbour::neighbour_entry::Neighbour;
-use crate::data_structures::neighbour::{NeighbourConfig, NeighbourError, NeighbourIndex};
+use crate::data_structures::neighbour::{NeighbourConfig, NeighbourError};
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
@@ -75,7 +75,7 @@ where
         now: Instant,
         config: NeighbourConfig<A>,
     ) -> Result<(), NeighbourError<A>> {
-        let neighbour = Neighbour::new(now, config)?;
+        let neighbour = Neighbour::new(now, config);
         let index = neighbour.key();
 
         b_debug!("Registering neighbour: {:?}", index);
@@ -162,6 +162,7 @@ mod test {
     use core::net::Ipv6Addr;
 
     use super::*;
+    use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_types::Interval;
     use crate::extension::NoExtension;
     use crate::utils::Duration;

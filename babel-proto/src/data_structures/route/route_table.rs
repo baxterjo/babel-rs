@@ -16,7 +16,7 @@ use crate::packet::parser::Parser;
 use crate::packet::writer::ready::Ready;
 use crate::packet::writer::{PacketWriterError, PacketWriterStep};
 use crate::utils::destination::DestAddr;
-use crate::utils::storage::{InternallyKeyed, MaybeInUse, Table, TableSlot};
+use crate::utils::storage::{InsertError, InternallyKeyed, MaybeInUse, Recycle, Table, TableSlot};
 use crate::utils::{Duration, DurationMultiplier, Instant, ManagedSlice};
 
 pub const DEFAULT_SMOOTHING_MULTIPLE: DurationMultiplier = DurationMultiplier::new(3, 1);
@@ -118,9 +118,23 @@ where
             interval,
             self.route_expiry_time,
             storage,
-        )?;
+        );
 
-        self.inner.insert(route)?;
+        // If there is an error inserting the route then the storage needs to be returned to the
+        // table.
+        if let Err(err) = self.inner.insert(route) {
+            match err {
+                InsertError::Full(route) => {
+                    self.inner.return_storage(route.release());
+                    return Err(RouteError::Full);
+                }
+                InsertError::Duplicate(route) => {
+                    self.inner.return_storage(route.release());
+                    return Err(RouteError::Duplicate);
+                }
+            }
+        };
+
         Ok(())
     }
 

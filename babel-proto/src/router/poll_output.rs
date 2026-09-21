@@ -356,7 +356,7 @@ where
                             interface.request_acks,
                             *interface.update_retry_interval,
                             1,
-                        )?;
+                        );
                         route.add_update(update)?;
                     }
                 }

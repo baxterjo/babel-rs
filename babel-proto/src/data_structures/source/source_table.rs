@@ -90,7 +90,7 @@ impl<A: AddressExt> SourceTable<'_, A> {
                 metric,
                 // TODO: Make this a setting.
                 SPEC_DEFAULT_SOURCE_GC_TIME,
-            )?) {
+            )) {
                 Err(InsertError::Full(_)) => return Err(SourceError::Full),
                 Ok(_) | Err(InsertError::Duplicate(_)) => {}
             };

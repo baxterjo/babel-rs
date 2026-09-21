@@ -117,7 +117,7 @@ where
             pending_seqno: PendingSeqnoRequestTable::new_with_storage(pending_seqno_table),
             route_table: RouteTable::new_with_storage(route_table, config.route_expiry_multiplier),
             source_table: SourceTable::new_with_storage(source_table),
-            update_timer: Timer::from_interval(now, config.update_interval)?,
+            update_timer: Timer::from_interval(now, config.update_interval),
             route_selection_due: false,
             _state_ext_marker: PhantomData,
             _addr_ext_marker: PhantomData,

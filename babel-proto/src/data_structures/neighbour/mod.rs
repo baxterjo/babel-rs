@@ -110,6 +110,8 @@ pub enum NeighbourError<A: AddressExt> {
     Full,
     #[error("A neighbour with the same index was added twice: {0}")]
     DuplicateNeighbour(NeighbourIndex<A>),
+    #[error("An IHU TLV's Interval must not be 0")]
+    ZeroIhuInterval,
     #[error(transparent)]
     Timer(#[from] TimerError),
     #[error(transparent)]
@@ -138,7 +140,7 @@ mod test {
             config.ucast_hello_interval.is_none(),
             "Spec default does not send ucast hellos."
         );
-        Timer::from_interval(now, config.inbound_ihu_interval).expect("Spec default should work");
-        Timer::from_interval(now, config.outbound_ihu_interval).expect("Spec default should work");
+        Timer::from_interval(now, config.inbound_ihu_interval);
+        Timer::from_interval(now, config.outbound_ihu_interval);
     }
 }

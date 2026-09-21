@@ -208,8 +208,7 @@ mod test {
         send_count: u8,
     ) {
         let route = routes.get_mut_by_key(route).expect("route is in the table");
-        let update = Update::new(t0(), send_to, mcast, false, RETRY_INTERVAL, send_count)
-            .expect("bad retry interval");
+        let update = Update::new(t0(), send_to, mcast, false, RETRY_INTERVAL, send_count);
         route.add_update(update).expect("owned storage grows");
     }
 
@@ -553,7 +552,7 @@ mod test {
             config
                 .add_other_address(IFACE_V4_ADDR.into())
                 .expect("v4 is a fresh family");
-            Interface::new(t0(), config).expect("bad interface config")
+            Interface::new(t0(), config)
         }
 
         /// [`interface`], with no IPv4 address — an IPv6-only link, which cannot advertise IPv4
@@ -563,7 +562,6 @@ mod test {
                 t0(),
                 InterfaceConfig::new_wired(iface_handle(name), IFACE_ADDR.into()),
             )
-            .expect("bad interface config")
         }
 
         /// A placeholder for the source table the write pass takes but does not yet read. Once the

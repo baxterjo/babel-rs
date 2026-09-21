@@ -39,6 +39,8 @@ where
         "Blanket retraction must have a Plen and Omitted of 0 - plen: {plen}, omitted: {omitted}"
     )]
     MalformedBlanketRetraction { plen: u8, omitted: u8 },
+    #[error("An Update TLV's Interval must not be 0")]
+    ZeroUpdateInterval,
     #[error(transparent)]
     Len(#[from] LenError),
     #[error(transparent)]

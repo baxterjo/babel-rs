@@ -312,6 +312,15 @@ where
         // Resolve the update (this also updates the parser state)
         let resolved_update = parser.handle_update(update)?;
 
+        // Section 4.6.9: the Interval "MUST NOT be 0". It is the only thing an Update says about
+        // when to stop believing it, so without one there is no hold time a route could be created
+        // or refreshed under. Checked before the route table is touched so a rejected Update
+        // leaves an existing entry exactly as it was, rather than half-updated with a new metric
+        // under the old expiry.
+        if resolved_update.slice.interval().is_zero() {
+            return Err(BabelError::ZeroUpdateInterval);
+        }
+
         let source = SourceIndex {
             router_id: resolved_update.router_id,
             destination: resolved_update.destination,
@@ -397,8 +406,6 @@ where
                         // TODO(#21): User defined full storage handline.
                         b_debug!("Route not added - Discarded: {:?}", err);
                     }
-                    // An interval the expiry timer will not take, on the other hand, came out of
-                    // the TLV and is the sender's problem.
                     Err(err) => return Err(err.into()),
                 }
                 self.route_selection_due = true;
@@ -465,14 +472,10 @@ where
                     // - Keep track of all non-selected routes (without regard to feasibility) for
                     // fast failover.
 
-                    // The new hold time is built before the entry is touched. An Interval the
-                    // timer rejects has to leave the entry exactly as it was, rather than
-                    // half-updated with a new metric under the old expiry and the deselect below
-                    // never reached.
                     let expiry = Timer::from_duration(
                         now,
                         Duration::from(resolved_update.slice.interval()) * route_expiry_time,
-                    )?;
+                    );
 
                     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                     // and if the advertised metric is not infinite, the route's expiry
@@ -943,11 +946,10 @@ mod test {
     /// Sends a packet carrying a Router-Id TLV followed by `updates`, which is the shape an Update
     /// normally arrives in.
     ///
-    /// `handle_input` only brings the route table up to date; the expiry sweep and route selection
-    /// live in `poll_tick`, which its documentation requires the caller to run immediately
-    /// afterwards. This helper does both so that what a test observes is the state a real caller
-    /// would see. `poll_tick` rather than `poll_output` because the tests below read the update
-    /// table, which sending would drain.
+    /// `handle_input` only brings the route table up to date; the expiry sweep and the route
+    /// selection that follows it live in the poll, which its documentation requires the caller to
+    /// run immediately afterwards. This helper does both through [`tick`] so that what a test
+    /// observes is the state a real caller would see.
     fn send_updates(
         r: &mut BabelRouter<'static>,
         now: Instant,
@@ -967,7 +969,20 @@ mod test {
             receive(iface, from, ReceiveDestination::Multicast, &pkt),
         )
         .expect("handle_input should succeed");
+        tick(r, now);
+    }
+
+    /// Runs the time based sweep and the route selection that follows it.
+    ///
+    /// `poll_tick` only marks selection as due; `poll_output` is where it actually runs. The tests
+    /// below read the update table, which sending would drain, so they take the same two steps
+    /// `poll_output` takes without the packet that would come after them.
+    fn tick(r: &mut BabelRouter<'static>, now: Instant) {
         r.poll_tick(now).expect("poll should succeed");
+        if r.route_selection_due {
+            r.select_routes(now);
+            r.route_selection_due = false;
+        }
     }
 
     fn nbr_idx(iface: InterfaceHandle, addr: Ipv6Addr) -> NeighbourIndex<NoExtension> {
@@ -2696,7 +2711,7 @@ mod test {
         destinations
     }
 
-    /// Selection runs in `poll_tick`, which follows the packet that carried the Update, so a lone
+    /// Selection runs in the poll that follows the packet that carried the Update, so a lone
     /// feasible route holds its destination as soon as that tick has run.
     #[test]
     fn the_only_route_to_a_destination_is_selected() {
@@ -3474,8 +3489,8 @@ mod test {
     ///   retracted at once;
     /// * [`BabelRouter::select_routes`], when a destination changes which route it points at —
     ///   including a destination that had none until now;
-    /// * `poll_tick`, when a selected route's hold time runs out, which is the only one of the five
-    ///   that no neighbour announces.
+    /// * the expiry sweep, when a selected route's hold time runs out, which is the only one of the
+    ///   five that no neighbour announces.
     ///
     /// All five queue the update to every neighbour on the link, the one that advertised the route
     /// included. Babel does not use split horizon to stay loop-free — the feasibility condition of
@@ -3597,7 +3612,7 @@ mod test {
                 "acquisition sees neither of its triggers, so it queues nothing"
             );
 
-            r.poll_tick(t0).expect("poll should succeed");
+            tick(&mut r, t0);
 
             assert_eq!(
                 pending(&mut r),
@@ -3987,12 +4002,12 @@ mod test {
         }
 
         /// The fourth way a route can go away, and the only one no neighbour announces: its hold
-        /// time runs out. Nothing arrives to relay, so `poll_tick` has to notice on its own —
+        /// time runs out. Nothing arrives to relay, so the tick has to notice on its own —
         /// otherwise the rest of the network keeps believing a route this node has already stopped
         /// believing, until its own copy expires.
         ///
-        /// `poll_tick` is called directly rather than through `poll_output`, which would send the
-        /// queued updates and clear them back out before they could be looked at.
+        /// [`tick`] is used rather than `poll_output`, which would send the queued updates and
+        /// clear them back out before they could be looked at.
         #[test]
         fn an_expiring_route_is_retracted_to_every_neighbour() {
             let mut r = router("node_1");
@@ -4001,7 +4016,7 @@ mod test {
 
             // One second past the hold time the route's Interval bought it.
             let expired = t0 + expected_expiry(UPDATE_INTERVAL_CENTIS) + Duration::from_secs(1);
-            r.poll_tick(expired).expect("poll should succeed");
+            tick(&mut r, expired);
 
             let route = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
                 .expect("an expired route is retracted before it is dropped");
@@ -4046,7 +4061,7 @@ mod test {
             drain_updates(&mut r);
 
             let expired = t0 + expected_expiry(UPDATE_INTERVAL_CENTIS) + Duration::from_secs(1);
-            r.poll_tick(expired).expect("poll should succeed");
+            tick(&mut r, expired);
 
             assert_eq!(
                 pending(&mut r),
