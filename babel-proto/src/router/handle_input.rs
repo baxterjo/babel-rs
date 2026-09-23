@@ -133,7 +133,7 @@ where
 
         // After all packets have been handled, metrics can be updated for this neighbour.
         if let Some(neighbour) = neighbour_udpate {
-            self.update_metrics_for_neighbour(now, &interface, neighbour)?;
+            self.update_metrics_for_neighbour(now, &interface, neighbour);
             self.route_selection_due = true;
         }
 
@@ -257,6 +257,7 @@ where
         // |_|_\___| |_| |_|_\/_/ \_\___| |_| |___\___/|_|\_|
 
         if update.is_blanket_retraction() {
+            b_debug!("Update is a blanket retraction.");
             // Section 4.6.9: "If the metric is infinite and AE is 0, Plen and Omitted MUST both be
             // 0; Update TLVs that do not satisfy this requirement MUST be ignored."
             if update.plen() != 0 || update.ommitted() != 0 {
@@ -269,11 +270,10 @@ where
             // advertised.
             for route in self.route_table.iter_mut().filter(|r| r.neigbour() == &idx) {
                 route.retract();
-                // Send an update if the route was selected
                 if route.selected {
-                    route.broadcast_update(now, &self.iface_table, &self.neighbor_table, None)?;
+                    b_trace!("Selected route retracted, selection is due.");
+                    self.route_selection_due = true;
                 }
-                self.route_selection_due = true;
             }
             return Ok(neighbour.key());
         }
@@ -284,6 +284,7 @@ where
         // |_|_\___| |_| |_|_\/_/ \_\___| |_| |___\___/|_|\_|
 
         if update.is_retraction() {
+            b_debug!("Update is a retraction.");
             // A retraction only has to name the entry it retracts. Section 4.6.9: "the router-id,
             // next hop, and seqno are not used" This means that the parser does not need to have
             // state for router-id or next hop in this branch.
@@ -293,12 +294,11 @@ where
                 destination: RouteDestination::new(prefix, update.plen())?,
                 neighbour: neighbour.key(),
             }) {
-                // Only send an update if the route is selected.
-                if route.selected {
-                    route.broadcast_update(now, &self.iface_table, &self.neighbor_table, None)?;
-                }
                 route.retract();
-                self.route_selection_due = true;
+                if route.selected {
+                    b_trace!("Selected route retracted, selection is due.");
+                    self.route_selection_due = true;
+                }
             } else {
                 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                 // if the metric is infinite (the update is a retraction of a route we do not know
@@ -489,6 +489,7 @@ where
                     // If the update is unfeasible, then the (now unfeasible) entry MUST be
                     // immediately unselected.
                     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                    let was_selected = route.selected;
                     if !feasible {
                         route.selected = false;
                     }
@@ -503,13 +504,13 @@ where
 
                         // If the router ID for this route was changed and it was selected, an
                         // update MUST be sent.
-                        if route.selected {
+                        if was_selected {
                             route.broadcast_update(
                                 now,
                                 &self.iface_table,
                                 &self.neighbor_table,
                                 None,
-                            )?;
+                            );
                         }
                     }
 
@@ -526,11 +527,17 @@ where
     /// The recommended route selection procedure as defined in
     /// [Section 3.6](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection)
     /// and [Appendix A.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection)
+    ///
+    /// This method selects routes and publishes updates triggered as a result of route selection.
     pub(super) fn select_routes(&mut self, now: Instant) {
         // A shared borrow of one field while `route_table` is borrowed mutably below.
         let source_table = &self.source_table;
 
+        b_debug!("Route selection...");
+
         for mut destination_group in self.route_table.destination_groups_mut() {
+            let dest = destination_group.destination();
+            b_debug!("{:?} options for {:?}", dest, destination_group.len());
             // The route this destination was pointing at before this run, whether or not it is
             // still usable. Only the change detection at the bottom cares about that distinction.
             let previous: Option<RouteIndex<A>> = destination_group
@@ -560,7 +567,7 @@ where
                         // A set of potential winners must be eligible
                         .filter(|route| is_eligible(source_table, route))
                         // A set of potential winners must have a computed and smoothed metric
-                        // better than the incumbent. If there are any items in the iterator at
+                        // better than the incumbent. If there are any items in the iterator after
                         // this point, they are better than the incumbent.
                         .filter(|route| {
                             route.computed_metric() < &incumbent_computed
@@ -585,32 +592,58 @@ where
                     .map(|route| route.key()),
             };
 
+            b_trace!(
+                "previous: {:?}, incumbent: {:?}, winner: {:?}",
+                previous,
+                incumbent.map(|i| i.0),
+                winner
+            );
+
+            b_debug!("{:?} -> {:?}", dest, winner);
+
             for route in destination_group.iter_mut() {
                 // Deselect everything, then switch the winner back on. Doing it in that order means
                 // a destination that no longer has an eligible route ends up with
                 // nothing selected.
                 route.selected = false;
 
-                if let Some(win_route) = winner {
-                    if win_route != route.key() {
-                        // If there is a definititive winner and there are other routes to this
-                        // destination, then their update queues should be cleared so they don't
-                        // generate noise.
-                        route.clear_updates();
-                    } else {
-                        route.selected = true;
+                match (previous, winner) {
+                    (prev_opt, Some(win)) => {
+                        if win == route.key() {
+                            // If this route is the winner then mark it selected.
+                            route.selected = true;
 
-                        // The destination changed hands, which is 3.7.2's second trigger.
-                        if previous != winner
-                            && let Err(err) = route.broadcast_update(
+                            // If a new winner has been selected OR a winner has been selected for
+                            // the first time, broadcast an updated.
+                            if prev_opt.is_none_or(|p| p != win) {
+                                route.broadcast_update(
+                                    now,
+                                    &self.iface_table,
+                                    &self.neighbor_table,
+                                    None,
+                                );
+                            }
+                        } else {
+                            // If there is a winner and it is not this route, clear this route's
+                            // update queue to reduce noise.
+                            route.clear_updates();
+                        }
+                    }
+                    (Some(prev), None) => {
+                        // If this route WAS selected before and there are now no eligible routes
+                        // due to a retraction, publish an update.
+                        if prev == route.key() && route.computed_metric() == &Metric::INFINITY {
+                            route.broadcast_update(
                                 now,
                                 &self.iface_table,
                                 &self.neighbor_table,
                                 None,
-                            )
-                        {
-                            b_debug!("Err adding Update: {}", err);
+                            );
                         }
+                    }
+                    (None, None) => {
+                        // If no winner has been selected and no winner is selected this time, do
+                        // nothing.
                     }
                 }
             }
@@ -618,8 +651,8 @@ where
     }
 }
 
-/// Section 3.6's hard rules, which no amount of hysteresis can talk a route past: a route with an
-/// infinite metric has been retracted, and an unfeasible one risks a routing loop.
+/// Section 3.6's hard rules: a route with an infinite metric has been retracted, and an unfeasible
+/// one risks a routing loop.
 fn is_eligible<A: AddressExt>(source_table: &SourceTable<'_, A>, route: &Route<A>) -> bool {
     route.computed_metric() != &Metric::INFINITY
         && source_table.is_feasible(route.source(), route.advertised_metric(), &route.seqno)

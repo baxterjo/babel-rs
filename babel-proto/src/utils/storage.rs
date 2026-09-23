@@ -339,7 +339,7 @@ where
         // If the slice is owned, then some memory can be reclaimed.
         #[cfg(any(feature = "std", feature = "alloc"))]
         if let ManagedSlice::Owned(owned) = &mut self.0 {
-            owned.retain(|e| !e.is_vacant());
+            owned.retain(|e| !(e.is_vacant()));
         }
         // Ensure the slice is sorted after modifying it.
         my_sort(&mut self.0[..]);
@@ -355,19 +355,23 @@ impl<'storage, V: InternallyKeyed + Recycle> Table<'storage, MaybeInUse<V>> {
     /// MEMORY DRAIN: If the storage returned here is dropped, it will be gone from the table
     /// forever. Use [`Self::return_storage`] to return free storage to the table.
     pub(crate) fn get_storage(&mut self) -> Option<V::Storage> {
-        let out = match &mut self.0 {
-            // If the slice is borrowed, look for a free spot.
-            ManagedSlice::Borrowed(borrowed) => {
-                let item = borrowed.iter_mut().find(|s| s.is_free())?;
-                mem::replace(item, MaybeInUse::Vacant).storage()
-            }
-            // If the slice is owned, push a new slot.
-            #[cfg(any(feature = "std", feature = "alloc"))]
-            ManagedSlice::Owned(_) => {
-                // If we have access to alloc, then alloc.
-                Some(V::Storage::default())
+        let out = if let Some(storage) = self.0.iter_mut().find(|s| s.is_free()) {
+            // If there is a free slot in the slice, grab it.
+            mem::replace(storage, MaybeInUse::Vacant).storage()
+        } else {
+            match &mut self.0 {
+                // If the slice is borrowed, and a free slot does not exist then a new one cannot
+                // be made.
+                ManagedSlice::Borrowed(_) => None,
+                // If the slice is owned, push a new slot.
+                #[cfg(any(feature = "std", feature = "alloc"))]
+                ManagedSlice::Owned(_) => {
+                    // If we have access to alloc, then alloc.
+                    Some(V::Storage::default())
+                }
             }
         };
+
         // Sort after mutating.
         my_sort(&mut self.0[..]);
         out

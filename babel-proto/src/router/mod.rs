@@ -175,18 +175,18 @@ where
         now: Instant,
         interface: &Interface<A>,
         neighbour_idx: NeighbourIndex<A>,
-    ) -> Result<(), BabelError<A>> {
+    ) {
         let Some(neighbour) = self.neighbor_table.inner.get_by_key(&neighbour_idx) else {
             b_debug!("Cannot update metrics for non-existant neighbour.");
-            return Ok(());
+            return;
         };
 
-        Ok(self.route_table.update_metrics_for_neighbour(
+        self.route_table.update_metrics_for_neighbour(
             now,
             interface,
             neighbour,
             &self.iface_table,
             &self.neighbor_table,
-        )?)
+        )
     }
 }

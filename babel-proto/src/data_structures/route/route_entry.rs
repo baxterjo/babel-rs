@@ -151,20 +151,21 @@ impl<'storage, A: AddressExt> Route<'storage, A> {
         interfaces: &InterfaceTable<A>,
         neighbours: &NeighbourTable<A>,
         retry_override: Option<u8>,
-    ) -> Result<(), UpdateError> {
+    ) {
         for interface in interfaces.iter() {
             for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
-                self.add_update(Update::new(
+                if let Err(err) = self.add_update(Update::new(
                     now,
                     neighbour.key(),
                     !interface.prefer_ucast,
                     false,
                     *interface.update_retry_interval,
                     retry_override.unwrap_or(interface.update_retry_limit),
-                ))?;
+                )) {
+                    b_debug!("Failed to add update for {:?} - {:?}", self.key(), err);
+                };
             }
         }
-        Ok(())
     }
 
     /// Writes out whatever this route owes on `interface`, advancing each update's send state as

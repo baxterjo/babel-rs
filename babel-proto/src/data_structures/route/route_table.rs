@@ -5,7 +5,7 @@ use crate::data_structures::neighbour::{Neighbour, NeighbourIndex, NeighbourTabl
 use crate::data_structures::route::route_entry::Route;
 use crate::data_structures::route::{RouteError, RouteIndex};
 use crate::data_structures::source::{SourceIndex, SourceTable};
-use crate::data_structures::updates::{Update, UpdateError};
+use crate::data_structures::updates::Update;
 use crate::data_types::destination::RouteDestination;
 use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Address, Interval};
@@ -150,7 +150,7 @@ where
         neighbour: &Neighbour<A>,
         interfaces: &InterfaceTable<A>,
         neighbours: &NeighbourTable<A>,
-    ) -> Result<(), UpdateError> {
+    ) {
         let smoothing_multiple = self.smoothing_multiple;
         let neighbour_idx = neighbour.key();
 
@@ -169,10 +169,9 @@ where
             if route.selected
                 && route.computed_metric().abs_diff(old_computed) > METRIC_DIFFERENCE_THRESHOLD
             {
-                route.broadcast_update(now, interfaces, neighbours, None)?;
+                route.broadcast_update(now, interfaces, neighbours, None);
             }
         }
-        Ok(())
     }
 
     /// Groups the routes in the table by the destination (prefix, plen) they lead to.

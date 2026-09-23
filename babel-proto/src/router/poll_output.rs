@@ -95,13 +95,6 @@ where
         // Poll time based state.
         let next_poll = self.poll_tick(now)?;
 
-        // This is the only place where route selection is done, so polling output is required to
-        // update the routing table.
-        if self.route_selection_due {
-            self.select_routes(now);
-            self.route_selection_due = false;
-        }
-
         let writer = PacketWriter::new_packet(self.magic_number, self.version_number, buf.into())?;
 
         // Poll the body of the packet.
@@ -287,7 +280,7 @@ where
                     .inner
                     .get_by_key(&idx.iface)
                     .ok_or(BabelError::InterfaceDoesntExist(idx.iface))?;
-                self.update_metrics_for_neighbour(now, &interface, idx)?;
+                self.update_metrics_for_neighbour(now, &interface, idx);
                 self.route_selection_due = true;
             }
         }
@@ -317,17 +310,11 @@ where
                 next_poll = Some(next_poll.map_or(route.expiry.duration(), |cur| {
                     cur.min(route.expiry.duration())
                 }));
-                // If the route was selected, send an update and unselect it.
-                if route.selected {
-                    if let Err(err) =
-                        route.broadcast_update(now, &self.iface_table, &self.neighbor_table, None)
-                    {
-                        b_debug!("Failed to broadcast update: {}", err);
-                    }
 
-                    route.selected = false;
+                // If the route was selected then route selection is due.
+                if route.selected {
+                    self.route_selection_due = true;
                 }
-                self.route_selection_due = true;
                 true
             } else {
                 // If the metric was already infinity and the timer expires (again) then the
@@ -335,6 +322,13 @@ where
                 false
             }
         });
+
+        // This is the only place where route selection is done, so polling output is required to
+        // update the routing table.
+        if self.route_selection_due {
+            self.select_routes(now);
+            self.route_selection_due = false;
+        }
 
         // Check for periodic updates
         for interface in self.iface_table.iter_mut() {
