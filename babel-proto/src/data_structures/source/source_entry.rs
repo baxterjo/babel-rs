@@ -1,6 +1,7 @@
 use crate::data_structures::source::SourceError;
+use crate::data_types::RouterId;
+use crate::data_types::destination::RouteDestination;
 use crate::data_types::seqno::SeqNo;
-use crate::data_types::{Address, RouterId};
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::metric::distance::Feasibility;
@@ -12,8 +13,7 @@ pub const SPEC_DEFAULT_SOURCE_GC_TIME: Duration = Duration::from_secs(3 * 60);
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SourceIndex<A: AddressExt> {
     pub(crate) router_id: RouterId,
-    pub(crate) prefix: Address<A>,
-    pub(crate) prefix_len: u8,
+    pub(crate) destination: RouteDestination<A>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -21,10 +21,8 @@ pub struct SourceIndex<A: AddressExt> {
 pub struct Source<A: AddressExt> {
     /// the prefix (prefix, plen), where plen is the prefix length in bits, that this entry applies
     /// to
-    prefix: Address<A>,
-    /// the prefix (prefix, plen), where plen is the prefix length in bits, that this entry applies
-    /// to
-    prefix_len: u8,
+    destination: RouteDestination<A>,
+
     /// the router-id of a router originating this prefix
     router_id: RouterId,
     /// a pair (seqno, metric), this source's feasibility distance.
@@ -39,8 +37,7 @@ impl<A: AddressExt> InternallyKeyed for Source<A> {
     type Key = SourceIndex<A>;
     fn key(&self) -> Self::Key {
         SourceIndex {
-            prefix: self.prefix,
-            prefix_len: self.prefix_len,
+            destination: self.destination,
             router_id: self.router_id,
         }
     }
@@ -49,27 +46,20 @@ impl<A: AddressExt> InternallyKeyed for Source<A> {
 impl<A: AddressExt> Source<A> {
     pub(crate) fn new(
         now: Instant,
-        prefix: Address<A>,
-        prefix_len: u8,
-        router_id: RouterId,
+        index: SourceIndex<A>,
         seqno: SeqNo,
         metric: Metric,
         gc_interval: Duration,
-    ) -> Result<Self, SourceError> {
-        Ok(Self {
-            prefix,
-            prefix_len,
-            router_id,
+    ) -> Self {
+        Self {
+            destination: index.destination,
+            router_id: index.router_id,
             feasibility: Feasibility::new(seqno, metric),
-            gc_timer: Timer::from_duration(now, gc_interval)?,
-        })
+            gc_timer: Timer::from_duration(now, gc_interval),
+        }
     }
-    pub(crate) fn prefix(&self) -> &Address<A> {
-        &self.prefix
-    }
-
-    pub(crate) fn prefix_len(&self) -> &u8 {
-        &self.prefix_len
+    pub(crate) fn destination(&self) -> &RouteDestination<A> {
+        &self.destination
     }
 
     pub(crate) fn router_id(&self) -> &RouterId {

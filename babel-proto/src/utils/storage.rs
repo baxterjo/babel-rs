@@ -89,6 +89,10 @@ pub(crate) enum MaybeInUse<V: Recycle> {
 }
 
 impl<V: Recycle> MaybeInUse<V> {
+    pub(crate) const fn new_free(storage: V::Storage) -> Self {
+        Self::Free(storage)
+    }
+
     fn storage(self) -> Option<V::Storage> {
         match self {
             MaybeInUse::Free(s) => Some(s),
@@ -158,6 +162,7 @@ where
 /// IMPORTANT: The entries of this table are internally keyed, that means they are looked up and
 /// sorted by information inside of the entries. Table entries should **NEVER** be able to mutate
 /// their keys after initial creation.
+#[derive(Debug)]
 pub(crate) struct Table<'storage, S>(ManagedSlice<'storage, S>)
 where
     S: TableSlot;
@@ -168,6 +173,10 @@ where
 {
     pub(crate) fn new<T: Into<ManagedSlice<'storage, S>>>(storage: T) -> Self {
         Self(storage.into())
+    }
+
+    pub(crate) fn into_inner(self) -> ManagedSlice<'storage, S> {
+        self.0
     }
 
     /// Places a value in a vacant slot, keyed by the value itself.
@@ -235,6 +244,24 @@ where
     ) -> Option<&mut S::Value> {
         check_sorted!(self);
         let idx = locate(&self.0[..], key)?;
+        self.0.get_mut(idx)?.value_mut()
+    }
+
+    /// The number of slots the table holds, occupied or not.
+    ///
+    /// Paired with [`Self::get_mut_slot_at`] to walk the table by position, which a caller needs
+    /// when it has to let go of its borrow between entries.
+    pub(crate) fn slot_count(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Mutably borrows the value in slot `idx`, or `None` if that slot holds no value or is out of
+    /// range.
+    ///
+    /// Positions are not stable across an insert or a remove — both re-sort the table — so this is
+    /// only for a walk that does not modify the table's shape.
+    pub(crate) fn get_mut_slot_at(&mut self, idx: usize) -> Option<&mut S::Value> {
+        check_sorted!(self);
         self.0.get_mut(idx)?.value_mut()
     }
 
@@ -312,7 +339,7 @@ where
         // If the slice is owned, then some memory can be reclaimed.
         #[cfg(any(feature = "std", feature = "alloc"))]
         if let ManagedSlice::Owned(owned) = &mut self.0 {
-            owned.retain(|e| !e.is_vacant());
+            owned.retain(|e| !(e.is_vacant()));
         }
         // Ensure the slice is sorted after modifying it.
         my_sort(&mut self.0[..]);
@@ -328,19 +355,23 @@ impl<'storage, V: InternallyKeyed + Recycle> Table<'storage, MaybeInUse<V>> {
     /// MEMORY DRAIN: If the storage returned here is dropped, it will be gone from the table
     /// forever. Use [`Self::return_storage`] to return free storage to the table.
     pub(crate) fn get_storage(&mut self) -> Option<V::Storage> {
-        let out = match &mut self.0 {
-            // If the slice is borrowed, look for a free spot.
-            ManagedSlice::Borrowed(borrowed) => {
-                let item = borrowed.iter_mut().find(|s| s.is_free())?;
-                mem::replace(item, MaybeInUse::Vacant).storage()
-            }
-            // If the slice is owned, push a new slot.
-            #[cfg(any(feature = "std", feature = "alloc"))]
-            ManagedSlice::Owned(_) => {
-                // If we have access to alloc, then alloc.
-                Some(V::Storage::default())
+        let out = if let Some(storage) = self.0.iter_mut().find(|s| s.is_free()) {
+            // If there is a free slot in the slice, grab it.
+            mem::replace(storage, MaybeInUse::Vacant).storage()
+        } else {
+            match &mut self.0 {
+                // If the slice is borrowed, and a free slot does not exist then a new one cannot
+                // be made.
+                ManagedSlice::Borrowed(_) => None,
+                // If the slice is owned, push a new slot.
+                #[cfg(any(feature = "std", feature = "alloc"))]
+                ManagedSlice::Owned(_) => {
+                    // If we have access to alloc, then alloc.
+                    Some(V::Storage::default())
+                }
             }
         };
+
         // Sort after mutating.
         my_sort(&mut self.0[..]);
         out
@@ -351,14 +382,18 @@ impl<'storage, V: InternallyKeyed + Recycle> Table<'storage, MaybeInUse<V>> {
             ManagedSlice::Borrowed(borrowed) => {
                 if let Some(item) = borrowed.iter_mut().find(|s| s.is_vacant()) {
                     let _ = mem::replace(item, MaybeInUse::Free(store));
+                } else {
+                    b_trace!(
+                        "Tried to return storage to a borrowed buffer that couldn't accept it."
+                    )
                 }
-                b_trace!("Tried to return storage to a borrowed buffer that couldn't accept it.")
             }
             _other => {
-                b_trace!("Tried to return storage that was uneeded.")
                 // Nothing to be done
             }
         }
+        // Sort after mutating.
+        my_sort(&mut self.0[..]);
     }
 }
 

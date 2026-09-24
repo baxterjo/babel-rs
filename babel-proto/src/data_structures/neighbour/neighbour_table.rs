@@ -1,6 +1,6 @@
 use crate::data_structures::interface::{Interface, InterfaceHandle};
 use crate::data_structures::neighbour::neighbour_entry::Neighbour;
-use crate::data_structures::neighbour::{NeighbourConfig, NeighbourError, NeighbourIndex};
+use crate::data_structures::neighbour::{NeighbourConfig, NeighbourError};
 use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::packet::tlv::{HelloSlice, IhuSlice};
@@ -11,7 +11,7 @@ pub struct NeighbourTable<'storage, A>
 where
     A: AddressExt,
 {
-    inner: Table<'storage, Option<Neighbour<A>>>,
+    pub(crate) inner: Table<'storage, Option<Neighbour<A>>>,
 }
 
 impl<'storage, A> NeighbourTable<'storage, A>
@@ -32,31 +32,20 @@ where
         }
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Neighbour<A>> {
-        self.inner.iter()
-    }
-
-    /// Borrows the neighbour registered under `index`, if it exists.
-    pub(crate) fn get(&self, index: &NeighbourIndex<A>) -> Option<&Neighbour<A>> {
-        self.inner.get_by_key(index)
-    }
-
-    /// Mutably borrows the neighbour registered under `index`, if it exists.
-    pub(crate) fn get_mut(&mut self, index: &NeighbourIndex<A>) -> Option<&mut Neighbour<A>> {
-        self.inner.get_mut_by_key(index)
-    }
     pub(crate) fn neighbours_for_iface(
         &self,
         iface: &InterfaceHandle,
     ) -> impl Iterator<Item = &Neighbour<A>> {
-        self.iter().filter(move |n| n.interface() == iface)
+        self.inner.iter().filter(move |n| n.interface() == iface)
     }
 
     pub(crate) fn neighbours_mut_for_iface(
         &mut self,
         iface: &InterfaceHandle,
     ) -> impl Iterator<Item = &mut Neighbour<A>> {
-        self.iter_mut().filter(move |n| n.interface() == iface)
+        self.inner
+            .iter_mut()
+            .filter(move |n| n.interface() == iface)
     }
 
     fn get_or_insert_default(
@@ -86,7 +75,7 @@ where
         now: Instant,
         config: NeighbourConfig<A>,
     ) -> Result<(), NeighbourError<A>> {
-        let neighbour = Neighbour::new(now, config)?;
+        let neighbour = Neighbour::new(now, config);
         let index = neighbour.key();
 
         b_debug!("Registering neighbour: {:?}", index);
@@ -173,6 +162,7 @@ mod test {
     use core::net::Ipv6Addr;
 
     use super::*;
+    use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_types::Interval;
     use crate::extension::NoExtension;
     use crate::utils::Duration;
@@ -244,8 +234,15 @@ mod test {
         ucast_config.ucast_hello_interval = Some(Interval::from_duration(Duration::from_secs(600)));
         let _ = table.add_neighbour(now, ucast_config);
 
-        assert_eq!(table.iter().count(), 1, "the duplicate must not add a row");
-        let neighbour = table.get(&index(NEIGHBOUR_1)).expect("registered above");
+        assert_eq!(
+            table.inner.iter().count(),
+            1,
+            "the duplicate must not add a row"
+        );
+        let neighbour = table
+            .inner
+            .get_by_key(&index(NEIGHBOUR_1))
+            .expect("registered above");
         assert!(
             neighbour.pending.ucast_hello.is_none(),
             "the original entry should have survived, not been replaced by the incoming config"

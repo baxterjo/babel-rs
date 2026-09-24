@@ -4,17 +4,19 @@ use crate::BorrowedMemoryPool;
 use crate::data_structures::interface::{
     Interface, InterfaceConfig, InterfaceHandle, InterfaceTable,
 };
-use crate::data_structures::neighbour::{Neighbour, NeighbourConfig, NeighbourTable};
+use crate::data_structures::neighbour::{
+    Neighbour, NeighbourConfig, NeighbourIndex, NeighbourTable,
+};
 use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
 use crate::data_structures::route::{Route, RouteTable};
 use crate::data_structures::source::{Source, SourceTable};
-use crate::data_structures::updates::{Update, UpdateTable};
 use crate::data_types::{Address, RouterId};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
 use crate::router::config::BabelRouterConfig;
+use crate::utils::storage::MaybeInUse;
 use crate::utils::{Instant, ManagedSlice, Timer};
 
 pub mod config;
@@ -43,9 +45,10 @@ where
 
     pub(crate) source_table: SourceTable<'storage, A>,
 
-    pub(crate) update_table: UpdateTable<'storage, A>,
-
+    // Implementation config
     pub(crate) update_timer: Timer,
+
+    pub(crate) route_selection_due: bool,
 
     // Extension markers
     _state_ext_marker: PhantomData<P>,
@@ -69,7 +72,6 @@ where
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Vec::new(),
         )
     }
 
@@ -87,11 +89,10 @@ where
             storage.pending_seqno_table,
             storage.route_table,
             storage.source_table,
-            storage.update_table,
         )
     }
 
-    fn new_with_storage_inner<IF, N, PS, R, S, U>(
+    fn new_with_storage_inner<IF, N, PS, R, S>(
         now: Instant,
         config: BabelRouterConfig,
         interface_table: IF,
@@ -99,15 +100,13 @@ where
         pending_seqno_table: PS,
         route_table: R,
         source_table: S,
-        update_table: U,
     ) -> Result<Self, BabelError<A>>
     where
         IF: Into<ManagedSlice<'storage, Option<Interface<A>>>>,
         N: Into<ManagedSlice<'storage, Option<Neighbour<A>>>>,
         PS: Into<ManagedSlice<'storage, Option<SeqnoRequest<A>>>>,
-        R: Into<ManagedSlice<'storage, Option<Route<A>>>>,
+        R: Into<ManagedSlice<'storage, MaybeInUse<Route<'storage, A>>>>,
         S: Into<ManagedSlice<'storage, Option<Source<A>>>>,
-        U: Into<ManagedSlice<'storage, Option<Update<A>>>>,
     {
         Ok(Self {
             id: config.id,
@@ -118,8 +117,8 @@ where
             pending_seqno: PendingSeqnoRequestTable::new_with_storage(pending_seqno_table),
             route_table: RouteTable::new_with_storage(route_table, config.route_expiry_multiplier),
             source_table: SourceTable::new_with_storage(source_table),
-            update_table: UpdateTable::new_with_storage(update_table),
-            update_timer: Timer::from_interval(now, config.update_interval)?,
+            update_timer: Timer::from_interval(now, config.update_interval),
+            route_selection_due: false,
             _state_ext_marker: PhantomData,
             _addr_ext_marker: PhantomData,
         })
@@ -164,5 +163,30 @@ where
         let config = NeighbourConfig::interface_default(address, iface);
 
         Ok(self.neighbor_table.add_neighbour(now, config)?)
+    }
+
+    /// Runs metric updates for all of the routes advertised by this neighbour.
+    ///
+    /// The work is [`RouteTable::update_metrics_for_neighbour`]. This resolves the index its
+    /// callers hold to the entry it names, and hands the route table the two tables a triggered
+    /// update needs to reach every neighbour on every interface.
+    pub(crate) fn update_metrics_for_neighbour(
+        &mut self,
+        now: Instant,
+        interface: &Interface<A>,
+        neighbour_idx: NeighbourIndex<A>,
+    ) {
+        let Some(neighbour) = self.neighbor_table.inner.get_by_key(&neighbour_idx) else {
+            b_debug!("Cannot update metrics for non-existant neighbour.");
+            return;
+        };
+
+        self.route_table.update_metrics_for_neighbour(
+            now,
+            interface,
+            neighbour,
+            &self.iface_table,
+            &self.neighbor_table,
+        )
     }
 }

@@ -118,6 +118,7 @@ where
         required_len: usize,
         len: usize,
     },
+
     #[error(transparent)]
     Extension(E::Error),
 }
@@ -126,6 +127,14 @@ impl<A> Address<A>
 where
     A: AddressExt,
 {
+    pub fn address_type(&self) -> &'static str {
+        match self {
+            Self::V4(_) => "Ipv4",
+            Self::V6(_) => "Ipv6",
+            Self::Extension(e) => e.address_type(),
+        }
+    }
+
     pub fn from_bytes(
         ae: AddressEncoding<A::Encoding>,
         bytes: &[u8],
@@ -177,6 +186,20 @@ where
                 let ext_add = A::from_bytes(&e, bytes)?;
                 Ok(Self::Extension(ext_add))
             }
+        }
+    }
+
+    /// Every octet of the address, in contrast to [`Address::as_wire`], which drops the octets an
+    /// encoding leaves implied.
+    ///
+    /// A prefix length is measured against the whole address, so this — not the wire form — is what
+    /// anything reasoning about `plen` has to index into: `fe80::/100` names 13 octets, and only 8
+    /// of them ever reach the wire.
+    pub(crate) fn as_octets(&self) -> &[u8] {
+        match self {
+            Address::V4(v4) => v4.as_octets(),
+            Address::V6(v6) => v6.as_octets(),
+            Address::Extension(e) => e.as_octets(),
         }
     }
 

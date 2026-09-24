@@ -84,7 +84,7 @@ impl<A: AddressExt> NeighbourConfig<A> {
             // sensible defualt.
             inbound_ihu_interval: (DEFAULT_LOSSLESS_IHU_RATIO
                 .apply(*DEFAULT_MULTICAST_HELLO_INTERVAL)
-                * DEFAULT_HOLD_TIME_MULTIPLIER)
+                * interface.ihu_hold_time_multiple)
                 .into(),
             // This is set as a ratio of mcast hellos to outbound IHUs
             outbound_ihu_interval: (DEFAULT_LOSSLESS_IHU_RATIO
@@ -110,6 +110,8 @@ pub enum NeighbourError<A: AddressExt> {
     Full,
     #[error("A neighbour with the same index was added twice: {0}")]
     DuplicateNeighbour(NeighbourIndex<A>),
+    #[error("An IHU TLV's Interval must not be 0")]
+    ZeroIhuInterval,
     #[error(transparent)]
     Timer(#[from] TimerError),
     #[error(transparent)]
@@ -138,7 +140,7 @@ mod test {
             config.ucast_hello_interval.is_none(),
             "Spec default does not send ucast hellos."
         );
-        Timer::from_interval(now, config.inbound_ihu_interval).expect("Spec default should work");
-        Timer::from_interval(now, config.outbound_ihu_interval).expect("Spec default should work");
+        Timer::from_interval(now, config.inbound_ihu_interval);
+        Timer::from_interval(now, config.outbound_ihu_interval);
     }
 }

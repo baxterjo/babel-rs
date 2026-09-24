@@ -78,12 +78,12 @@ impl<A: AddressExt> InternallyKeyed for Interface<A> {
 
 impl<A: AddressExt> Interface<A> {
     /// Creates a new babel interface with the given interface ID.
-    pub fn new(now: Instant, config: InterfaceConfig<A>) -> Result<Self, InterfaceError> {
-        Ok(Self {
+    pub fn new(now: Instant, config: InterfaceConfig<A>) -> Self {
+        Self {
             handle: config.id,
             address: config.address,
             other_addresses: config.other_addresses,
-            hello_timer: Timer::eager_from_interval(now, config.mcast_hello_interval)?,
+            hello_timer: Timer::eager_from_interval(now, config.mcast_hello_interval),
             ucast_hello_interval: config.ucast_hello_interval,
             hello_seqno: SeqNo::default(),
             update_timer: Timer::from_interval(
@@ -91,14 +91,14 @@ impl<A: AddressExt> Interface<A> {
                 config
                     .update_interval_spec
                     .apply_to_interval(config.mcast_hello_interval),
-            )?,
+            ),
             ihu_hold_time_multiple: config.ihu_hold_time,
             cost_calc: config.cost_calc,
             prefer_ucast: config.prefer_ucast,
             request_acks: config.request_acks,
             update_retry_limit: config.update_retry_limit,
             update_retry_interval: config.update_retry_interval,
-        })
+        }
     }
 
     pub(crate) fn handle(&self) -> &InterfaceHandle {
@@ -205,7 +205,7 @@ mod test {
     }
 
     fn interface(config: InterfaceConfig<NoExtension>) -> Interface<NoExtension> {
-        Interface::new(t0(), config).expect("bad interface config")
+        Interface::new(t0(), config)
     }
 
     /// The address a packet is sourced from covers its own family, so a route in that family

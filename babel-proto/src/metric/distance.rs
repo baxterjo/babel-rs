@@ -131,6 +131,10 @@ impl Metric {
 
         self.0 = libm::round(self.0 as f64 + (other.0 as f64 - self.0 as f64) * alpha) as u16;
     }
+
+    pub(crate) fn abs_diff(&self, other: Self) -> Self {
+        Self(self.0.abs_diff(other.0))
+    }
 }
 
 // `Cost` is deliberately *not* built with `distance_newtype!`: unlike

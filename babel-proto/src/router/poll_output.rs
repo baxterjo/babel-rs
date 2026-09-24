@@ -1,6 +1,6 @@
 use super::BabelRouter;
 use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
-use crate::data_structures::updates::Update;
+use crate::data_structures::route::updates::Update;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -184,12 +184,11 @@ where
                 };
             }
 
-            // Reached for by field rather than through `self`: the loop above still holds
-            // `self.iface_table` mutably, and these are disjoint from it.
-            writer = ok_or_try_send!(self.update_table.poll_for_updates::<P>(
+            // Check for updates first so urgent updates are sent.
+            b_trace!("Polling for route updates");
+            writer = ok_or_try_send!(self.route_table.poll_for_updates::<P>(
                 now,
                 interface,
-                &self.route_table,
                 &mut self.source_table,
                 self.update_timer.interval(),
                 &mut active_dest,
@@ -254,82 +253,35 @@ where
     /// Polls and updates all of the time based states.
     pub(super) fn poll_tick(&mut self, now: Instant) -> Result<Option<Duration>, BabelError<A>> {
         let mut next_poll = None;
-        let mut run_selection = false;
 
         // Check for missing hellos from neighbours.
-        for neighbour in self.neighbor_table.iter_mut() {
-            let (update, remaining) = neighbour.poll_tick(now);
+        //
+        // Walked by slots rather than iter_mut() so that the mutable borrow of the neighbour table
+        // ends between entries.
+        for slot in 0..self.neighbor_table.inner.slot_count() {
+            let Some((needs_metrics, remaining, idx)) = self
+                .neighbor_table
+                .inner
+                .get_mut_slot_at(slot)
+                .map(|neighbour| {
+                    let (update, remaining) = neighbour.poll_tick(now);
+                    (update, remaining, neighbour.key())
+                })
+            else {
+                continue;
+            };
+
             next_poll = [remaining, next_poll].into_iter().flatten().min();
-            if update {
-                let interface = self
+
+            if needs_metrics {
+                // Copied out so the interface table is not left borrowed either.
+                let interface = *self
                     .iface_table
                     .inner
-                    .get_by_key(neighbour.interface())
-                    .ok_or(BabelError::InterfaceDoesntExist(*neighbour.interface()))?;
-                self.route_table
-                    .update_cost_for_neighbour(now, interface, neighbour);
-                run_selection |= true;
-            }
-        }
-
-        // Check for expired routes.
-        self.route_table.retain_mut(|route| {
-            if let Some(remaining) = route.expiry.time_remaining(now) {
-                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
-                true
-            } else {
-                let out: bool;
-                // If the route has expired and the advertised metric is not yet infinity, set
-                // it to infinity and reset the timer.
-                if route.advertised_metric != Metric::INFINITY {
-                    route.advertised_metric = Metric::INFINITY;
-                    route.computed_metric = Metric::INFINITY;
-                    route.expiry.restart(now);
-                    let remaining = route.expiry.duration();
-                    next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
-                    out = true;
-                } else {
-                    // If the metric was already infinity and the timer expires (again) then the
-                    // route is removed.
-                    out = false;
-                }
-                // In either case, the selection process must be run when the timer expires.
-                run_selection |= true;
-                out
-            }
-        });
-
-        if run_selection {
-            self.select_routes();
-        }
-
-        // Check for periodic updates
-        for interface in self.iface_table.iter_mut() {
-            if let Some(remaining) = interface.update_timer.time_remaining(now) {
-                // If there is still time remaining until the next periodic update. Merge with
-                // next_poll and skip.
-                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
-            } else {
-                // Otherwize reset the update timer.
-                self.update_timer.restart(now);
-
-                // And queue an update for every selected route to every neighbour.
-                for route in self.route_table.iter().filter(|r| r.selected) {
-                    for neighbour in self.neighbor_table.neighbours_for_iface(interface.handle()) {
-                        self.update_table.add_update(Update::new(
-                            now,
-                            route.key(),
-                            neighbour.key(),
-                            !interface.prefer_ucast,
-                            interface.request_acks,
-                            interface.update_retry_interval.into(),
-                            1,
-                        )?)?;
-                    }
-                }
-
-                let remaining = self.update_timer.duration();
-                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+                    .get_by_key(&idx.iface)
+                    .ok_or(BabelError::InterfaceDoesntExist(idx.iface))?;
+                self.update_metrics_for_neighbour(now, &interface, idx);
+                self.route_selection_due = true;
             }
         }
 
@@ -342,6 +294,59 @@ where
                 false
             }
         });
+
+        // Check for expired routes.
+        self.route_table.retain_mut(|route| {
+            // Check if there is time remaining in the route.
+            if let Some(remaining) = route.expiry.time_remaining(now) {
+                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+                true
+            } else if route.advertised_metric() != &Metric::INFINITY {
+                // If the route has expired and the advertised metric is not yet infinity, retract
+                // the route, reset the timer.
+                route.retract();
+                route.expiry.restart(now);
+                // Update next poll
+                next_poll = Some(next_poll.map_or(route.expiry.duration(), |cur| {
+                    cur.min(route.expiry.duration())
+                }));
+
+                // If the route was selected then route selection is due.
+                if route.selected {
+                    self.route_selection_due = true;
+                }
+                true
+            } else {
+                // If the metric was already infinity and the timer expires (again) then the
+                // route is removed.
+                false
+            }
+        });
+
+        // This is the only place where route selection is done, so polling output is required to
+        // update the routing table.
+        if self.route_selection_due {
+            self.select_routes(now);
+            self.route_selection_due = false;
+        }
+
+        // Check for periodic updates
+        for interface in self.iface_table.iter_mut() {
+            if let Some(remaining) = interface.update_timer.time_remaining(now) {
+                // If there is still time remaining until the next periodic update. Merge with
+                // next_poll and skip.
+                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+            } else {
+                // Otherwize reset the update timer.
+                self.update_timer.restart(now);
+
+                self.route_table
+                    .broadcast_periodic_update(now, interface, &self.neighbor_table);
+
+                let remaining = self.update_timer.duration();
+                next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+            }
+        }
 
         Ok(next_poll)
     }
@@ -560,7 +565,8 @@ mod test {
     ) -> &'r mut Neighbour<NoExtension> {
         router
             .neighbor_table
-            .get_mut(&NeighbourIndex {
+            .inner
+            .get_mut_by_key(&NeighbourIndex {
                 iface,
                 addr: address.into(),
             })

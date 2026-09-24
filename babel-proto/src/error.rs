@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
 use crate::data_structures::neighbour::{NeighbourError, NeighbourIndex};
 use crate::data_structures::route::RouteError;
-use crate::data_structures::updates::UpdateError;
+use crate::data_structures::route::updates::UpdateError;
 use crate::data_types::address::AddressError;
 use crate::data_types::address_encoding::AddressEncodingError;
 use crate::extension::address::AddressExt;
@@ -39,6 +39,8 @@ where
         "Blanket retraction must have a Plen and Omitted of 0 - plen: {plen}, omitted: {omitted}"
     )]
     MalformedBlanketRetraction { plen: u8, omitted: u8 },
+    #[error("An Update TLV's Interval must not be 0")]
+    ZeroUpdateInterval,
     #[error(transparent)]
     Len(#[from] LenError),
     #[error(transparent)]

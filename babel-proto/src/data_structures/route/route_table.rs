@@ -1,36 +1,60 @@
-use crate::data_structures::interface::Interface;
-use crate::data_structures::neighbour::Neighbour;
-use crate::data_structures::route::route_entry::{Destination, Route};
+use core::iter::zip;
+
+use crate::data_structures::interface::{Interface, InterfaceTable};
+use crate::data_structures::neighbour::{Neighbour, NeighbourIndex, NeighbourTable};
+use crate::data_structures::route::route_entry::Route;
+use crate::data_structures::route::updates::Update;
 use crate::data_structures::route::{RouteError, RouteIndex};
-use crate::data_structures::source::SourceIndex;
-use crate::data_types::address::Address;
+use crate::data_structures::source::{SourceIndex, SourceTable};
+use crate::data_types::destination::RouteDestination;
+use crate::data_types::seqno::SeqNo;
+use crate::data_types::{Address, Interval, RouterId};
 use crate::extension::address::AddressExt;
+use crate::extension::parser_state::ParserStateExt;
 use crate::metric::Metric;
-use crate::packet::parser::ResolvedUpdate;
-use crate::utils::storage::{InsertError, Table};
-use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, ManagedSlice, Timer};
+use crate::packet::parser::Parser;
+use crate::packet::writer::ready::Ready;
+use crate::packet::writer::{PacketWriterError, PacketWriterStep};
+use crate::utils::destination::DestAddr;
+use crate::utils::storage::{InsertError, InternallyKeyed, MaybeInUse, Recycle, Table, TableSlot};
+use crate::utils::{Duration, DurationMultiplier, Instant, ManagedSlice};
 
 pub const DEFAULT_SMOOTHING_MULTIPLE: DurationMultiplier = DurationMultiplier::new(3, 1);
+pub const METRIC_DIFFERENCE_THRESHOLD: Metric = Metric::from_raw(100);
 
 /// Route table as defined in
 /// [Section 3.2.6](https://datatracker.ietf.org/doc/html/rfc8966#name-the-route-table)
 pub struct RouteTable<'storage, A: AddressExt> {
     /// The inner slice for the table.
-    pub(crate) inner: Table<'storage, Option<Route<A>>>,
+    inner: Table<'storage, MaybeInUse<Route<'storage, A>>>,
 
+    /// The multiple of a route's update interval that will determine how long this table keeps the
+    /// route.
     pub(crate) route_expiry_time: DurationMultiplier,
+
     /// Multiple of the hello timer of a given route that should be used to generate the time
     /// constant of a route's smoothed metric.
     ///
     /// The time constant will be taken from the max between mcast hello interval and ucast hello
     /// interval (if it exists)
-    smoothing_multiple: DurationMultiplier,
+    pub(crate) smoothing_multiple: DurationMultiplier,
 }
 
 impl<'storage, A> RouteTable<'storage, A>
 where
     A: AddressExt,
 {
+    /// Initializes the route storage with update queue storage.
+    pub(crate) fn init_storage<const R: usize, const N: usize>(
+        route_storage: &mut [MaybeInUse<Route<'storage, A>>; R],
+        update_queue: &'storage mut [[Option<Update<A>>; N]; R],
+    ) {
+        for (route_slot, update_queue) in zip(route_storage.iter_mut(), update_queue.iter_mut()) {
+            update_queue.fill(None);
+            *route_slot = MaybeInUse::new_free(update_queue.as_mut_slice().into())
+        }
+    }
+
     /// Create a new source table with user provided storage.
     ///
     /// While interfaces are generally well known at compile time, the number of routes this
@@ -38,30 +62,13 @@ where
     /// this number for your specfic deployment or do what you can to enable the alloc feature.
     pub(crate) fn new_with_storage<T>(storage: T, route_expiry: DurationMultiplier) -> Self
     where
-        T: Into<ManagedSlice<'storage, Option<Route<A>>>>,
+        T: Into<ManagedSlice<'storage, MaybeInUse<Route<'storage, A>>>>,
     {
         Self {
             inner: Table::new(storage),
             route_expiry_time: route_expiry,
             smoothing_multiple: DEFAULT_SMOOTHING_MULTIPLE,
         }
-    }
-
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<A>> {
-        self.inner.iter_mut()
-    }
-
-    pub(crate) fn iter_mut_slots(&mut self) -> impl Iterator<Item = &mut Option<Route<A>>> {
-        self.inner.iter_mut_slots()
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Route<A>> {
-        self.inner.iter()
-    }
-
-    /// The route an index names, if it is still in the table.
-    pub(crate) fn get_by_key(&self, key: &RouteIndex<A>) -> Option<&Route<A>> {
-        self.inner.get_by_key(key)
     }
 
     pub(crate) fn retain_mut<F>(&mut self, f: F)
@@ -71,220 +78,198 @@ where
         self.inner.retain_mut(f);
     }
 
-    pub(crate) fn flush(&mut self) {
-        self.inner.flush();
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<'storage, A>> {
+        self.inner.iter_mut()
     }
 
-    /// Route aquisition as defined in section
-    /// [3.5.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-acquisition)
-    ///
-    /// When a Babel node receives an update (prefix, plen, router-id, seqno, metric) from a
-    /// neighbour neigh, it checks whether it already has a route table entry indexed by (prefix,
-    /// plen, neigh).
-    pub(crate) fn aquire_route(
+    pub(crate) fn get_mut_by_key(
+        &mut self,
+        key: &RouteIndex<A>,
+    ) -> Option<&mut Route<'storage, A>> {
+        self.inner.get_mut_by_key(key)
+    }
+
+    pub(crate) fn add_route(
         &mut self,
         now: Instant,
-        interface: &Interface<A>,
-        neighbour: &Neighbour<A>,
-        feasible: bool,
-        update: ResolvedUpdate<'_, A>,
+        source: SourceIndex<A>,
+        neighbour: NeighbourIndex<A>,
+        seqno: SeqNo,
+        advertised_metric: Metric,
+        computed_metric: Metric,
+        next_hop: Address<A>,
+        interval: Interval,
     ) -> Result<(), RouteError> {
-        match self.inner.get_mut_by_key(&RouteIndex {
-            prefix: update.address,
-            prefix_len: update.slice.plen(),
-            neighbour: neighbour.key(),
-        }) {
-            // The following is a direct quote from section 3.5.3:
-            // If no such entry exists:
-            None => {
-                // if the update is unfeasible, it **MAY** be ignored
-                if !feasible {
-                    // TODO: Local setting?
+        let storage = self
+            .inner
+            .get_storage()
+            .ok_or(RouteError::NoStorageAvailable)?;
+
+        let route = Route::new(
+            now,
+            source,
+            neighbour,
+            seqno,
+            advertised_metric,
+            computed_metric,
+            next_hop,
+            // Routes are never added as selected; route selection runs after each update.
+            false,
+            interval,
+            self.route_expiry_time,
+            storage,
+        );
+
+        // If there is an error inserting the route then the storage needs to be returned to the
+        // table.
+        if let Err(err) = self.inner.insert(route) {
+            match err {
+                InsertError::Full(route) => {
+                    self.inner.return_storage(route.release());
+                    return Err(RouteError::Full);
                 }
-                // if the metric is infinite (the update is a retraction of a route we do not know
-                // about), the update is ignored;
-                if update.slice.is_retraction() {
-                    // NOTE: This is technically dead code since the logic of the calling function
-                    // does not allow a retraction to reach this point. But I'm
-                    // keeping it as a regression backstop.
-                    return Ok(());
+                InsertError::Duplicate(route) => {
+                    self.inner.return_storage(route.release());
+                    return Err(RouteError::Duplicate);
                 }
-
-                // otherwise, a new entry is created in the route table, indexed by (prefix, plen,
-                // neigh), with source equal to (prefix, plen, router-id), seqno equal to seqno,
-                // and an advertised metric equal to the metric carried by the update.
-                // NOTE: Ignore returned value as we already checked the entry didn't exist above.
-                // Calculate the link cost to this neighbour
-
-                let link_cost = interface.cost_calc.link_cost(
-                    interface.cost_calc.rx_cost(
-                        neighbour.mcast_hello_info.history,
-                        neighbour.ucast_hello_info.history,
-                    ),
-                    neighbour.tx_cost,
-                );
-                let computed_metric = interface.cost_calc.metric(update.slice.metric(), link_cost);
-
-                // NOTE: Ignore the return value if the table is not full as we just checked above
-                // if there would be a duplicate.
-                let _ = match self.inner.insert(Route::new(
-                    now,
-                    SourceIndex {
-                        prefix: update.address,
-                        prefix_len: update.slice.plen(),
-                        router_id: update.router_id,
-                    },
-                    neighbour.key(),
-                    update.slice.seqno(),
-                    update.slice.metric(),
-                    computed_metric,
-                    update.next_hop,
-                    // Never add new routes as selected as route selection will be run after each
-                    // update.
-                    false,
-                    update.slice.interval(),
-                    self.route_expiry_time,
-                )?) {
-                    // The only error that matters is if the table is full.
-                    Err(InsertError::Full(_)) => {
-                        return Err(RouteError::Full);
-                    }
-                    other => other,
-                };
             }
-            // If such an entry exists:
-            Some(route) => {
-                // if the entry is currently selected, the update is unfeasible, and the router-id
-                // of the update is equal to the router-id of the entry, then the update **MAY** be
-                // ignored
-                if route.selected && !feasible && route.source().router_id == update.router_id {
-                    // TODO: Local setting?
-                }
-                // The new hold time is built before the entry is touched. An Interval the timer
-                // rejects has to leave the entry exactly as it was, rather than half-updated with
-                // a new metric under the old expiry and the deselect below never reached.
-                let expiry = Timer::from_duration(
-                    now,
-                    Duration::from(update.slice.interval()) * self.route_expiry_time,
-                )?;
-
-                // otherwise, the entry's sequence number, advertised metric, metric, and router-id
-                // are updated,
-                route.seqno = update.slice.seqno();
-                route.advertised_metric = update.slice.metric();
-                if route.source().router_id != update.router_id {
-                    // If the update caused the router-id of the entry to change, an update
-                    // (possibly a retraction) MUST be sent in a timely manner as described in
-                    // Section 3.7.2.
-                    // TODO: A router ID change should trigger an update
-                    route.set_router_id(update.router_id);
-                }
-                // and if the advertised metric is not infinite, the route's expiry
-                // timer is reset to a small multiple of the interval value included in the update
-                // (see "Route Expiry time" in Appendix B for suggested values).
-                if !update.slice.is_retraction() {
-                    // NOTE: This if statement is redundant since the logic of the calling function
-                    // does not allow a retraction to reach this point. But I'm
-                    // keeping it as a regression backstop.
-                    route.expiry = expiry;
-                }
-                // If the update is unfeasible, then the (now unfeasible) entry MUST be immediately
-                // unselected.
-                if !feasible {
-                    // NOTE: This is likely redundant as route selection always happens after
-                    // updates, and unfeasible routes are cleared during selection. Keeping it here
-                    // as a backstop.
-                    route.selected = false;
-                }
-
-                route.update_cost(now, interface, neighbour, &self.smoothing_multiple);
-
-                // TODO: Triggered updates
-            }
-        }
+        };
 
         Ok(())
     }
 
-    /// Retracts every route this neighbour advertised, which is what an Update with AE 0 and an
-    /// infinite metric asks for.
-    ///
-    /// The expiry timers are deliberately left alone. Section
-    /// [3.5.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-acquisition) resets a
-    /// route's expiry timer only when the advertised metric is finite, so a retracted route runs
-    /// out the hold time it already had and is flushed when that timer fires.
-    pub(crate) fn handle_blanket_retraction(&mut self, neighbour: &Neighbour<A>) {
-        for route in self.iter_mut().filter(|r| *r.neigbour() == neighbour.key()) {
-            route.advertised_metric = Metric::INFINITY;
-            route.computed_metric = Metric::INFINITY;
-        }
-    }
-
-    /// Retracts the single route indexed by (prefix, prefix_len, neighbour).
-    ///
-    /// The seqno and router-id of the entry are left as its last real advertisement set them:
-    /// [Section 4.6.9](https://datatracker.ietf.org/doc/html/rfc8966#name-update) says that for a
-    /// retraction "the router-id, next hop, and seqno are not used", so there is nothing
-    /// meaningful on the wire to replace them with. See [`Self::handle_blanket_retraction`] for
-    /// why the expiry timer is untouched.
-    pub(crate) fn handle_retraction(
+    /// Queues updates for all selected routes to all neighbours on the given interface.
+    pub(crate) fn broadcast_periodic_update(
         &mut self,
-        neighbour: &Neighbour<A>,
-        prefix: Address<A>,
-        prefix_len: u8,
+        now: Instant,
+        interface: &Interface<A>,
+        neighbours: &NeighbourTable<A>,
     ) {
-        let idx = RouteIndex {
-            prefix,
-            prefix_len,
-            neighbour: neighbour.key(),
-        };
-        // If an unknown route is somehow retracted, silently ignore.
-        if let Some(route) = self.inner.get_mut_by_key(&idx) {
-            route.advertised_metric = Metric::INFINITY;
-            route.computed_metric = Metric::INFINITY;
+        for route in self.inner.iter_mut().filter(|r| r.selected) {
+            for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
+                if let Err(err) = route.add_update(Update::new(
+                    now,
+                    neighbour.key(),
+                    !interface.prefer_ucast,
+                    false,
+                    *interface.update_retry_interval,
+                    1,
+                )) {
+                    b_debug!("Failed to add update for {:?} - {:?}", route.key(), err);
+                };
+            }
         }
     }
 
-    pub(crate) fn update_cost_for_neighbour(
+    /// Recomputes the metric of every route `neighbour` advertised, and queues a triggered update
+    /// for any of them still holding a destination whose metric moved significantly.
+    ///
+    /// `interfaces` and `neighbours` are only there for that queueing — a triggered update goes to
+    /// every neighbour on every interface, not just the one whose link cost moved.
+    pub(crate) fn update_metrics_for_neighbour(
         &mut self,
         now: Instant,
         interface: &Interface<A>,
         neighbour: &Neighbour<A>,
+        interfaces: &InterfaceTable<A>,
+        neighbours: &NeighbourTable<A>,
     ) {
-        let smoothing_mul = self.smoothing_multiple;
-        for route in self.iter_mut().filter(|r| r.neigbour() == &neighbour.key()) {
-            route.update_cost(now, interface, neighbour, &smoothing_mul);
+        let smoothing_multiple = self.smoothing_multiple;
+        let neighbour_idx = neighbour.key();
+
+        for route in self
+            .inner
+            .iter_mut()
+            .filter(|route| route.neighbour() == &neighbour_idx)
+        {
+            let old_computed = *route.computed_metric();
+            route.compute_metric(now, interface, neighbour, &smoothing_multiple);
+
+            // Every route over this neighbour has its metric recomputed, but only the selected one
+            // can be worth relaying. 3.7.2 scopes the significant-metric trigger to the route that
+            // holds its destination: an unselected route was never advertised onwards, so no
+            // neighbour is holding a belief about it that the move would correct.
+            if route.selected
+                && route.computed_metric().abs_diff(old_computed) > METRIC_DIFFERENCE_THRESHOLD
+            {
+                route.broadcast_triggered_update(now, interfaces, neighbours);
+            }
         }
     }
 
-    /// Groups the routes in the table by the destination (prefix, plen) they lead to.
-    //  `chunk_by` produces "runs" of elements. So this only works because one of the main
-    //  predicates of `ManagedSlice<'storage, Option<V>>` is that it is always sorted. The key for
-    // the items in this particular `ManagedSlice` is a struct that consists of `(prefix,
-    // prefix_len, neighbour)`. Sorting by a key is also sorting by a subset of that key, so
-    // this grouping works.
+    /// Writes out whatever the route updates this table owes on `interface`.
+    pub(crate) fn poll_for_updates<'output, P>(
+        &mut self,
+        now: Instant,
+        interface: &Interface<A>,
+        sources: &mut SourceTable<'_, A>,
+        update_interval: Interval,
+        active_dest: &mut DestAddr<A>,
+        next_poll: &mut Duration,
+        mut writer: PacketWriterStep<'output, Ready>,
+    ) -> Result<
+        PacketWriterStep<'output, Ready>,
+        (PacketWriterError, PacketWriterStep<'output, Ready>),
+    >
+    where
+        P: ParserStateExt<AddressEncoding = A::Encoding, Address = A>,
+    {
+        // Start the parser for the packet with the initial next hop equal to the address of the
+        // interface this packet will be sent on.
+        let mut parser: Parser<P> = Parser::new(interface.address);
+
+        let mut router_id_groups = self.router_id_groups_mut();
+
+        while let Some(mut rid_group) = router_id_groups.next_group() {
+            for route in rid_group.iter_mut() {
+                writer = route.poll_for_updates::<P>(
+                    now,
+                    interface,
+                    sources,
+                    update_interval,
+                    active_dest,
+                    next_poll,
+                    &mut parser,
+                    writer,
+                )?;
+            }
+        }
+
+        Ok(writer)
+    }
+
+    /// Get a [`DestinationGroup`] iterator from self.
     pub(crate) fn destination_groups_mut(
         &mut self,
-    ) -> impl Iterator<Item = DestinationGroup<'_, A>> {
+    ) -> impl Iterator<Item = DestinationGroup<'_, 'storage, A>> {
         self.inner
+            // Chunk by runs of the same destination
             .chunk_by_mut(|a, b| destination_of(a) == destination_of(b))
-            .filter(|group| group.first().is_some_and(Option::is_some))
+            // Filter out empty chunks and chunks that don't contain routes
+            .filter(|group| group.first().is_some_and(|first| first.value().is_some()))
+            // Map the chunk to a destination route.
             .map(DestinationGroup)
+    }
+
+    /// Get a [`RouterIdGroups`] cursor from self.
+    fn router_id_groups_mut(&mut self) -> RouterIdGroups<'_, 'storage, A> {
+        RouterIdGroups {
+            routes: self,
+            last: None,
+        }
     }
 }
 
 /// A non-empty run of route table entries that all lead to the same destination.
-///
-/// Yielded by [`RouteTable::destination_groups_mut`]. The wrapper exists to keep the `Option` that
-/// the table's free slots are made of out of the route selection code: every slot in a group is
-/// occupied, because free slots sort ahead of every occupied one and so collapse into a single
-/// leading run that the grouping discards.
-pub(crate) struct DestinationGroup<'storage, A: AddressExt>(&'storage mut [Option<Route<A>>]);
+pub(crate) struct DestinationGroup<'a, 'storage, A: AddressExt>(
+    &'a mut [MaybeInUse<Route<'storage, A>>],
+);
 
-impl<A: AddressExt> DestinationGroup<'_, A> {
+impl<'storage, A: AddressExt> DestinationGroup<'_, 'storage, A> {
     /// The destination that every route in this group leads to.
-    pub(crate) fn destination(&self) -> Destination<A> {
-        self.iter()
+    pub(crate) fn destination(&self) -> RouteDestination<A> {
+        *self
+            .iter()
             .next()
             .expect("a destination group always holds at least one route")
             .destination()
@@ -295,12 +280,12 @@ impl<A: AddressExt> DestinationGroup<'_, A> {
         self.0.len()
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Route<A>> {
-        self.0.iter().flatten()
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Route<'storage, A>> {
+        self.0.iter().filter_map(|r| r.value())
     }
 
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<A>> {
-        self.0.iter_mut().flatten()
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<'storage, A>> {
+        self.0.iter_mut().filter_map(|r| r.value_mut())
     }
 }
 
@@ -308,8 +293,61 @@ impl<A: AddressExt> DestinationGroup<'_, A> {
 ///
 /// Free slots compare equal to each other and to nothing else, which is what collapses them into
 /// the single leading group that [`RouteTable::destination_groups_mut`] discards.
-fn destination_of<A: AddressExt>(entry: &Option<Route<A>>) -> Option<Destination<A>> {
-    entry.as_ref().map(Route::destination)
+fn destination_of<A: AddressExt>(entry: &MaybeInUse<Route<A>>) -> Option<RouteDestination<A>> {
+    entry.value().map(|e| *e.destination())
+}
+
+/// A cursor that groups routes by [`RouterId`] to optimize network traffic for sending updates.
+///
+/// This cannot be an iterator because [`RouteTable`] is not ordered by [`RouterId`] and
+/// [`core::slice::chunk_by`] only yields contiguous chunks so it must first establish a starting
+/// [`RouterId`] for all routes (the minimum) and then ratchet up for each call of
+/// [`RouterIdGroups::next_group`]
+struct RouterIdGroups<'table, 'routes, A: AddressExt> {
+    routes: &'table mut RouteTable<'routes, A>,
+    /// The [`RouterId`] of the group handed out last.
+    last: Option<RouterId>,
+}
+
+impl<'routes, A: AddressExt> RouterIdGroups<'_, 'routes, A> {
+    /// Gets the next [`RouterIdGroup`] and advances the [`RouterId`] cursor.
+    fn next_group(&mut self) -> Option<RouterIdGroup<'_, 'routes, A>> {
+        let router_id = self
+            .routes
+            .inner
+            .iter()
+            // Get the RouterId that advertised the route.
+            .map(|r| r.source().router_id)
+            // Get all router_ids greater than last or all if last is None
+            .filter(|id| self.last.is_none_or(|last| *id > last))
+            // Take the minimum router id of the filtered group.
+            .min()?;
+
+        // Ratchet up the minimum so no router id's less than this one can be yielded in subsequent
+        // calls to next_group.
+        self.last = Some(router_id);
+
+        Some(RouterIdGroup {
+            router_id,
+            routes: self.routes,
+        })
+    }
+}
+
+/// The routes that were originated by one router-id.
+struct RouterIdGroup<'table, 'routes, A: AddressExt> {
+    router_id: RouterId,
+    routes: &'table mut RouteTable<'routes, A>,
+}
+
+impl<'routes, A: AddressExt> RouterIdGroup<'_, 'routes, A> {
+    /// Yields all routes that have this group's [`RouterId`]
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<'routes, A>> {
+        self.routes
+            .inner
+            .iter_mut()
+            .filter(|r| r.source().router_id == self.router_id)
+    }
 }
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
@@ -334,32 +372,72 @@ mod test {
     const NEIGHBOUR_1: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
     const NEIGHBOUR_2: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
 
-    fn route(
+    const IFACE: &str = "eth0";
+
+    fn iface_handle() -> InterfaceHandle {
+        InterfaceHandle::try_from(IFACE).expect("bad interface handle")
+    }
+
+    fn get_storage<'storage, const R: usize, const N: usize, A: AddressExt>() -> (
+        [MaybeInUse<Route<'storage, A>>; R],
+        [[Option<Update<A>>; N]; R],
+    ) {
+        ([const { MaybeInUse::Vacant }; R], [[const { None }; N]; R])
+    }
+
+    /// Adds a route to `table`.
+    ///
+    /// A route owns the queue it was handed, so it can no longer be built standalone and handed to
+    /// the table afterwards: the queue has to come from the table it is going to live in.
+    fn insert_route(
+        table: &mut RouteTable<'_, NoExtension>,
         prefix: Ipv6Addr,
         prefix_len: u8,
         router_id: &str,
         neighbour: Ipv6Addr,
-    ) -> Route<NoExtension> {
-        Route::new(
-            Instant::from_secs(0),
-            SourceIndex {
-                router_id: RouterId::try_from(router_id).expect("bad router id"),
-                prefix: prefix.into(),
-                prefix_len,
-            },
-            NeighbourIndex {
-                iface: InterfaceHandle::try_from("eth0").expect("bad interface handle"),
-                addr: neighbour.into(),
-            },
-            SeqNo(0),
+    ) {
+        insert_route_with_metrics(
+            table,
+            prefix,
+            prefix_len,
+            router_id,
+            neighbour,
             Metric::from(10),
             Metric::from(10),
-            neighbour.into(),
-            false,
-            INTERVAL,
-            DEFAULT_ROUTE_EXPIRY_TIME,
         )
-        .expect("bad expiry")
+    }
+
+    /// [`insert_route`], with the advertised and computed metrics the caller wants it settled at.
+    /// The smoothed metric starts out equal to the computed one, as it does for any freshly created
+    /// entry.
+    fn insert_route_with_metrics(
+        table: &mut RouteTable<'_, NoExtension>,
+        prefix: Ipv6Addr,
+        prefix_len: u8,
+        router_id: &str,
+        neighbour: Ipv6Addr,
+        advertised_metric: Metric,
+        computed_metric: Metric,
+    ) {
+        table
+            .add_route(
+                Instant::from_secs(0),
+                SourceIndex {
+                    destination: RouteDestination::new(prefix.into(), prefix_len)
+                        .expect("bad destination"),
+                    router_id: RouterId::try_from(router_id).expect("bad router id"),
+                },
+                NeighbourIndex {
+                    iface: iface_handle(),
+                    addr: neighbour.into(),
+                },
+                SeqNo(0),
+                advertised_metric,
+                computed_metric,
+                neighbour.into(),
+                INTERVAL,
+            )
+            .expect("the table has a free slot and update queue storage for the route");
     }
 
     /// The grouping is by destination, so two routes towards one prefix belong together even when
@@ -372,18 +450,22 @@ mod test {
 
         // Inserted out of order, and with a same-prefix/different-plen pair, to show the grouping
         // does not lean on insertion order and that plen is part of the destination.
-        for r in [
-            route(DEST_B, 64, "rtr-b", NEIGHBOUR_1),
-            route(DEST_A, 64, "rtr-b", NEIGHBOUR_2),
-            route(DEST_A, 32, "rtr-a", NEIGHBOUR_1),
-            route(DEST_A, 64, "rtr-a", NEIGHBOUR_1),
-        ] {
-            table.inner.insert(r).expect("owned storage grows");
-        }
+        insert_route(&mut table, DEST_B, 64, "rtr-b", NEIGHBOUR_1);
+        insert_route(&mut table, DEST_A, 64, "rtr-b", NEIGHBOUR_2);
+        insert_route(&mut table, DEST_A, 32, "rtr-a", NEIGHBOUR_1);
+        insert_route(&mut table, DEST_A, 64, "rtr-a", NEIGHBOUR_1);
 
-        let groups: Vec<(Destination<NoExtension>, Vec<Route<NoExtension>>)> = table
+        // A route owns its update queue, so it cannot be lifted out of the table to be inspected
+        // later. Its source carries both things the assertions below are about -- destination and
+        // router-id -- and is `Copy`, so that is what gets collected.
+        let groups: Vec<(RouteDestination<NoExtension>, Vec<SourceIndex<NoExtension>>)> = table
             .destination_groups_mut()
-            .map(|group| (group.destination(), group.iter().copied().collect()))
+            .map(|group| {
+                (
+                    group.destination(),
+                    group.iter().map(|r| *r.source()).collect(),
+                )
+            })
             .collect();
 
         assert_eq!(
@@ -392,10 +474,10 @@ mod test {
             "(DEST_A, 32), (DEST_A, 64) and (DEST_B, 64)"
         );
 
-        for (destination, routes) in &groups {
-            assert!(!routes.is_empty(), "empty slots must not be yielded");
+        for (destination, sources) in &groups {
+            assert!(!sources.is_empty(), "empty slots must not be yielded");
             assert!(
-                routes.iter().all(|r| r.destination() == *destination),
+                sources.iter().all(|s| &s.destination == destination),
                 "every route in a group shares one destination"
             );
         }
@@ -404,12 +486,11 @@ mod test {
         // router-id and neighbour.
         let (_, dest_a_64) = groups
             .iter()
-            .find(|(d, _)| d.prefix_len == 64 && d.prefix == DEST_A.into())
+            .find(|(d, _)| d == &RouteDestination::new(DEST_A.into(), 64).unwrap())
             .expect("(DEST_A, 64) group");
         assert_eq!(dest_a_64.len(), 2);
         assert_ne!(
-            dest_a_64[0].source().router_id,
-            dest_a_64[1].source().router_id,
+            dest_a_64[0].router_id, dest_a_64[1].router_id,
             "router-id is not part of the destination"
         );
     }
@@ -418,12 +499,11 @@ mod test {
     /// as a group of their own.
     #[test]
     fn skips_free_slots() {
-        let mut storage: [Option<Route<NoExtension>>; 4] = [const { None }; 4];
-        let mut table = RouteTable::new_with_storage(&mut storage[..], DEFAULT_ROUTE_EXPIRY_TIME);
-        table
-            .inner
-            .insert(route(DEST_A, 64, "rtr-a", NEIGHBOUR_1))
-            .expect("space for one route");
+        let (mut route_storage, mut update_queue) = get_storage::<'_, 4, 4, NoExtension>();
+        RouteTable::init_storage(&mut route_storage, &mut update_queue);
+        let mut table =
+            RouteTable::new_with_storage(&mut route_storage[..], DEFAULT_ROUTE_EXPIRY_TIME);
+        insert_route(&mut table, DEST_A, 64, "rtr-a", NEIGHBOUR_1);
 
         let groups: Vec<usize> = table.destination_groups_mut().map(|g| g.len()).collect();
 
