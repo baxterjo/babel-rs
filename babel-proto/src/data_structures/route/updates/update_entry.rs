@@ -1,5 +1,5 @@
 use crate::data_structures::neighbour::NeighbourIndex;
-use crate::data_structures::updates::{UpdateError, UpdateIndex};
+use crate::data_structures::route::updates::UpdateIndex;
 use crate::extension::address::AddressExt;
 use crate::utils::destination::DestAddr;
 use crate::utils::{Duration, Instant, InternallyKeyed, Timer};

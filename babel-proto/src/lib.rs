@@ -4,9 +4,9 @@
 use crate::data_structures::interface::Interface;
 use crate::data_structures::neighbour::Neighbour;
 use crate::data_structures::pending_seqno::SeqnoRequest;
+use crate::data_structures::route::updates::Update;
 use crate::data_structures::route::{Route, RouteTable};
 use crate::data_structures::source::Source;
-use crate::data_structures::updates::Update;
 use crate::extension::address::AddressExt;
 use crate::utils::storage::MaybeInUse;
 

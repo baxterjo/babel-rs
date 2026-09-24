@@ -1,7 +1,7 @@
 use crate::data_structures::interface::{Interface, InterfaceTable};
 use crate::data_structures::neighbour::{Neighbour, NeighbourIndex, NeighbourTable};
+use crate::data_structures::route::updates::{Update, UpdateError, UpdateTable};
 use crate::data_structures::source::{SourceIndex, SourceTable};
-use crate::data_structures::updates::{Update, UpdateError, UpdateTable};
 use crate::data_types::address::Address;
 use crate::data_types::destination::RouteDestination;
 use crate::data_types::seqno::SeqNo;

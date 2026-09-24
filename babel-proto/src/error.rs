@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
 use crate::data_structures::neighbour::{NeighbourError, NeighbourIndex};
 use crate::data_structures::route::RouteError;
-use crate::data_structures::updates::UpdateError;
+use crate::data_structures::route::updates::UpdateError;
 use crate::data_types::address::AddressError;
 use crate::data_types::address_encoding::AddressEncodingError;
 use crate::extension::address::AddressExt;

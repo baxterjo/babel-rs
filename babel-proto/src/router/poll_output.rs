@@ -1,6 +1,6 @@
 use super::BabelRouter;
 use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
-use crate::data_structures::updates::Update;
+use crate::data_structures::route::updates::Update;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;

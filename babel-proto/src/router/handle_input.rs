@@ -693,8 +693,8 @@ mod test {
     use crate::data_structures::interface::{InterfaceConfig, InterfaceHandle};
     use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_structures::route::route_table::DEFAULT_SMOOTHING_MULTIPLE;
+    use crate::data_structures::route::updates::{Update, UpdateIndex};
     use crate::data_structures::route::{Route, RouteIndex};
-    use crate::data_structures::updates::{Update, UpdateIndex};
     use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Interval, RouterId};
     use crate::extension::NoExtension;

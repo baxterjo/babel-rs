@@ -5,6 +5,9 @@ pub mod route_entry;
 #[doc(hidden)]
 pub mod route_table;
 
+/// Table containing pending updates.
+pub mod updates;
+
 #[doc(inline)]
 pub use route_entry::{Route, RouteIndex};
 #[doc(inline)]

@@ -3,12 +3,12 @@ use core::iter::zip;
 use crate::data_structures::interface::{Interface, InterfaceTable};
 use crate::data_structures::neighbour::{Neighbour, NeighbourIndex, NeighbourTable};
 use crate::data_structures::route::route_entry::Route;
+use crate::data_structures::route::updates::Update;
 use crate::data_structures::route::{RouteError, RouteIndex};
 use crate::data_structures::source::{SourceIndex, SourceTable};
-use crate::data_structures::updates::Update;
 use crate::data_types::destination::RouteDestination;
 use crate::data_types::seqno::SeqNo;
-use crate::data_types::{Address, Interval};
+use crate::data_types::{Address, Interval, RouterId};
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::metric::Metric;
@@ -174,24 +174,6 @@ where
         }
     }
 
-    /// Groups the routes in the table by the destination (prefix, plen) they lead to.
-    //  `chunk_by` produces "runs" of elements. So this only works because one of the main
-    //  predicates of `Table<'storage, MaybeInUse<V>>` is that it is always sorted. The key for
-    // the items in this particular `Table` is a struct that consists of `(prefix,
-    // prefix_len, neighbour)`. Sorting by a key is also sorting by a subset of that key, so
-    // this grouping works.
-    pub(crate) fn destination_groups_mut(
-        &mut self,
-    ) -> impl Iterator<Item = DestinationGroup<'_, 'storage, A>> {
-        self.inner
-            // Chunk by runs of the same destination
-            .chunk_by_mut(|a, b| destination_of(a) == destination_of(b))
-            // Filter out empty chunks and chunks that don't contain routes
-            .filter(|group| group.first().is_some_and(|first| first.value().is_some()))
-            // Map the chunk to a destination route.
-            .map(DestinationGroup)
-    }
-
     /// Writes out whatever the route updates this table owes on `interface`.
     pub(crate) fn poll_for_updates<'output, P>(
         &mut self,
@@ -213,20 +195,45 @@ where
         // interface this packet will be sent on.
         let mut parser: Parser<P> = Parser::new(interface.address);
 
-        for route in self.inner.iter_mut() {
-            writer = route.poll_for_updates::<P>(
-                now,
-                interface,
-                sources,
-                update_interval,
-                active_dest,
-                next_poll,
-                &mut parser,
-                writer,
-            )?;
+        let mut router_id_groups = self.router_id_groups_mut();
+
+        while let Some(mut rid_group) = router_id_groups.next_group() {
+            for route in rid_group.iter_mut() {
+                writer = route.poll_for_updates::<P>(
+                    now,
+                    interface,
+                    sources,
+                    update_interval,
+                    active_dest,
+                    next_poll,
+                    &mut parser,
+                    writer,
+                )?;
+            }
         }
 
         Ok(writer)
+    }
+
+    /// Get a [`DestinationGroup`] iterator from self.
+    pub(crate) fn destination_groups_mut(
+        &mut self,
+    ) -> impl Iterator<Item = DestinationGroup<'_, 'storage, A>> {
+        self.inner
+            // Chunk by runs of the same destination
+            .chunk_by_mut(|a, b| destination_of(a) == destination_of(b))
+            // Filter out empty chunks and chunks that don't contain routes
+            .filter(|group| group.first().is_some_and(|first| first.value().is_some()))
+            // Map the chunk to a destination route.
+            .map(DestinationGroup)
+    }
+
+    /// Get a [`RouterIdGroups`] cursor from self.
+    fn router_id_groups_mut(&mut self) -> RouterIdGroups<'_, 'storage, A> {
+        RouterIdGroups {
+            routes: self,
+            last: None,
+        }
     }
 }
 
@@ -265,6 +272,59 @@ impl<'storage, A: AddressExt> DestinationGroup<'_, 'storage, A> {
 /// the single leading group that [`RouteTable::destination_groups_mut`] discards.
 fn destination_of<A: AddressExt>(entry: &MaybeInUse<Route<A>>) -> Option<RouteDestination<A>> {
     entry.value().map(|e| *e.destination())
+}
+
+/// A cursor that groups routes by [`RouterId`] to optimize network traffic for sending updates.
+///
+/// This cannot be an iterator because [`RouteTable`] is not ordered by [`RouterId`] and
+/// [`core::slice::chunk_by`] only yields contiguous chunks so it must first establish a starting
+/// [`RouterId`] for all routes (the minimum) and then ratchet up for each call of
+/// [`RouterIdGroups::next_group`]
+struct RouterIdGroups<'table, 'routes, A: AddressExt> {
+    routes: &'table mut RouteTable<'routes, A>,
+    /// The [`RouterId`] of the group handed out last.
+    last: Option<RouterId>,
+}
+
+impl<'routes, A: AddressExt> RouterIdGroups<'_, 'routes, A> {
+    /// Gets the next [`RouterIdGroup`] and advances the [`RouterId`] cursor.
+    fn next_group(&mut self) -> Option<RouterIdGroup<'_, 'routes, A>> {
+        let router_id = self
+            .routes
+            .inner
+            .iter()
+            // Get the RouterId that advertised the route.
+            .map(|r| r.source().router_id)
+            // Get all router_ids greater than last or all if last is None
+            .filter(|id| self.last.is_none_or(|last| *id > last))
+            // Take the minimum router id of the filtered group.
+            .min()?;
+
+        // Ratchet up the minimum so no router id's less than this one can be yielded in subsequent
+        // calls to next_group.
+        self.last = Some(router_id);
+
+        Some(RouterIdGroup {
+            router_id,
+            routes: self.routes,
+        })
+    }
+}
+
+/// The routes that were originated by one router-id.
+struct RouterIdGroup<'table, 'routes, A: AddressExt> {
+    router_id: RouterId,
+    routes: &'table mut RouteTable<'routes, A>,
+}
+
+impl<'routes, A: AddressExt> RouterIdGroup<'_, 'routes, A> {
+    /// Yields all routes that have this group's [`RouterId`]
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<'routes, A>> {
+        self.routes
+            .inner
+            .iter_mut()
+            .filter(|r| r.source().router_id == self.router_id)
+    }
 }
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]

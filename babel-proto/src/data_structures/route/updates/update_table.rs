@@ -1,4 +1,4 @@
-use crate::data_structures::updates::{Update, UpdateError};
+use crate::data_structures::route::updates::{Update, UpdateError};
 use crate::extension::address::AddressExt;
 use crate::utils::storage::Table;
 use crate::utils::{InternallyKeyed, ManagedSlice};
@@ -74,7 +74,6 @@ mod test {
     use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_structures::route::{RouteIndex, RouteTable};
     use crate::data_structures::source::{SourceIndex, SourceTable};
-    use crate::data_structures::updates::UpdateIndex;
     use crate::data_types::destination::RouteDestination;
     use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Address, Interval, RouterId};
@@ -252,13 +251,14 @@ mod test {
     /// Updates come out in route table order, which is led by the destination rather than by the
     /// router-id that originated it.
     ///
-    /// This is what moving the queues onto the routes cost. While one table held every update it
+    /// This is what moving the queues onto the routes changed. While one table held every update it
     /// was keyed by [`UpdateIndex`], which leads with the router-id, so a router-id's updates sat
-    /// together and one Router-Id TLV could cover the whole run. Queues now hang off routes, the
-    /// route table is keyed by (prefix, plen, advertising neighbour), and a router-id's updates are
-    /// interleaved with every other router's. Packets stay correct — the write pass compares each
-    /// update against the packet's Router-Id context exactly — but a router-id can now be restated
-    /// several times in one packet.
+    /// together in storage. Queues now hang off routes, the route table is keyed by (prefix, plen,
+    /// advertising neighbour), and a router-id's updates are interleaved with every other router's.
+    ///
+    /// Storage order is not packet order, though: the write pass walks the table through a cursor
+    /// that groups the routes by originator, so one Router-Id TLV still covers a whole run — see
+    /// [`poll_updates::a_router_id_split_in_the_table_is_one_run_in_the_packet`].
     #[test]
     fn updates_come_out_in_destination_order_not_router_id_order() {
         let mut routes = empty_routes();
@@ -320,12 +320,14 @@ mod test {
     ///    tell one neighbour about itself twice in a packet.
     ///
     /// A third claim held while a single table carried every update and does not any more: updates
-    /// for one router-id sat together, so one Router-Id TLV covered the whole run. See
-    /// [`super::updates_come_out_in_destination_order_not_router_id_order`]. Uniqueness has also
+    /// for one router-id sat together *in storage*. They no longer do — see
+    /// [`super::updates_come_out_in_destination_order_not_router_id_order`] — so the router-id
+    /// grouping a packet needs is now the cursor's job rather than the key's. Uniqueness has also
     /// narrowed from global to per-queue — see
     /// [`two_routes_to_one_destination_each_queue_their_own_update`].
     mod table_order {
         use super::*;
+        use crate::data_structures::route::updates::UpdateIndex;
 
         /// The fields an update is ordered by, in the order they break ties: the destination's
         /// (prefix, plen) — which is what the route table sorts on — then the update's destination
@@ -907,16 +909,16 @@ mod test {
             );
         }
 
-        /// What that run costs now that it is ordered by destination: a router-id whose prefixes
-        /// are separated by another router's is restated, and the packet carries one Router-Id TLV
-        /// per Update TLV.
+        /// A router-id whose prefixes are separated by another router's in the table still gets
+        /// one Router-Id TLV, because the write pass walks the routes grouped by originator rather
+        /// than in table order.
         ///
-        /// The packet is still correct — every Update inherits the router-id immediately in front
-        /// of it — but while one table carried every update, keyed by [`UpdateIndex`], the
-        /// router-id led the key and this could not happen. It is the density that regressed, not
-        /// the meaning.
+        /// Table order is led by the destination, so rtr-b's prefix sits between rtr-a's two — see
+        /// [`super::updates_come_out_in_destination_order_not_router_id_order`]. The router-id
+        /// cursor hands out one originator at a time, in ascending order, so how the destinations
+        /// interleave no longer costs the packet a Router-Id TLV per Update TLV.
         #[test]
-        fn a_router_id_split_by_another_is_restated() {
+        fn a_router_id_split_in_the_table_is_one_run_in_the_packet() {
             let mut routes = empty_routes();
 
             for (prefix, id) in [(DEST_A, "rtr-a"), (DEST_B, "rtr-b"), (DEST_C, "rtr-a")] {
@@ -931,12 +933,12 @@ mod test {
                 alloc::vec![
                     RouterIdSlice::TYPE_ID,
                     UpdateSlice::TYPE_ID,
-                    RouterIdSlice::TYPE_ID,
                     UpdateSlice::TYPE_ID,
                     RouterIdSlice::TYPE_ID,
                     UpdateSlice::TYPE_ID,
                 ],
-                "rtr-a is named twice because rtr-b's prefix sorts between its two"
+                "rtr-a's two updates share one Router-Id TLV even though rtr-b's prefix sorts \
+                 between them in the table"
             );
         }
 
