@@ -89,7 +89,7 @@ impl<A: AddressExt> Update<A> {
     }
 
     /// Whether writing this update would repeat a TLV the packet already carries.
-    pub(crate) fn would_duplicate(&self, dest: &DestAddr<A>, route_in_packet: bool) -> bool {
+    pub(crate) fn can_piggyback(&self, dest: &DestAddr<A>, route_in_packet: bool) -> bool {
         // Mcast is allowed for this update
         self.mcast_allowed
             // The destination is mcast

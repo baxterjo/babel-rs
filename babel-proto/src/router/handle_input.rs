@@ -65,7 +65,7 @@ where
         // * After updating a neighbour's tx_cost (which does not necesarrily mean upon IHU receipt)
         // * After the route table is updated
 
-        let mut neighbour_udpate: Option<NeighbourIndex<A>> = None;
+        let mut neighbour_update: Option<NeighbourIndex<A>> = None;
 
         for tlv in TlvReader::new(packet.body()) {
             b_trace!("{:?}", tlv);
@@ -84,7 +84,7 @@ where
                         input.source_addr,
                         hello
                     ));
-                    neighbour_udpate = neighbour_udpate.or(neighbour_opt);
+                    neighbour_update = neighbour_update.or(neighbour_opt);
                 }
                 Tlv::Ihu(ihu) => {
                     let neighbour_opt = ok_or_continue!(self.handle_ihu(
@@ -94,7 +94,7 @@ where
                         input.destination,
                         ihu
                     ));
-                    neighbour_udpate = neighbour_udpate.or(neighbour_opt);
+                    neighbour_update = neighbour_update.or(neighbour_opt);
                 }
                 Tlv::RouterId(router_id) => {
                     b_debug!(
@@ -122,7 +122,7 @@ where
                         &mut parser,
                         update
                     ));
-                    neighbour_udpate = neighbour_udpate.or(Some(neighbour));
+                    neighbour_update = neighbour_update.or(Some(neighbour));
                 }
                 // This covers the base-spec TLVs that are not implemented yet.
                 Tlv::AckReq(_) | Tlv::Ack(_) | Tlv::RouteRequest(_) | Tlv::SeqnoRequest(_) => {
@@ -132,7 +132,7 @@ where
         }
 
         // After all packets have been handled, metrics can be updated for this neighbour.
-        if let Some(neighbour) = neighbour_udpate {
+        if let Some(neighbour) = neighbour_update {
             self.update_metrics_for_neighbour(now, &interface, neighbour);
             self.route_selection_due = true;
         }
@@ -268,7 +268,11 @@ where
             }
             // A blanket retraction triggers an update to be sent for all routes this neighbour has
             // advertised.
-            for route in self.route_table.iter_mut().filter(|r| r.neigbour() == &idx) {
+            for route in self
+                .route_table
+                .iter_mut()
+                .filter(|r| r.neighbour() == &idx)
+            {
                 route.retract();
                 if route.selected {
                     b_trace!("Selected route retracted, selection is due.");
@@ -399,7 +403,7 @@ where
                     Err(
                         err @ (RouteError::Full
                         | RouteError::Duplicate
-                        | RouteError::NoStorageAvaliable),
+                        | RouteError::NoStorageAvailable),
                     ) => {
                         // Running out of room is a local capacity limit, not a protocol error: the
                         // route is dropped and the sender will re-advertise it.
@@ -1073,7 +1077,7 @@ mod test {
         fn of(route: &Route<'_, NoExtension>) -> Self {
             Self {
                 source: *route.source(),
-                neighbour: *route.neigbour(),
+                neighbour: *route.neighbour(),
                 seqno: route.seqno,
                 advertised_metric: *route.advertised_metric(),
                 computed_metric: *route.computed_metric(),
@@ -3239,7 +3243,7 @@ mod test {
             addr: neighbour.into(),
         };
         for route in r.route_table.iter_mut() {
-            route.selected = *route.neigbour() == idx;
+            route.selected = *route.neighbour() == idx;
         }
     }
 
@@ -3511,8 +3515,6 @@ mod test {
     ///
     /// Five things can ask for one, spread over three places:
     ///
-    /// * `handle_update`, for an ordinary Update, where [`RouteTable::aquire_route`] decides — see
-    ///   the `route_acquisition` tests over there for which changes count;
     /// * `handle_update`, for a retraction, which is always relayed, because a route going away is
     ///   the change the rest of the network most needs to hear about promptly;
     /// * `handle_update`, for a blanket retraction, which is every route from that neighbour

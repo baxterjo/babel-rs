@@ -213,9 +213,9 @@ impl<'storage, A: AddressExt> Route<'storage, A> {
                 continue;
             }
 
-            // If the update would be a duplicate TLV in the current packet, decrement the send
+            // If the update can piggyback on a TLV in the current packet, decrement the send
             // counter and restart the send timer.
-            if update.would_duplicate(active_dest, route_in_packet) {
+            if update.can_piggyback(active_dest, route_in_packet) {
                 update.send_count = update.send_count.saturating_sub(1);
                 update.send_timer.restart(now);
                 *next_poll = update.send_timer.duration().min(*next_poll);
@@ -356,7 +356,7 @@ impl<'storage, A: AddressExt> Route<'storage, A> {
         &self.source
     }
 
-    pub(crate) fn neigbour(&self) -> &NeighbourIndex<A> {
+    pub(crate) fn neighbour(&self) -> &NeighbourIndex<A> {
         &self.neighbour
     }
 

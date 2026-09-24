@@ -103,7 +103,7 @@ where
         let storage = self
             .inner
             .get_storage()
-            .ok_or(RouteError::NoStorageAvaliable)?;
+            .ok_or(RouteError::NoStorageAvailable)?;
 
         let route = Route::new(
             now,
@@ -180,7 +180,7 @@ where
         for route in self
             .inner
             .iter_mut()
-            .filter(|route| route.neigbour() == &neighbour_idx)
+            .filter(|route| route.neighbour() == &neighbour_idx)
         {
             let old_computed = *route.computed_metric();
             route.compute_metric(now, interface, neighbour, &smoothing_multiple);
@@ -385,8 +385,7 @@ mod test {
         ([const { MaybeInUse::Vacant }; R], [[const { None }; N]; R])
     }
 
-    /// Adds a route to `table`, taking its update queue out of the table's own pool the way
-    /// [`RouteTable::aquire_route`] does.
+    /// Adds a route to `table`.
     ///
     /// A route owns the queue it was handed, so it can no longer be built standalone and handed to
     /// the table afterwards: the queue has to come from the table it is going to live in.

@@ -23,7 +23,7 @@ pub enum RouteError {
     #[error(transparent)]
     Timer(#[from] TimerError),
     #[error("Could not get update queue storage for route.")]
-    NoStorageAvaliable,
+    NoStorageAvailable,
     #[error("Duplicate route in the table")]
     Duplicate,
     #[error("Route table is full")]
