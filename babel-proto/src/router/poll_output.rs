@@ -340,20 +340,8 @@ where
                 // Otherwize reset the update timer.
                 self.update_timer.restart(now);
 
-                // And queue an update for every selected route to every neighbour.
-                for route in self.route_table.iter_mut().filter(|r| r.selected) {
-                    for neighbour in self.neighbor_table.neighbours_for_iface(interface.handle()) {
-                        let update = Update::new(
-                            now,
-                            neighbour.key(),
-                            !interface.prefer_ucast,
-                            interface.request_acks,
-                            *interface.update_retry_interval,
-                            1,
-                        );
-                        route.add_update(update)?;
-                    }
-                }
+                self.route_table
+                    .broadcast_periodic_update(now, interface, &self.neighbor_table);
 
                 let remaining = self.update_timer.duration();
                 next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));

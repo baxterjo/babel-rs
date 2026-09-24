@@ -1,4 +1,4 @@
-use crate::data_structures::interface::{Interface, InterfaceTable};
+use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTable};
 use crate::data_structures::neighbour::{Neighbour, NeighbourIndex, NeighbourTable};
 use crate::data_structures::route::updates::{Update, UpdateError, UpdateTable};
 use crate::data_structures::source::{SourceIndex, SourceTable};
@@ -145,12 +145,11 @@ impl<'storage, A: AddressExt> Route<'storage, A> {
     ///
     /// This is 3.7.2's triggered update: the callers are the points where what this node believes
     /// about the route changed in a way the neighbours are owed.
-    pub(crate) fn broadcast_update(
+    pub(crate) fn broadcast_triggered_update(
         &mut self,
         now: Instant,
         interfaces: &InterfaceTable<A>,
         neighbours: &NeighbourTable<A>,
-        retry_override: Option<u8>,
     ) {
         for interface in interfaces.iter() {
             for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
@@ -160,7 +159,7 @@ impl<'storage, A: AddressExt> Route<'storage, A> {
                     !interface.prefer_ucast,
                     false,
                     *interface.update_retry_interval,
-                    retry_override.unwrap_or(interface.update_retry_limit),
+                    interface.update_retry_limit,
                 )) {
                     b_debug!("Failed to add update for {:?} - {:?}", self.key(), err);
                 };

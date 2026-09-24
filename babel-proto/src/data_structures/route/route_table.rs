@@ -138,6 +138,29 @@ where
         Ok(())
     }
 
+    /// Queues updates for all selected routes to all neighbours on the given interface.
+    pub(crate) fn broadcast_periodic_update(
+        &mut self,
+        now: Instant,
+        interface: &Interface<A>,
+        neighbours: &NeighbourTable<A>,
+    ) {
+        for route in self.inner.iter_mut().filter(|r| r.selected) {
+            for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
+                if let Err(err) = route.add_update(Update::new(
+                    now,
+                    neighbour.key(),
+                    !interface.prefer_ucast,
+                    false,
+                    *interface.update_retry_interval,
+                    1,
+                )) {
+                    b_debug!("Failed to add update for {:?} - {:?}", route.key(), err);
+                };
+            }
+        }
+    }
+
     /// Recomputes the metric of every route `neighbour` advertised, and queues a triggered update
     /// for any of them still holding a destination whose metric moved significantly.
     ///
@@ -169,7 +192,7 @@ where
             if route.selected
                 && route.computed_metric().abs_diff(old_computed) > METRIC_DIFFERENCE_THRESHOLD
             {
-                route.broadcast_update(now, interfaces, neighbours, None);
+                route.broadcast_triggered_update(now, interfaces, neighbours);
             }
         }
     }

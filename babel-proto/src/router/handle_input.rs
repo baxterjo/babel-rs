@@ -505,11 +505,10 @@ where
                         // If the router ID for this route was changed and it was selected, an
                         // update MUST be sent.
                         if was_selected {
-                            route.broadcast_update(
+                            route.broadcast_triggered_update(
                                 now,
                                 &self.iface_table,
                                 &self.neighbor_table,
-                                None,
                             );
                         }
                     }
@@ -616,11 +615,10 @@ where
                             // If a new winner has been selected OR a winner has been selected for
                             // the first time, broadcast an updated.
                             if prev_opt.is_none_or(|p| p != win) {
-                                route.broadcast_update(
+                                route.broadcast_triggered_update(
                                     now,
                                     &self.iface_table,
                                     &self.neighbor_table,
-                                    None,
                                 );
                             }
                         } else {
@@ -633,11 +631,10 @@ where
                         // If this route WAS selected before and there are now no eligible routes
                         // due to a retraction, publish an update.
                         if prev == route.key() && route.computed_metric() == &Metric::INFINITY {
-                            route.broadcast_update(
+                            route.broadcast_triggered_update(
                                 now,
                                 &self.iface_table,
                                 &self.neighbor_table,
-                                None,
                             );
                         }
                     }

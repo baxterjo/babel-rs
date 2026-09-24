@@ -382,14 +382,18 @@ impl<'storage, V: InternallyKeyed + Recycle> Table<'storage, MaybeInUse<V>> {
             ManagedSlice::Borrowed(borrowed) => {
                 if let Some(item) = borrowed.iter_mut().find(|s| s.is_vacant()) {
                     let _ = mem::replace(item, MaybeInUse::Free(store));
+                } else {
+                    b_trace!(
+                        "Tried to return storage to a borrowed buffer that couldn't accept it."
+                    )
                 }
-                b_trace!("Tried to return storage to a borrowed buffer that couldn't accept it.")
             }
             _other => {
-                b_trace!("Tried to return storage that was uneeded.")
                 // Nothing to be done
             }
         }
+        // Sort after mutating.
+        my_sort(&mut self.0[..]);
     }
 }
 
