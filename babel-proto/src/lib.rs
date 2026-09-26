@@ -4,11 +4,10 @@
 use crate::data_structures::interface::Interface;
 use crate::data_structures::neighbour::Neighbour;
 use crate::data_structures::pending_seqno::SeqnoRequest;
-use crate::data_structures::route::updates::Update;
-use crate::data_structures::route::{Route, RouteTable};
+use crate::data_structures::route::Route;
 use crate::data_structures::source::Source;
+use crate::data_structures::updates::Update;
 use crate::extension::address::AddressExt;
-use crate::utils::storage::MaybeInUse;
 
 //#[cfg(not(any(test, feature = "alloc")))]
 #[cfg(feature = "alloc")]
@@ -64,7 +63,6 @@ impl<T> MaybeDefmt for T {}
 /// * `S`: Maximum number of sources
 /// * `PS`: Maximum number of pending seqno requests.
 pub struct BabelMemoryPool<
-    'storage,
     A: AddressExt,
     const I: usize,
     const N: usize,
@@ -74,61 +72,52 @@ pub struct BabelMemoryPool<
 > {
     interface_table: [Option<Interface<A>>; I],
     neighbour_table: [Option<Neighbour<A>>; N],
-    route_table: [MaybeInUse<Route<'storage, A>>; R],
+    route_table: [Option<Route<A>>; R],
     source_table: [Option<Source<A>>; S],
     pending_seqno_table: [Option<SeqnoRequest<A>>; PS],
     /// The maximum possible number of updates is the maximum routes * maximum neighbours.
-    update_queues: [[Option<Update<A>>; N]; R],
+    update_queue: [[Option<Update<A>>; N]; R],
 }
 
 pub struct BorrowedMemoryPool<'storage, A: AddressExt> {
     pub(crate) interface_table: &'storage mut [Option<Interface<A>>],
     pub(crate) neighbour_table: &'storage mut [Option<Neighbour<A>>],
-    pub(crate) route_table: &'storage mut [MaybeInUse<Route<'storage, A>>],
+    pub(crate) route_table: &'storage mut [Option<Route<A>>],
     pub(crate) source_table: &'storage mut [Option<Source<A>>],
     pub(crate) pending_seqno_table: &'storage mut [Option<SeqnoRequest<A>>],
+    pub(crate) update_queue: &'storage mut [Option<Update<A>>],
 }
 
 impl<A: AddressExt, const I: usize, const N: usize, const R: usize, const S: usize, const PS: usize>
-    Default for BabelMemoryPool<'_, A, I, N, R, S, PS>
+    Default for BabelMemoryPool<A, I, N, R, S, PS>
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<
-    'storage,
-    A: AddressExt,
-    const I: usize,
-    const N: usize,
-    const R: usize,
-    const S: usize,
-    const PS: usize,
-> BabelMemoryPool<'storage, A, I, N, R, S, PS>
-where
-    Self: 'storage,
+impl<A: AddressExt, const I: usize, const N: usize, const R: usize, const S: usize, const PS: usize>
+    BabelMemoryPool<A, I, N, R, S, PS>
 {
     pub const fn new() -> Self {
         Self {
             interface_table: [const { None }; I],
             neighbour_table: [const { None }; N],
-            route_table: [const { MaybeInUse::Vacant }; R],
+            route_table: [const { None }; R],
             source_table: [const { None }; S],
             pending_seqno_table: [const { None }; PS],
-            update_queues: [[const { None }; N]; R],
+            update_queue: [[const { None }; N]; R],
         }
     }
 
-    pub fn borrowed(&'storage mut self) -> BorrowedMemoryPool<'storage, A> {
-        RouteTable::init_storage(&mut self.route_table, &mut self.update_queues);
-
+    pub fn borrowed(&mut self) -> BorrowedMemoryPool<'_, A> {
         BorrowedMemoryPool {
             interface_table: &mut self.interface_table,
             neighbour_table: &mut self.neighbour_table,
             route_table: &mut self.route_table,
             source_table: &mut self.source_table,
             pending_seqno_table: &mut self.pending_seqno_table,
+            update_queue: self.update_queue.as_flattened_mut(),
         }
     }
 }

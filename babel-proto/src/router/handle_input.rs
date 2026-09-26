@@ -270,6 +270,7 @@ where
             // advertised.
             for route in self
                 .route_table
+                .inner
                 .iter_mut()
                 .filter(|r| r.neighbour() == &idx)
             {
@@ -294,7 +295,7 @@ where
             // state for router-id or next hop in this branch.
             let prefix = parser.resolve_address(&update)?;
 
-            if let Some(route) = self.route_table.get_mut_by_key(&RouteIndex {
+            if let Some(route) = self.route_table.inner.get_mut_by_key(&RouteIndex {
                 destination: RouteDestination::new(prefix, update.plen())?,
                 neighbour: neighbour.key(),
             }) {
@@ -346,7 +347,7 @@ where
         let route_expiry_time = self.route_table.route_expiry_time;
 
         // Aquire the route
-        match self.route_table.get_mut_by_key(&RouteIndex {
+        match self.route_table.inner.get_mut_by_key(&RouteIndex {
             destination: resolved_update.destination,
             neighbour: neighbour.key(),
         }) {
@@ -509,8 +510,9 @@ where
                         // If the router ID for this route was changed and it was selected, an
                         // update MUST be sent.
                         if was_selected {
-                            route.broadcast_triggered_update(
+                            self.update_queue.queue_triggered_update(
                                 now,
+                                route,
                                 &self.iface_table,
                                 &self.neighbor_table,
                             );
@@ -573,8 +575,8 @@ where
                         // better than the incumbent. If there are any items in the iterator after
                         // this point, they are better than the incumbent.
                         .filter(|route| {
-                            route.computed_metric() < &incumbent_computed
-                                && route.smoothed_metric() < &incumbent_smoothed
+                            *route.computed_metric() < incumbent_computed
+                                && *route.smoothed_metric() < incumbent_smoothed
                         })
                         // Take the route that is the minimum of the routes better than the
                         // incumbent. Breaking ties on the route index.
@@ -619,24 +621,22 @@ where
                             // If a new winner has been selected OR a winner has been selected for
                             // the first time, broadcast an updated.
                             if prev_opt.is_none_or(|p| p != win) {
-                                route.broadcast_triggered_update(
+                                self.update_queue.queue_triggered_update(
                                     now,
+                                    route,
                                     &self.iface_table,
                                     &self.neighbor_table,
                                 );
                             }
-                        } else {
-                            // If there is a winner and it is not this route, clear this route's
-                            // update queue to reduce noise.
-                            route.clear_updates();
                         }
                     }
                     (Some(prev), None) => {
                         // If this route WAS selected before and there are now no eligible routes
                         // due to a retraction, publish an update.
                         if prev == route.key() && route.computed_metric() == &Metric::INFINITY {
-                            route.broadcast_triggered_update(
+                            self.update_queue.queue_triggered_update(
                                 now,
+                                route,
                                 &self.iface_table,
                                 &self.neighbor_table,
                             );
@@ -694,8 +694,8 @@ mod test {
     use crate::data_structures::interface::{InterfaceConfig, InterfaceHandle};
     use crate::data_structures::neighbour::NeighbourIndex;
     use crate::data_structures::route::route_table::DEFAULT_SMOOTHING_MULTIPLE;
-    use crate::data_structures::route::updates::{Update, UpdateIndex};
     use crate::data_structures::route::{Route, RouteIndex};
+    use crate::data_structures::updates::{Update, UpdateIndex};
     use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Interval, RouterId};
     use crate::extension::NoExtension;
@@ -726,7 +726,6 @@ mod test {
             Instant::from_secs(0),
             BabelRouterConfig::new(RouterId::try_from(name).expect("bad router id")),
         )
-        .expect("bad router")
     }
 
     fn iface_handle(name: &str) -> InterfaceHandle {
@@ -1031,11 +1030,10 @@ mod test {
     }
 
     /// What a queued update for `prefix`, originated by `origin`, owed to `send_to` amounts to:
-    /// the source it will advertise paired with the key it sits under in its route's queue.
+    /// the source it will advertise paired with the key it sits under in the router's queue.
     ///
-    /// An update names only the neighbour it is owed to. What it will *say* — the destination and
-    /// the router-id that originated it — is read off the route holding it at the moment the packet
-    /// is written, so the two have to be looked at together to identify what is actually owed.
+    /// The key names the destination and the neighbour owed, and nothing about the originator, so
+    /// the source has to be looked at alongside it to identify what is actually owed.
     fn update_key(
         origin: [u8; 8],
         prefix: Ipv6Addr,
@@ -1046,16 +1044,19 @@ mod test {
                 router_id: RouterId::from(&origin),
                 destination: dest(prefix, PLEN),
             },
-            UpdateIndex { neighbour: send_to },
+            UpdateIndex {
+                destination: dest(prefix, PLEN),
+                neighbour: send_to,
+            },
         )
     }
 
     /// A `Copy` snapshot of a route table entry.
     ///
-    /// A [`Route`] owns its update queue, so an entry cannot be lifted out of the table and held on
-    /// to while the router is driven further — which is exactly what these tests do when they take
-    /// a "before" and an "after". Everything the assertions reach for is `Copy`, so this carries
-    /// those and nothing else, under the names [`Route`] gives them.
+    /// A [`Route`] cannot be lifted out of the table and held on to while the router is driven
+    /// further — which is exactly what these tests do when they take a "before" and an "after".
+    /// Everything the assertions reach for is `Copy`, so this carries those and nothing else,
+    /// under the names [`Route`] gives them.
     #[derive(Debug, Clone, Copy)]
     struct RouteSnapshot {
         source: SourceIndex<NoExtension>,
@@ -1068,13 +1069,10 @@ mod test {
         pub(crate) next_hop: Address<NoExtension>,
         pub(crate) selected: bool,
         pub(crate) expiry: Timer,
-        /// Whether this route's own update queue is empty. The queue itself cannot come along —
-        /// the route owns it — but whether there is anything in it is what the tests ask.
-        pub(crate) owes_nothing: bool,
     }
 
     impl RouteSnapshot {
-        fn of(route: &Route<'_, NoExtension>) -> Self {
+        fn of(route: &Route<NoExtension>) -> Self {
             Self {
                 source: *route.source(),
                 neighbour: *route.neighbour(),
@@ -1086,7 +1084,6 @@ mod test {
                 next_hop: route.next_hop,
                 selected: route.selected,
                 expiry: route.expiry,
-                owes_nothing: route.update_queue.inner.iter().next().is_none(),
             }
         }
 
@@ -1134,6 +1131,7 @@ mod test {
             },
         };
         r.route_table
+            .inner
             .get_mut_by_key(&idx)
             .map(|r| RouteSnapshot::of(r))
     }
@@ -1143,52 +1141,56 @@ mod test {
     fn is_eligible_in_table(r: &mut BabelRouter<'static>, key: &RouteIndex<NoExtension>) -> bool {
         let source_table = &r.source_table;
         r.route_table
+            .inner
             .get_mut_by_key(key)
             .is_some_and(|route| is_eligible(source_table, route))
     }
 
     fn route_count(r: &mut BabelRouter<'static>) -> usize {
-        r.route_table.iter_mut().count()
+        r.route_table.inner.iter_mut().count()
     }
 
     /// The keys of every route currently holding a destination.
     fn selected_route_keys(r: &mut BabelRouter<'static>) -> Vec<RouteIndex<NoExtension>> {
         r.route_table
+            .inner
             .iter_mut()
             .filter(|route| route.selected)
             .map(|route| route.key())
             .collect()
     }
 
-    /// Every update the router still owes, paired with the source of the route that holds it, in
-    /// the order a poll would walk them.
+    /// Every update the router still owes, paired with the source it advertises, in the order a
+    /// poll would walk them: the queue's order, which is (prefix, plen, neighbour owed).
     ///
-    /// Queues hang off the routes, so this is the route table's order — (prefix, plen, advertising
-    /// neighbour) — and then each route's own queue, which is keyed by the neighbour owed. The
-    /// source rides along because an update no longer carries one: what it will advertise is only
-    /// knowable from the route it hangs off.
+    /// The source is pulled out separately because it is what the assertions are about and is not
+    /// part of the key.
     fn pending_updates(
         r: &mut BabelRouter<'static>,
     ) -> Vec<(SourceIndex<NoExtension>, Update<NoExtension>)> {
-        r.route_table
-            .iter_mut()
-            .flat_map(|route| {
-                let source = *route.source();
-                route
-                    .update_queue
-                    .inner
-                    .iter()
-                    .map(move |update| (source, *update))
-            })
+        r.update_queue
+            .inner
+            .iter()
+            .map(|update| (*update.source(), *update))
             .collect()
+    }
+
+    /// Whether the router owes nothing that advertises `route`.
+    ///
+    /// One queue serves the whole router, so "this route's queue" is no longer a place — an update
+    /// belongs to the route it names, which is the destination it carries plus the neighbour it
+    /// was learned from.
+    fn owes_nothing(r: &mut BabelRouter<'static>, route: &RouteIndex<NoExtension>) -> bool {
+        !r.update_queue.inner.iter().any(|update| {
+            update.source().destination == route.destination
+                && update.advertising_neighbour == route.neighbour
+        })
     }
 
     /// Drops every update the router is holding, so what a later step queues is measured on its
     /// own.
     fn drain_updates(r: &mut BabelRouter<'static>) {
-        for route in r.route_table.iter_mut() {
-            route.update_queue.clear();
-        }
+        r.update_queue.inner.retain(|_| false);
     }
 
     /// Brings a neighbour to the state an Update needs to yield a finite route metric: enough
@@ -3153,7 +3155,12 @@ mod test {
 
         // Drive the selected route to infinity behind selection's back, the way an expiry sweep
         // would, so the next run has a real change to report.
-        for route in r.route_table.iter_mut().filter(|route| route.selected) {
+        for route in r
+            .route_table
+            .inner
+            .iter_mut()
+            .filter(|route| route.selected)
+        {
             route.retract();
         }
 
@@ -3242,7 +3249,7 @@ mod test {
             iface,
             addr: neighbour.into(),
         };
-        for route in r.route_table.iter_mut() {
+        for route in r.route_table.inner.iter_mut() {
             route.selected = *route.neighbour() == idx;
         }
     }
@@ -3264,7 +3271,7 @@ mod test {
 
         // Clear the selection the updates left behind. This is the state a destination is in when
         // every route towards it has just come back from having been retracted.
-        for route in r.route_table.iter_mut() {
+        for route in r.route_table.inner.iter_mut() {
             route.selected = false;
         }
 
@@ -3545,10 +3552,9 @@ mod test {
 
         /// The (destination, destination neighbour) keys the router is holding updates for.
         ///
-        /// In poll order, which walks the route table — sorted by (prefix, plen, advertising
-        /// neighbour) — and then each route's own queue, sorted by the neighbour the update is
-        /// owed to. Two routes towards one prefix now each carry their own queue, so a destination
-        /// can appear more than once here where the single shared table would have collapsed it.
+        /// In poll order, which is the queue's own: sorted by (prefix, plen) and then by the
+        /// neighbour the update is owed to. The key is what collapses two routes towards one
+        /// prefix into a single update per neighbour — only the selected one is ever advertised.
         fn pending(
             r: &mut BabelRouter<'static>,
         ) -> Vec<(SourceIndex<NoExtension>, UpdateIndex<NoExtension>)> {
@@ -3809,10 +3815,11 @@ mod test {
             );
         }
 
-        /// Queues hang off routes, so a destination that changes hands would otherwise be owed
-        /// twice — once by the route that was holding it and once by the route that just took it.
-        /// Selection drops the loser's queue for exactly that reason: whatever it still had to say
-        /// about the destination is superseded by the winner's update.
+        /// A destination that changes hands must not be owed twice — once by the route that was
+        /// holding it and once by the route that just took it. Nothing has to sweep the loser for
+        /// that: an update is keyed by (destination, neighbour owed), and the winner queues to
+        /// every neighbour, so what the loser was still holding sits under those very keys and is
+        /// superseded in place.
         ///
         /// The move is driven by retracting the incumbent, which queues a relay on it first — so at
         /// the moment selection runs, the loser really is holding something. A worsened metric
@@ -3864,18 +3871,19 @@ mod test {
                 "one update per neighbour, from the winner — the relay the loser queued for its \
                  own retraction went with the destination"
             );
+            let loser = route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+                .expect("the loser is still in the table")
+                .key();
             assert!(
-                route_for(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
-                    .expect("the loser is still in the table")
-                    .owes_nothing,
-                "and the loser's queue is empty rather than holding a second, infinite copy"
+                owes_nothing(&mut r, &loser),
+                "and nothing owed still advertises the loser, so no second, infinite copy goes out"
             );
         }
 
-        /// The limit of that clearing: it is sound only because a winner's update supersedes what
-        /// the loser owed. A destination that has just lost its *last* eligible route has no winner
-        /// to supersede anything, so the retraction its previous holder queued has to survive —
-        /// that retraction is the only thing telling the neighbours the destination is gone.
+        /// The other side of that supersede: it only happens where there is a winner to do it. A
+        /// destination that has just lost its *last* eligible route has none, so the retraction its
+        /// previous holder queued stays in the queue untouched — that retraction is the only thing
+        /// telling the neighbours the destination is gone.
         #[test]
         fn a_destination_with_nothing_to_fail_over_to_keeps_its_retraction() {
             let mut r = router("node_1");

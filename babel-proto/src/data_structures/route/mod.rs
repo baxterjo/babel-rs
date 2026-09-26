@@ -5,9 +5,6 @@ pub mod route_entry;
 #[doc(hidden)]
 pub mod route_table;
 
-/// Table containing pending updates.
-pub mod updates;
-
 #[doc(inline)]
 pub use route_entry::{Route, RouteIndex};
 #[doc(inline)]
@@ -30,8 +27,8 @@ pub enum RouteError {
     Full,
 }
 
-impl<A: AddressExt> From<InsertError<Route<'_, A>>> for RouteError {
-    fn from(value: InsertError<Route<'_, A>>) -> Self {
+impl<A: AddressExt> From<InsertError<Route<A>>> for RouteError {
+    fn from(value: InsertError<Route<A>>) -> Self {
         match value {
             InsertError::Full(_) => RouteError::Full,
             InsertError::Duplicate(_) => RouteError::Duplicate,

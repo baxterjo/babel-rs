@@ -3,14 +3,15 @@ use thiserror::Error;
 #[doc(hidden)]
 pub mod update_entry;
 #[doc(hidden)]
-pub mod update_table;
+pub mod update_queue;
 
 #[doc(inline)]
 pub(crate) use update_entry::Update;
 #[doc(inline)]
-pub(crate) use update_table::UpdateTable;
+pub(crate) use update_queue::UpdateQueue;
 
 use crate::data_structures::neighbour::NeighbourIndex;
+use crate::data_types::destination::RouteDestination;
 use crate::extension::address::AddressExt;
 use crate::utils::TimerError;
 
@@ -26,5 +27,6 @@ pub enum UpdateError {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct UpdateIndex<A: AddressExt> {
+    pub(crate) destination: RouteDestination<A>,
     pub(crate) neighbour: NeighbourIndex<A>,
 }

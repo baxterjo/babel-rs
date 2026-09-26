@@ -1,5 +1,4 @@
 use core::fmt::Debug as DebugT;
-use core::mem;
 use core::ops::{Deref, DerefMut};
 
 use crate::utils::ManagedSlice;
@@ -20,10 +19,11 @@ macro_rules! check_sorted {
         );
     };
 }
-/// A slot in a [`Table`].
+/// A slot in a [`Table`], either holding a value or standing empty.
 ///
-/// This is used for table values that either require no resources to instantiate, or values that
-/// require some pre-allocated resource that can be given back when dropped.
+/// [`Option`] is the only implementor. The trait is what lets [`Table`] be written once over "a
+/// slot", and is kept so a slot that needs more than a value — a tombstone, say — can be added
+/// without rewriting every table.
 pub(crate) trait TableSlot {
     type Value: InternallyKeyed;
     fn new_occupied(value: Self::Value) -> Self;
@@ -73,77 +73,6 @@ pub(crate) enum InsertError<V> {
     Duplicate(V),
 }
 
-/// A value that is built from pre-allocated memory and can give it back.
-pub(crate) trait Recycle: Sized {
-    type Storage: Default;
-    fn release(self) -> Self::Storage;
-}
-
-/// Storage slot used for pre-allocated memory.
-///
-/// The type stored at Free can contain types required to instantiate the value at InUse.
-pub(crate) enum MaybeInUse<V: Recycle> {
-    Free(V::Storage),
-    InUse(V),
-    Vacant,
-}
-
-impl<V: Recycle> MaybeInUse<V> {
-    pub(crate) const fn new_free(storage: V::Storage) -> Self {
-        Self::Free(storage)
-    }
-
-    fn storage(self) -> Option<V::Storage> {
-        match self {
-            MaybeInUse::Free(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    fn is_free(&self) -> bool {
-        matches!(self, MaybeInUse::Free(_))
-    }
-}
-
-impl<V: Recycle + InternallyKeyed> TableSlot for MaybeInUse<V> {
-    type Value = V;
-    fn new_occupied(value: V) -> Self {
-        Self::InUse(value)
-    }
-
-    /// Returns the instantiated value at the slot if it is in use.
-    fn value(&self) -> Option<&V> {
-        match self {
-            MaybeInUse::InUse(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    /// Returns the instantiated value at the slot if it is in use.
-    fn value_mut(&mut self) -> Option<&mut V> {
-        match self {
-            MaybeInUse::InUse(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    fn occupy(&mut self, value: V) {
-        *self = MaybeInUse::InUse(value)
-    }
-
-    /// If the value is in use, free's it in place.
-    fn free(&mut self) {
-        match mem::replace(self, MaybeInUse::Vacant) {
-            MaybeInUse::InUse(v) => *self = MaybeInUse::Free(v.release()),
-            free => *self = free,
-        }
-    }
-
-    fn is_vacant(&self) -> bool {
-        matches!(self, MaybeInUse::Vacant)
-    }
-}
-
 /// A type that knows how to be located within a slice containing itself and can derive its own key.
 /// And knows how to sort a slice of itself in a way that the locate method is expecting.
 pub(crate) trait InternallyKeyed
@@ -173,10 +102,6 @@ where
 {
     pub(crate) fn new<T: Into<ManagedSlice<'storage, S>>>(storage: T) -> Self {
         Self(storage.into())
-    }
-
-    pub(crate) fn into_inner(self) -> ManagedSlice<'storage, S> {
-        self.0
     }
 
     /// Places a value in a vacant slot, keyed by the value itself.
@@ -342,57 +267,6 @@ where
             owned.retain(|e| !(e.is_vacant()));
         }
         // Ensure the slice is sorted after modifying it.
-        my_sort(&mut self.0[..]);
-    }
-}
-
-/// Fetches the first available free storage in the table.
-///
-/// Only implemented if the table contains a type that is created from a resource.
-impl<'storage, V: InternallyKeyed + Recycle> Table<'storage, MaybeInUse<V>> {
-    /// Gets storage from the table for creating a new item.
-    ///
-    /// MEMORY DRAIN: If the storage returned here is dropped, it will be gone from the table
-    /// forever. Use [`Self::return_storage`] to return free storage to the table.
-    pub(crate) fn get_storage(&mut self) -> Option<V::Storage> {
-        let out = if let Some(storage) = self.0.iter_mut().find(|s| s.is_free()) {
-            // If there is a free slot in the slice, grab it.
-            mem::replace(storage, MaybeInUse::Vacant).storage()
-        } else {
-            match &mut self.0 {
-                // If the slice is borrowed, and a free slot does not exist then a new one cannot
-                // be made.
-                ManagedSlice::Borrowed(_) => None,
-                // If the slice is owned, push a new slot.
-                #[cfg(any(feature = "std", feature = "alloc"))]
-                ManagedSlice::Owned(_) => {
-                    // If we have access to alloc, then alloc.
-                    Some(V::Storage::default())
-                }
-            }
-        };
-
-        // Sort after mutating.
-        my_sort(&mut self.0[..]);
-        out
-    }
-
-    pub(crate) fn return_storage(&mut self, store: V::Storage) {
-        match &mut self.0 {
-            ManagedSlice::Borrowed(borrowed) => {
-                if let Some(item) = borrowed.iter_mut().find(|s| s.is_vacant()) {
-                    let _ = mem::replace(item, MaybeInUse::Free(store));
-                } else {
-                    b_trace!(
-                        "Tried to return storage to a borrowed buffer that couldn't accept it."
-                    )
-                }
-            }
-            _other => {
-                // Nothing to be done
-            }
-        }
-        // Sort after mutating.
         my_sort(&mut self.0[..]);
     }
 }
