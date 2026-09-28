@@ -111,7 +111,8 @@ where
     #[error("Cannot generate single address from wildcard")]
     CannotCreateFromWildCard,
     #[error(
-        "Inocorrect number of bytes for address type {address_type} - required: {required_len}, len: {len}"
+        "Incorrect number of bytes for address type \
+        {address_type} - required: {required_len}, len: {len}"
     )]
     IncorrectByteLength {
         address_type: &'static str,
@@ -135,43 +136,47 @@ where
         }
     }
 
+    /// Reads an address out of the octets an encoding puts on the wire.
+    ///
+    /// If given less octets than the length of the addresws, this method will fill the right side
+    /// with zeros
+    ///
+    /// More octets than the encoding has will error.
     pub fn from_bytes(
         ae: AddressEncoding<A::Encoding>,
         bytes: &[u8],
     ) -> Result<Self, AddressError<A>> {
+        /// Left-aligns `bytes` in an `N`-octet address, zero-filling the tail it does not reach.
+        fn leading<const N: usize, A: AddressExt>(
+            bytes: &[u8],
+            address_type: &'static str,
+        ) -> Result<[u8; N], AddressError<A>> {
+            let mut octets = [0u8; N];
+            let head = octets
+                .get_mut(..bytes.len())
+                .ok_or(AddressError::IncorrectByteLength {
+                    address_type,
+                    required_len: N,
+                    len: bytes.len(),
+                })?;
+            head.copy_from_slice(bytes);
+            Ok(octets)
+        }
+
         match ae {
             AddressEncoding::WildCard => Err(AddressError::CannotCreateFromWildCard),
             AddressEncoding::Ipv4 => {
-                let octets: [u8; 4] =
-                    bytes
-                        .try_into()
-                        .map_err(|_| AddressError::IncorrectByteLength {
-                            address_type: "Ipv4",
-                            required_len: 4,
-                            len: bytes.len(),
-                        })?;
+                let octets = leading::<4, A>(bytes, "Ipv4")?;
                 Ok(Self::V4(core::net::Ipv4Addr::from_octets(octets).into()))
             }
             AddressEncoding::Ipv6 => {
-                let octets: [u8; 16] =
-                    bytes
-                        .try_into()
-                        .map_err(|_| AddressError::IncorrectByteLength {
-                            address_type: "Ipv6",
-                            required_len: 16,
-                            len: bytes.len(),
-                        })?;
+                let octets = leading::<16, A>(bytes, "Ipv6")?;
                 Ok(Self::V6(core::net::Ipv6Addr::from_octets(octets).into()))
             }
             AddressEncoding::LocalIpv6 => {
-                let suffix: [u8; 8] =
-                    bytes
-                        .try_into()
-                        .map_err(|_| AddressError::IncorrectByteLength {
-                            address_type: "Link Local Ipv6",
-                            required_len: 8,
-                            len: bytes.len(),
-                        })?;
+                // The encoding fixes the first 8 octets, so the wire only ever carries the suffix
+                // and it is the suffix that is left-aligned and zero-filled.
+                let suffix = leading::<8, A>(bytes, "Link Local Ipv6")?;
                 let prefix: [u8; 8] = [0xFE, 0x80, 0, 0, 0, 0, 0, 0];
                 let whole: [u8; 16] = {
                     let mut whole = [0; 16];
@@ -341,5 +346,51 @@ mod test {
                 ..
             }
         ));
+    }
+
+    /// A Prefix field holds `(Plen/8).ceil()` octets, not a whole address, so the octets a prefix
+    /// does not reach never arrive. They are zero by definition — a `/64` is an address with 8
+    /// trailing zero octets — and filling them in is what lets a prefix off the wire be read
+    /// without anything having to tell this function how long it was.
+    #[test]
+    fn a_prefix_shorter_than_its_encoding_is_filled_out_with_zeroes() {
+        let addr = Address::<NoExtension>::from_bytes(
+            AddressEncoding::Ipv6,
+            // fd0a::/64, as an Update or a Route Request puts it on the wire.
+            &[0xfd, 0x0a, 0, 0, 0, 0, 0, 0],
+        )
+        .expect("the leading octets of an address are an address");
+
+        assert_eq!(
+            addr,
+            Address::from(core::net::Ipv6Addr::new(0xfd0a, 0, 0, 0, 0, 0, 0, 0))
+        );
+    }
+
+    /// The same for the two encodings whose wire form is not simply the address: IPv4, which is
+    /// shorter, and AE 3, where it is the 8-octet *suffix* that is left-aligned and zero-filled
+    /// under the `fe80::/64` the encoding implies.
+    #[test]
+    fn a_short_prefix_is_filled_out_under_every_encoding() {
+        let v4 = Address::<NoExtension>::from_bytes(AddressEncoding::Ipv4, &[192, 168])
+            .expect("192.168.0.0/16 on the wire is two octets");
+        assert_eq!(v4, Address::from(core::net::Ipv4Addr::new(192, 168, 0, 0)));
+
+        let local = Address::<NoExtension>::from_bytes(AddressEncoding::LocalIpv6, &[0x01, 0x02])
+            .expect("a link-local prefix carries only as much suffix as it reaches");
+        assert_eq!(
+            local,
+            Address::from(core::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0x0102, 0, 0, 0))
+        );
+    }
+
+    /// An empty Prefix field is the whole of what a `/0` puts on the wire, and the address it names
+    /// is the unspecified one.
+    #[test]
+    fn an_empty_prefix_is_the_all_zeroes_address() {
+        let addr = Address::<NoExtension>::from_bytes(AddressEncoding::Ipv6, &[])
+            .expect("::/0 reaches the wire as no octets at all");
+
+        assert_eq!(addr, Address::from(core::net::Ipv6Addr::UNSPECIFIED));
     }
 }

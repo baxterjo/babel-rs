@@ -1,6 +1,6 @@
 use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTable};
 use crate::data_structures::neighbour::{NeighbourIndex, NeighbourTable};
-use crate::data_structures::route::{Route, RouteIndex, RouteTable};
+use crate::data_structures::route::{Route, RouteTable};
 use crate::data_structures::source::SourceTable;
 use crate::data_structures::updates::{Update, UpdateError};
 use crate::data_types::destination::RouteDestination;
@@ -49,7 +49,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                 if let Err(err) = self.add_update(
                     Update::new(
                         now,
-                        route,
+                        *route.destination(),
                         neighbour.key(),
                         !interface.prefer_ucast,
                         false,
@@ -578,6 +578,18 @@ mod test {
                 INTERVAL,
             )
             .expect("owned storage grows");
+
+        // `add_route` never marks a route selected — real route selection runs afterwards — so
+        // this stands in for it, with the route just added taking the destination from whatever
+        // held it before. The write pass renders an update from the *selected* route for its
+        // destination, so a table where nothing is selected would advertise nothing but
+        // retractions.
+        for route in tables.routes.inner.iter_mut() {
+            if route.destination() == &source.destination {
+                route.selected = route.neighbour() == &learned_from;
+            }
+        }
+
         RouteIndex {
             destination: source.destination,
             neighbour: learned_from,
@@ -622,7 +634,7 @@ mod test {
             .expect("route is in the table");
         let update = Update::new(
             t0(),
-            route,
+            *route.destination(),
             send_to,
             mcast,
             false,
@@ -635,17 +647,29 @@ mod test {
             .expect("owned storage grows");
     }
 
-    /// Every update the router is holding, paired with the source it advertises, in the order a
-    /// poll walks them: the queue's own order, which is (prefix, plen, destination neighbour).
+    /// Every update the router is holding, paired with the source it would advertise, in the order
+    /// a poll walks them: the queue's own order, which is (prefix, plen, destination neighbour).
     ///
-    /// The source is pulled out separately because it is what most of the assertions here are
-    /// about, and because it is not part of the key.
-    fn pending(tables: &Tables<'_>) -> Vec<(SourceIndex<NoExtension>, Update<NoExtension>)> {
+    /// The source is not the update's own any more — an update names a destination, and the write
+    /// pass resolves what to advertise from the selected route for it. So this resolves it the same
+    /// way, and `None` is a destination with no selected route: the case the pass renders as a
+    /// retraction.
+    fn pending(
+        tables: &Tables<'_>,
+    ) -> Vec<(Option<SourceIndex<NoExtension>>, Update<NoExtension>)> {
         tables
             .updates
             .inner
             .iter()
-            .map(|update| (*update.source(), *update))
+            .map(|update| {
+                (
+                    tables
+                        .routes
+                        .get_selected(update.destination())
+                        .map(|route| *route.source()),
+                    *update,
+                )
+            })
             .collect()
     }
 
@@ -684,7 +708,11 @@ mod test {
 
         let in_table_order: Vec<RouterId> = pending(&tables)
             .iter()
-            .map(|(source, _)| source.router_id)
+            .map(|(source, _)| {
+                source
+                    .expect("every destination has a selected route")
+                    .router_id
+            })
             .collect();
         assert_eq!(
             in_table_order,
@@ -706,7 +734,10 @@ mod test {
 
         let updates_vec: Vec<(RouterId, Address<NoExtension>)> = pending(&tables)
             .iter()
-            .map(|(source, _)| (source.router_id, *source.destination.prefix()))
+            .map(|(source, _)| {
+                let source = source.expect("DEST_A's route holds the destination");
+                (source.router_id, *source.destination.prefix())
+            })
             .collect();
 
         assert_eq!(
@@ -756,6 +787,7 @@ mod test {
             pending(tables)
                 .iter()
                 .map(|(source, update)| {
+                    let source = source.expect("every destination here has a selected route");
                     (
                         source.router_id,
                         *source.destination.prefix(),
@@ -834,8 +866,10 @@ mod test {
                 }
             }
 
-            let sources: Vec<SourceIndex<NoExtension>> =
-                pending(&tables).iter().map(|(source, _)| *source).collect();
+            let sources: Vec<SourceIndex<NoExtension>> = pending(&tables)
+                .iter()
+                .map(|(source, _)| source.expect("both destinations are held"))
+                .collect();
             let mut runs = sources.clone();
             runs.dedup();
             assert_eq!(
@@ -870,7 +904,8 @@ mod test {
         /// stops the receiver hearing about the destination twice in one packet.
         ///
         /// Which of the two the survivor advertises is route selection's business rather than the
-        /// queue's: it queues for the winner, and the last write wins.
+        /// queue's, and now entirely so: the update names only the destination, so what it carries
+        /// is read off whichever route holds that destination when the packet is written.
         #[test]
         fn two_routes_to_one_destination_collapse_into_one_update() {
             let mut tables = empty_tables();
@@ -882,7 +917,7 @@ mod test {
 
             // What the receiver would see: what the update advertises, paired with who it is owed
             // to.
-            let owed_to_n1: Vec<(SourceIndex<NoExtension>, UpdateIndex<NoExtension>)> =
+            let owed_to_n1: Vec<(Option<SourceIndex<NoExtension>>, UpdateIndex<NoExtension>)> =
                 pending(&tables)
                     .iter()
                     .map(|(source, update)| (*source, update.key()))
@@ -893,9 +928,13 @@ mod test {
                 "one destination, one destination neighbour, one pending update: {owed_to_n1:?}"
             );
             assert_eq!(
-                pending(&tables)[0].1.advertising_neighbour,
-                neighbour(NEIGHBOUR_2),
-                "and it advertises the route that queued last"
+                tables
+                    .routes
+                    .get_selected(&dest(DEST_A, 64))
+                    .expect("the destination is held")
+                    .neighbour(),
+                &neighbour(NEIGHBOUR_2),
+                "and it advertises the route that holds the destination, the one added last"
             );
         }
     }
@@ -1375,6 +1414,10 @@ mod test {
 
         /// Branch 5, taken: an IPv4 route advertised over an IPv6 interface has no implied next hop
         /// in its own family, so one has to be stated before the Update TLV.
+        ///
+        /// Both state-setting TLVs land ahead of the Update and their order between themselves is
+        /// free — the Router-Id comes first only because the write pass emits it from the route
+        /// lookup, which happens before the next hop is written.
         #[test]
         fn a_route_in_another_address_family_gets_a_next_hop_tlv_first() {
             let mut tables = empty_tables();
@@ -1387,14 +1430,14 @@ mod test {
             assert_eq!(
                 out.tlv_types(),
                 alloc::vec![
-                    NextHopSlice::TYPE_ID,
                     RouterIdSlice::TYPE_ID,
+                    NextHopSlice::TYPE_ID,
                     UpdateSlice::TYPE_ID
                 ],
                 "the next hop has to be stated before the update that relies on it"
             );
 
-            let next_hop = match out.nth_tlv(0) {
+            let next_hop = match out.nth_tlv(1) {
                 Tlv::NextHop(tlv) => tlv,
                 other => panic!("should be a next hop, got {other:?}"),
             };
@@ -1482,8 +1525,8 @@ mod test {
             assert_eq!(
                 out.tlv_types(),
                 alloc::vec![
-                    NextHopSlice::TYPE_ID,
                     RouterIdSlice::TYPE_ID,
+                    NextHopSlice::TYPE_ID,
                     UpdateSlice::TYPE_ID
                 ]
             );

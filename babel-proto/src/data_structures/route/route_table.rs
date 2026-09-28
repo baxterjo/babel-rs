@@ -148,7 +148,10 @@ where
 
     /// Gets the selected route for the given destination.
     pub(crate) fn get_selected(&self, destination: &RouteDestination<A>) -> Option<&Route<A>> {
-        let mut iter = self.inner.iter().filter(|r| r.destination() == destination);
+        let mut iter = self
+            .inner
+            .iter()
+            .filter(|r| r.selected && r.destination() == destination);
         let out = iter.next();
         // This is a good spot to assert that only one route is selected for a given destination on
         // non-optimized builds.

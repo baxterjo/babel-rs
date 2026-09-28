@@ -147,6 +147,12 @@ where
                         input.source_addr,
                         route_request
                     );
+                    ok_or_continue!(self.handle_route_request(
+                        now,
+                        &interface,
+                        &input.source_addr,
+                        route_request
+                    ))
                 }
                 Tlv::SeqnoRequest(seqno_req) => {
                     b_debug!(
@@ -578,6 +584,11 @@ where
     // | || | /_\ | \| |   \| |  | __| | _ \/ _ \| | | |_   _| __| | _ \ __/ _ \
     // | __ |/ _ \| .` | |) | |__| _|  |   / (_) | |_| | | | | _|  |   / _| (_) |
     // |_||_/_/ \_\_|\_|___/|____|___| |_|_\\___/ \___/  |_| |___| |_|_\___\__\_\
+
+    /// Handles route request as specified in
+    /// [Section 3.8.1.1](https://datatracker.ietf.org/doc/html/rfc8966#name-route-requests)
+    ///
+    /// Rate limiting is implemented per queued update (destination, neighbour).
     fn handle_route_request(
         &mut self,
         now: Instant,
@@ -585,14 +596,41 @@ where
         source_addr: &Address<A>,
         route_req: RouteRequestSlice<'_>,
     ) -> Result<(), BabelError<A>> {
-        let (ae, plen, prefix) = (route_req.ae(), route_req.plen(), route_req.prefix()?);
+        let idx = NeighbourIndex {
+            iface: interface.key(),
+            addr: *source_addr,
+        };
+        let Some(neighbour) = self.neighbor_table.inner.get_by_key(&idx) else {
+            return Err(BabelError::TlvFromUnknownNeighbour("route_request", idx));
+        };
+
+        let (ae, plen) = (route_req.ae(), route_req.plen());
 
         if ae == 0 && plen != 0 {
             return Err(BabelError::MalformedRouteRequest(ae, plen));
         }
 
-        if ae == 0 {}
-        todo!()
+        if ae == 0 {
+            // Wildcard update, send all routes.
+            for route in self.route_table.inner.iter().filter(|r| r.selected) {
+                self.update_queue.queue_route_response(
+                    now,
+                    interface,
+                    *route.destination(),
+                    neighbour.key(),
+                )?;
+            }
+        } else {
+            // Destination update, queue update for that destination.
+            let prefix = Address::from_bytes(AddressEncoding::try_from(ae)?, route_req.prefix()?)?;
+            self.update_queue.queue_route_response(
+                now,
+                interface,
+                RouteDestination::new(prefix, plen)?,
+                neighbour.key(),
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -764,6 +802,18 @@ mod test {
                     .expect("update should write")
                     .finish_tlv()
                     .expect("update should finish"),
+            )
+        }
+
+        /// `prefix` is the Prefix field as it goes on the wire: Plen/8 rounded upwards octets, less
+        /// the ones `ae` implies, and never compressed.
+        fn route_request(self, ae: u8, plen: u8, prefix: &[u8]) -> Self {
+            Self(
+                self.0
+                    .write_route_request(ae, plen, prefix)
+                    .expect("route request should write")
+                    .finish_tlv()
+                    .expect("route request should finish"),
             )
         }
 
@@ -976,12 +1026,31 @@ mod test {
         origin: [u8; 8],
         prefix: Ipv6Addr,
         send_to: NeighbourIndex<NoExtension>,
-    ) -> (SourceIndex<NoExtension>, UpdateIndex<NoExtension>) {
+    ) -> (Option<SourceIndex<NoExtension>>, UpdateIndex<NoExtension>) {
         (
-            SourceIndex {
+            Some(SourceIndex {
                 router_id: RouterId::from(&origin),
                 destination: dest(prefix, PLEN),
+            }),
+            UpdateIndex {
+                destination: dest(prefix, PLEN),
+                neighbour: send_to,
             },
+        )
+    }
+
+    /// [`update_key`] for a destination nothing holds any more, which is what a retraction is.
+    ///
+    /// There is no originator to name: an update carries a destination, and the write pass reads
+    /// what to advertise off the selected route for it. With no such route there is nothing to
+    /// read, and the pass writes an infinite metric — RFC 8966 4.6.9 leaves the router-id and the
+    /// seqno of a retraction unused, so the Update TLV needs neither.
+    fn retraction_key(
+        prefix: Ipv6Addr,
+        send_to: NeighbourIndex<NoExtension>,
+    ) -> (Option<SourceIndex<NoExtension>>, UpdateIndex<NoExtension>) {
+        (
+            None,
             UpdateIndex {
                 destination: dest(prefix, PLEN),
                 neighbour: send_to,
@@ -1098,30 +1167,40 @@ mod test {
             .collect()
     }
 
-    /// Every update the router still owes, paired with the source it advertises, in the order a
-    /// poll would walk them: the queue's order, which is (prefix, plen, neighbour owed).
+    /// Every update the router still owes, paired with the source it would advertise, in the order
+    /// a poll would walk them: the queue's order, which is (prefix, plen, neighbour owed).
     ///
-    /// The source is pulled out separately because it is what the assertions are about and is not
-    /// part of the key.
+    /// The source is not the update's own: an update names a destination, and the write pass reads
+    /// what to advertise off the selected route for it. So this resolves it the same way, and
+    /// `None` is a destination nothing holds — what the pass renders as a retraction.
     fn pending_updates(
         r: &mut BabelRouter<'static>,
-    ) -> Vec<(SourceIndex<NoExtension>, Update<NoExtension>)> {
+    ) -> Vec<(Option<SourceIndex<NoExtension>>, Update<NoExtension>)> {
+        let routes = &r.route_table;
         r.update_queue
             .inner
             .iter()
-            .map(|update| (*update.source(), *update))
+            .map(|update| {
+                (
+                    routes
+                        .get_selected(update.destination())
+                        .map(|route| *route.source()),
+                    *update,
+                )
+            })
             .collect()
     }
 
-    /// Whether the router owes nothing that advertises `route`.
+    /// Whether the router owes nothing that would advertise `route`.
     ///
-    /// One queue serves the whole router, so "this route's queue" is no longer a place — an update
-    /// belongs to the route it names, which is the destination it carries plus the neighbour it
-    /// was learned from.
+    /// An update no longer names a route at all — it names a destination, and the write pass
+    /// renders it from whichever route holds that destination. So the question is whether any
+    /// update owed for this route's destination resolves back to this route.
     fn owes_nothing(r: &mut BabelRouter<'static>, route: &RouteIndex<NoExtension>) -> bool {
+        let routes = &r.route_table;
         !r.update_queue.inner.iter().any(|update| {
-            update.source().destination == route.destination
-                && update.advertising_neighbour == route.neighbour
+            update.destination() == &route.destination
+                && routes.get_selected(update.destination()).map(|r| r.key()) == Some(*route)
         })
     }
 
@@ -2679,7 +2758,7 @@ mod test {
         r.select_routes(now);
         let mut destinations: Vec<RouteDestination<NoExtension>> = pending_updates(r)
             .iter()
-            .map(|(source, _)| source.destination)
+            .map(|(_, update)| *update.destination())
             .collect();
         destinations.dedup();
         destinations
@@ -3495,7 +3574,7 @@ mod test {
         /// prefix into a single update per neighbour — only the selected one is ever advertised.
         fn pending(
             r: &mut BabelRouter<'static>,
-        ) -> Vec<(SourceIndex<NoExtension>, UpdateIndex<NoExtension>)> {
+        ) -> Vec<(Option<SourceIndex<NoExtension>>, UpdateIndex<NoExtension>)> {
             pending_updates(r)
                 .iter()
                 .map(|(source, update)| (*source, update.key()))
@@ -3844,9 +3923,9 @@ mod test {
             assert_eq!(
                 pending(&mut r),
                 alloc::vec![
-                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    retraction_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    retraction_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    retraction_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
                 "the retraction is still owed to the whole link"
             );
@@ -3855,9 +3934,9 @@ mod test {
         /// A retraction is relayed unconditionally — there is no threshold to clear, because a
         /// route going away is the change the rest of the network most needs to hear promptly.
         ///
-        /// The queued update still names the retracted entry: the write pass renders the Update TLV
-        /// from the route it points at, and that route now carries an infinite metric, so what goes
-        /// out is itself a retraction.
+        /// What goes out is itself a retraction, and the queue does not have to say so: the update
+        /// names the destination, the write pass looks for the route holding it, and the retraction
+        /// left it holding none — so the pass has no metric to advertise but infinity.
         #[test]
         fn a_retraction_is_relayed_to_every_neighbour() {
             let mut r = router("node_1");
@@ -3882,9 +3961,9 @@ mod test {
             assert_eq!(
                 pending(&mut r),
                 alloc::vec![
-                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    retraction_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    retraction_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    retraction_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
             );
         }
@@ -3941,12 +4020,14 @@ mod test {
             assert_eq!(
                 pending(&mut r),
                 alloc::vec![
+                    // PREFIX_A failed over, so its updates resolve to the winner and carry a
+                    // finite metric; PREFIX_B has no holder left, so its are retractions.
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
                     update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
-                    update_key(ORIGIN_1, PREFIX_B, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(ORIGIN_1, PREFIX_B, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(ORIGIN_1, PREFIX_B, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    retraction_key(PREFIX_B, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    retraction_key(PREFIX_B, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    retraction_key(PREFIX_B, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
                 "both destinations owed to the whole link, once each — the failover selection \
                  queued for PREFIX_A lands on the same key the relay already made"
@@ -4003,9 +4084,9 @@ mod test {
             assert_eq!(
                 pending(&mut r),
                 alloc::vec![
-                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    retraction_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    retraction_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    retraction_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
             );
         }
@@ -4044,9 +4125,9 @@ mod test {
             assert_eq!(
                 pending(&mut r),
                 alloc::vec![
-                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
-                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
-                    update_key(ORIGIN_1, PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
+                    retraction_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_1_ADDR)),
+                    retraction_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    retraction_key(PREFIX_A, nbr_idx(iface, NEIGHBOUR_3_ADDR)),
                 ],
                 "only the route that held the destination is retracted onwards"
             );
@@ -4083,6 +4164,870 @@ mod test {
                     (DEFAULT_WIRED_UPDATE_RETRY_LIMIT, true)
                 ],
             );
+        }
+    }
+
+    //  ___  ___  _   _ _____ ___   ___ ___ ___  _   _ ___ ___ _____ ___
+    // | _ \/ _ \| | | |_   _| __| | _ \ __/ _ \| | | | __/ __|_   _/ __|
+    // |   / (_) | |_| | | | | _|  |   / _| (_) | |_| | _|\__ \ | | \__ \
+    // |_|_\\___/ \___/  |_| |___| |_|_\___\__\_\\___/|___|___/ |_| |___/
+
+    /// RFC 8966 [3.8.1.1](https://datatracker.ietf.org/doc/html/rfc8966#name-route-requests):
+    ///
+    /// > When a node receives a route request for a given prefix, it checks its route table for a
+    /// > selected route to this exact prefix. If such a route exists, it MUST send an update (over
+    /// > unicast or over multicast); if such a route does not exist, it MUST send a retraction for
+    /// > that prefix.
+    /// >
+    /// > When a node receives a wildcard route request, it SHOULD send a full route table dump.
+    /// > Full route dumps SHOULD be rate-limited, especially if they are sent over multicast.
+    ///
+    /// Three things separate an answer from the triggered updates of 3.7.2, and most of the tests
+    /// below are about one of them:
+    ///
+    /// * it goes to the neighbour that asked, and to nobody else — a triggered update goes to the
+    ///   whole link;
+    /// * it is owed whether or not this node has anything to say, because "no route" is itself an
+    ///   answer and has to be spelled out as a retraction;
+    /// * it is owed for the *exact* prefix asked about. A supernet or a subnet of a prefix this
+    ///   node holds is a prefix it does not hold.
+    ///
+    /// The queue does not record any of that. An answer is an ordinary entry keyed by (destination,
+    /// neighbour owed), and what reaches the wire is read off the selected route for the
+    /// destination at write time — which is what makes "no route" come out as an infinite metric
+    /// without the queue having to say so. So the assertions here are split: the queue is checked
+    /// for who is owed what, and the wire is checked for whether an answer is an update or a
+    /// retraction.
+    mod route_requests {
+        use super::*;
+        use crate::output::{Output, TransmitDestination};
+
+        /// A wildcard request: "dump your route table". Plen must be 0 alongside it.
+        const AE_WILDCARD: u8 = 0;
+        /// A request naming an IPv6 prefix.
+        const AE_IPV6: u8 = 2;
+
+        /// The metric the route below is advertised at, and the metric it computes to once the
+        /// link cost of an established neighbour is added.
+        const ADVERTISED: u16 = 100;
+        const COMPUTED: u16 = ADVERTISED + LINK_COST;
+
+        /// [`PREFIX_A`] at prefix lengths either side of the /64 the route table holds it at, with
+        /// the wire forms a Route Request carries for them: Plen/8 rounded upwards, uncompressed.
+        const SUPERNET_PLEN: u8 = 48;
+        const PREFIX_A_SUPERNET_WIRE: [u8; 6] = [0xfd, 0x0a, 0, 0, 0, 0];
+        const HOST_PLEN: u8 = 128;
+        const PREFIX_A_HOST_WIRE: [u8; 16] = [0xfd, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+        /// An interface with [`NEIGHBOUR_1_ADDR`], [`NEIGHBOUR_2_ADDR`] and [`NEIGHBOUR_3_ADDR`]
+        /// established on it.
+        ///
+        /// Three neighbours is what makes "answered the one that asked" different from "answered
+        /// somebody": the requester below is always neighbour 2, so an answer that went to the
+        /// whole link, or to the neighbour the route was learned from, is a different vector.
+        fn three_neighbours(r: &mut BabelRouter<'static>, now: Instant) -> InterfaceHandle {
+            let iface = drained_iface(r, now, "iface_1");
+            for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR, NEIGHBOUR_3_ADDR] {
+                established_neighbour(r, now, iface, addr);
+            }
+            iface
+        }
+
+        /// Advertises `prefix` at `plen` from `from`, under `origin`.
+        fn advertise(
+            r: &mut BabelRouter<'static>,
+            now: Instant,
+            iface: InterfaceHandle,
+            from: Ipv6Addr,
+            origin: [u8; 8],
+            plen: u8,
+            prefix: &[u8],
+            metric: u16,
+        ) {
+            send_updates(
+                r,
+                now,
+                iface,
+                from,
+                origin,
+                &[UpdateTlv::v6(plen, prefix, metric)],
+            );
+        }
+
+        /// A router holding one selected route, `PREFIX_A/64` learned from [`NEIGHBOUR_1_ADDR`],
+        /// with nothing owed to anybody.
+        ///
+        /// Selection queued that route's first advertisement to the whole link, which is 3.7.2's
+        /// business rather than a request's. It is drained here so that what a test measures
+        /// afterwards is only what the request it sends asked for.
+        fn one_route(r: &mut BabelRouter<'static>, now: Instant) -> InterfaceHandle {
+            let iface = three_neighbours(r, now);
+            advertise(
+                r,
+                now,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                PLEN,
+                &PREFIX_A_WIRE,
+                ADVERTISED,
+            );
+            assert!(
+                is_selected(r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+                "the only route to the destination should hold it"
+            );
+            drain_updates(r);
+            iface
+        }
+
+        /// Sends a Route Request from `from` and runs the tick `handle_input` requires of its
+        /// caller.
+        ///
+        /// Over unicast, which is how a node that wants one prefix asks for it — nothing in the
+        /// handler reads the transport destination, but a request is not a thing a node broadcasts
+        /// without meaning to.
+        ///
+        /// A TLV the router cannot handle is skipped rather than failing the packet, so this
+        /// expects `Ok` even of the requests that are meant to be ignored; what became of one is
+        /// read off the queue.
+        fn request(
+            r: &mut BabelRouter<'static>,
+            now: Instant,
+            iface: InterfaceHandle,
+            from: Ipv6Addr,
+            ae: u8,
+            plen: u8,
+            prefix: &[u8],
+        ) {
+            let pkt = PacketBuilder::new().route_request(ae, plen, prefix).build();
+            r.handle_input(now, receive(iface, from, ReceiveDestination::Unicast, &pkt))
+                .expect("a route request must never fail the packet it arrived in");
+            tick(r, now);
+        }
+
+        /// Every answer the router is holding, in the order a poll would walk them.
+        fn answers(
+            r: &mut BabelRouter<'static>,
+        ) -> Vec<(Option<SourceIndex<NoExtension>>, UpdateIndex<NoExtension>)> {
+            pending_updates(r)
+                .iter()
+                .map(|(source, update)| (*source, update.key()))
+                .collect()
+        }
+
+        /// The answer to a request for `prefix/plen`, owed to `send_to` and advertised under
+        /// `origin`.
+        ///
+        /// [`update_key`] says the same thing, but only ever at [`PLEN`] — and the prefix length a
+        /// request names is the whole point of half the tests here.
+        fn update_answer(
+            origin: [u8; 8],
+            prefix: Ipv6Addr,
+            plen: u8,
+            send_to: NeighbourIndex<NoExtension>,
+        ) -> (Option<SourceIndex<NoExtension>>, UpdateIndex<NoExtension>) {
+            (
+                Some(SourceIndex {
+                    router_id: RouterId::from(&origin),
+                    destination: dest(prefix, plen),
+                }),
+                UpdateIndex {
+                    destination: dest(prefix, plen),
+                    neighbour: send_to,
+                },
+            )
+        }
+
+        /// [`update_answer`] for a prefix no route holds, which is what a retraction is: there is
+        /// no selected route to read a router-id or a metric off, so the write pass has nothing to
+        /// advertise but infinity.
+        fn retraction_answer(
+            prefix: Ipv6Addr,
+            plen: u8,
+            send_to: NeighbourIndex<NoExtension>,
+        ) -> (Option<SourceIndex<NoExtension>>, UpdateIndex<NoExtension>) {
+            (
+                None,
+                UpdateIndex {
+                    destination: dest(prefix, plen),
+                    neighbour: send_to,
+                },
+            )
+        }
+
+        /// An Update TLV the router put on the wire, reduced to what an answer is judged on: the
+        /// prefix it names and whether it advertises or retracts it.
+        #[derive(Debug, PartialEq, Eq)]
+        struct SentUpdate {
+            /// Where the packet carrying it was addressed. 3.8.1.1 allows either, so this is
+            /// recorded rather than asserted on its own.
+            to: TransmitDestination<NoExtension>,
+            plen: u8,
+            /// The Prefix field as it went on the wire.
+            prefix: Vec<u8>,
+            metric: Metric,
+        }
+
+        impl SentUpdate {
+            /// An answer that advertises `prefix/plen` at `metric`.
+            fn advertising(plen: u8, prefix: &[u8], metric: u16) -> Self {
+                Self {
+                    to: TransmitDestination::Multicast,
+                    plen,
+                    prefix: prefix.to_vec(),
+                    metric: Metric::from_raw(metric),
+                }
+            }
+
+            /// An answer that retracts `prefix/plen`.
+            fn retracting(plen: u8, prefix: &[u8]) -> Self {
+                Self {
+                    to: TransmitDestination::Multicast,
+                    plen,
+                    prefix: prefix.to_vec(),
+                    metric: Metric::INFINITY,
+                }
+            }
+        }
+
+        /// Drains the router's output on `iface` and collects every Update TLV it wrote.
+        ///
+        /// Polling is what actually puts an answer on the wire, and a poll writes the updates it
+        /// owes before anything else, so the Hellos and IHUs the router also owes ride behind them
+        /// and are dropped here. It runs until the router asks to be woken rather than for a fixed
+        /// number of packets: how many packets the answers are split over is the writer's business,
+        /// not a request's.
+        fn sent_updates(
+            r: &mut BabelRouter<'static>,
+            now: Instant,
+            iface: InterfaceHandle,
+        ) -> Vec<SentUpdate> {
+            let mut out = Vec::new();
+            loop {
+                let transmit = match r
+                    .poll_output_for_iface(now, iface)
+                    .expect("poll should succeed")
+                {
+                    Output::SetTimer(_) => return out,
+                    Output::Transmit(transmit) => transmit,
+                };
+
+                let packet =
+                    PacketSlice::from_slice(&transmit.contents).expect("packet should parse");
+                for tlv in packet.body_reader() {
+                    let Tlv::Update(update) = tlv else {
+                        continue;
+                    };
+                    let ae = AddressEncoding::<NoExtension>::try_from(update.ae())
+                        .expect("the router should not write an encoding it cannot read");
+                    out.push(SentUpdate {
+                        to: transmit.destination,
+                        plen: update.plen(),
+                        prefix: update
+                            .prefix(ae.implied_prefix_octets())
+                            .expect("the prefix field should be within the TLV")
+                            .to_vec(),
+                        metric: update.metric(),
+                    });
+                }
+            }
+        }
+
+        /// The MUST in the first half of 3.8.1.1: a request for a prefix this node holds is owed an
+        /// update naming that prefix, and it is owed to the neighbour that asked.
+        #[test]
+        fn a_request_for_a_selected_route_is_answered_with_an_update() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_IPV6,
+                PLEN,
+                &PREFIX_A_WIRE,
+            );
+
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![update_answer(
+                    ORIGIN_1,
+                    PREFIX_A,
+                    PLEN,
+                    nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                )],
+                "the prefix that was asked about, advertised under the router-id that originated \
+                 the selected route"
+            );
+        }
+
+        /// The other half of that MUST, on the wire rather than in the queue: the Update TLV names
+        /// the requested prefix and carries the selected route's real metric, so the answer is an
+        /// advertisement rather than a retraction.
+        #[test]
+        fn the_answer_to_a_request_carries_the_selected_routes_metric() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_IPV6,
+                PLEN,
+                &PREFIX_A_WIRE,
+            );
+
+            assert_eq!(
+                sent_updates(&mut r, t0, iface),
+                alloc::vec![SentUpdate::advertising(PLEN, &PREFIX_A_WIRE, COMPUTED)],
+            );
+        }
+
+        /// An answer is owed to the neighbour that asked and to nobody else, which is what
+        /// separates it from the triggered updates of 3.7.2 — those go to the whole link because
+        /// every neighbour's belief about the route just went stale. Nothing went stale here; one
+        /// neighbour asked a question.
+        #[test]
+        fn a_request_is_answered_to_the_requester_alone() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_IPV6,
+                PLEN,
+                &PREFIX_A_WIRE,
+            );
+
+            let owed_to: Vec<NeighbourIndex<NoExtension>> = answers(&mut r)
+                .iter()
+                .map(|(_, update)| update.neighbour)
+                .collect();
+            assert_eq!(
+                owed_to,
+                alloc::vec![nbr_idx(iface, NEIGHBOUR_2_ADDR)],
+                "neighbour 1 advertised the route and neighbour 3 is on the same link, but \
+                 neither of them asked"
+            );
+        }
+
+        /// The second MUST in 3.8.1.1. "I have never heard of that prefix" is an answer the
+        /// requester needs, not a reason to stay quiet: a node asks because it is missing a route,
+        /// and silence leaves it waiting out a timeout for news that was never coming.
+        #[test]
+        fn a_request_for_a_prefix_nobody_holds_is_answered_with_a_retraction() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_IPV6,
+                PLEN,
+                &PREFIX_B_WIRE,
+            );
+
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![retraction_answer(
+                    PREFIX_B,
+                    PLEN,
+                    nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                )],
+                "an answer is owed for a prefix this node has never held"
+            );
+            assert_eq!(
+                sent_updates(&mut r, t0, iface),
+                alloc::vec![SentUpdate::retracting(PLEN, &PREFIX_B_WIRE)],
+                "and it goes out as an infinite metric for the prefix that was asked about"
+            );
+        }
+
+        /// A route table entry is not a selected route. The entry for a retracted prefix stays in
+        /// the table carrying an infinite metric, and 3.8.1.1 asks about "a selected route to this
+        /// exact prefix" — so the answer is a retraction, the same as for a prefix that was never
+        /// heard of at all.
+        #[test]
+        fn a_request_for_a_retracted_prefix_is_answered_with_a_retraction() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0);
+
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE)],
+            );
+            assert!(
+                !is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+                "the entry survives the retraction, but it holds nothing"
+            );
+            drain_updates(&mut r);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_IPV6,
+                PLEN,
+                &PREFIX_A_WIRE,
+            );
+
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![retraction_answer(
+                    PREFIX_A,
+                    PLEN,
+                    nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                )],
+            );
+            assert_eq!(
+                sent_updates(&mut r, t0, iface),
+                alloc::vec![SentUpdate::retracting(PLEN, &PREFIX_A_WIRE)],
+            );
+        }
+
+        /// "a selected route to this exact prefix" — a supernet of a prefix this node holds is not
+        /// that prefix. Answering `fd0a::/48` with the `fd0a::/64` route would tell the requester
+        /// this node can carry traffic for 65535 prefixes it knows nothing about.
+        #[test]
+        fn a_request_for_a_supernet_of_a_held_prefix_is_answered_with_a_retraction() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_IPV6,
+                SUPERNET_PLEN,
+                &PREFIX_A_SUPERNET_WIRE,
+            );
+
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![retraction_answer(
+                    PREFIX_A,
+                    SUPERNET_PLEN,
+                    nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                )],
+                "the /64 this node holds is not an answer about the /48 that was asked for"
+            );
+            assert_eq!(
+                sent_updates(&mut r, t0, iface),
+                alloc::vec![SentUpdate::retracting(
+                    SUPERNET_PLEN,
+                    &PREFIX_A_SUPERNET_WIRE
+                )],
+                "and the retraction names the prefix length that was asked about"
+            );
+        }
+
+        /// The same rule from the other side: a host route inside a prefix this node holds is a
+        /// prefix it does not hold.
+        #[test]
+        fn a_request_for_a_subnet_of_a_held_prefix_is_answered_with_a_retraction() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_IPV6,
+                HOST_PLEN,
+                &PREFIX_A_HOST_WIRE,
+            );
+
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![retraction_answer(
+                    PREFIX_A,
+                    HOST_PLEN,
+                    nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                )],
+            );
+        }
+
+        /// A prefix length that is not a whole number of octets still reaches the route table as
+        /// the prefix it names. The Prefix field is `Plen/8` rounded upwards, so a `/60` arrives as
+        /// 8 octets whose last one is only half prefix — RFC 8966
+        /// [4.5](https://datatracker.ietf.org/doc/html/rfc8966#name-parser-state-and-encoding-o)
+        /// has the sender clear the bits past Plen, so what arrives is the prefix itself and the
+        /// receiver has nothing to undo.
+        #[test]
+        fn a_request_at_a_prefix_length_inside_an_octet_is_answered() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = three_neighbours(&mut r, t0);
+
+            // A prefix length that stops four bits into the last octet of the field.
+            const ODD_PLEN: u8 = 60;
+            const ODD_WIRE: [u8; 8] = [0xfd, 0x0a, 0, 0, 0, 0, 0, 0x00];
+
+            advertise(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                ODD_PLEN,
+                &ODD_WIRE,
+                ADVERTISED,
+            );
+            assert!(
+                is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, ODD_PLEN),
+                "the route the request below is about"
+            );
+            drain_updates(&mut r);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_IPV6,
+                ODD_PLEN,
+                &ODD_WIRE,
+            );
+
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![update_answer(
+                    ORIGIN_1,
+                    PREFIX_A,
+                    ODD_PLEN,
+                    nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                )],
+                "the half-octet at the end of the field is matched against the route table the \
+                 same as any other prefix"
+            );
+        }
+
+        /// A wildcard request asks for everything this node would forward over, which is its
+        /// selected routes — one answer per destination, all of them owed to the one neighbour that
+        /// asked.
+        #[test]
+        fn a_wildcard_request_is_answered_with_every_selected_route() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = three_neighbours(&mut r, t0);
+
+            advertise(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                PLEN,
+                &PREFIX_A_WIRE,
+                ADVERTISED,
+            );
+            advertise(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_3_ADDR,
+                ORIGIN_2,
+                PLEN,
+                &PREFIX_B_WIRE,
+                ADVERTISED,
+            );
+            drain_updates(&mut r);
+
+            request(&mut r, t0, iface, NEIGHBOUR_2_ADDR, AE_WILDCARD, 0, &[]);
+
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![
+                    update_answer(ORIGIN_1, PREFIX_A, PLEN, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    update_answer(ORIGIN_2, PREFIX_B, PLEN, nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                ],
+                "both destinations, each advertised under its own originator, owed to the \
+                 requester alone"
+            );
+            assert_eq!(
+                sent_updates(&mut r, t0, iface),
+                alloc::vec![
+                    SentUpdate::advertising(PLEN, &PREFIX_A_WIRE, COMPUTED),
+                    SentUpdate::advertising(PLEN, &PREFIX_B_WIRE, COMPUTED),
+                ],
+            );
+        }
+
+        /// A dump is of the route *table*, not of everything this node has been told. A destination
+        /// with two routes is advertised once, from the route that holds it: the loser was never
+        /// advertised onwards, and putting it in the dump would tell the requester about a path
+        /// this node does not use.
+        #[test]
+        fn a_wildcard_dump_advertises_each_destination_once_from_the_route_that_holds_it() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = three_neighbours(&mut r, t0);
+
+            // Neighbour 1 wins the destination on the lower metric; neighbour 3's route is tracked
+            // for failover under a different originator, and loses.
+            advertise(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                PLEN,
+                &PREFIX_A_WIRE,
+                ADVERTISED,
+            );
+            advertise(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_3_ADDR,
+                ORIGIN_2,
+                PLEN,
+                &PREFIX_A_WIRE,
+                ADVERTISED + 100,
+            );
+            assert!(
+                !is_selected(&mut r, iface, NEIGHBOUR_3_ADDR, PREFIX_A, PLEN),
+                "neighbour 3's route is the one that lost"
+            );
+            drain_updates(&mut r);
+
+            request(&mut r, t0, iface, NEIGHBOUR_2_ADDR, AE_WILDCARD, 0, &[]);
+
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![update_answer(
+                    ORIGIN_1,
+                    PREFIX_A,
+                    PLEN,
+                    nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                )],
+                "one destination, one answer, under the winner's originator"
+            );
+        }
+
+        /// A node with nothing selected still has an answer to give — it just has nothing to
+        /// advertise. There is no prefix a wildcard request names, so there is no retraction to
+        /// send either, and the dump is empty.
+        #[test]
+        fn a_wildcard_request_to_a_router_with_no_routes_is_answered_with_nothing() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = three_neighbours(&mut r, t0);
+
+            request(&mut r, t0, iface, NEIGHBOUR_2_ADDR, AE_WILDCARD, 0, &[]);
+
+            assert_eq!(answers(&mut r), alloc::vec![]);
+        }
+
+        /// RFC 8966 [4.6.10](https://datatracker.ietf.org/doc/html/rfc8966#name-route-request): "A
+        /// Request TLV with AE set to 0 and Plen not set to 0 MUST be ignored."
+        ///
+        /// The two fields disagree about what is being asked for — a table dump, or a prefix that
+        /// was never sent — and there is no way to pick one. Guessing "dump" would hand anybody on
+        /// the link a two-byte way to make this node recite its whole route table.
+        #[test]
+        fn a_wildcard_request_with_a_nonzero_plen_is_ignored() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_WILDCARD,
+                PLEN,
+                &PREFIX_A_WIRE,
+            );
+
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![],
+                "no dump, and no answer about the prefix the Plen and Prefix fields describe"
+            );
+        }
+
+        /// An answer is owed to a *neighbour*, and a request from an address the neighbour table
+        /// has never heard of names nobody to owe it to. Answering anyway would let an off-link
+        /// address pull a route table dump out of this node.
+        #[test]
+        fn a_request_from_an_unknown_neighbour_is_answered_with_nothing() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1");
+            established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+            advertise(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                PLEN,
+                &PREFIX_A_WIRE,
+                ADVERTISED,
+            );
+            drain_updates(&mut r);
+
+            // Neighbour 2 was never established: no hello of its own has ever arrived.
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_IPV6,
+                PLEN,
+                &PREFIX_A_WIRE,
+            );
+
+            assert_eq!(answers(&mut r), alloc::vec![]);
+        }
+
+        /// A prefix length longer than the encoding can name is not a prefix. Letting it through
+        /// would file an answer under a destination no Update TLV could ever carry back out.
+        #[test]
+        fn a_request_whose_prefix_length_overruns_its_encoding_is_ignored() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0);
+
+            // 130 bits of an address that has 128, with a Prefix field long enough to match so
+            // that the length is the only thing wrong with it.
+            request(&mut r, t0, iface, NEIGHBOUR_2_ADDR, AE_IPV6, 130, &[0; 17]);
+
+            assert_eq!(answers(&mut r), alloc::vec![]);
+        }
+
+        /// TLVs in a packet are independent, so a request the router cannot handle must be skipped
+        /// rather than aborting the ones behind it — otherwise a malformed request at the front of
+        /// a packet suppresses every answer the rest of it was owed.
+        #[test]
+        fn a_malformed_request_does_not_discard_the_requests_behind_it() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0);
+
+            let pkt = PacketBuilder::new()
+                .route_request(AE_WILDCARD, PLEN, &PREFIX_A_WIRE)
+                .route_request(AE_IPV6, PLEN, &PREFIX_A_WIRE)
+                .build();
+            r.handle_input(
+                t0,
+                receive(iface, NEIGHBOUR_2_ADDR, ReceiveDestination::Unicast, &pkt),
+            )
+            .expect("a route request must never fail the packet it arrived in");
+            tick(&mut r, t0);
+
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![update_answer(
+                    ORIGIN_1,
+                    PREFIX_A,
+                    PLEN,
+                    nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                )],
+                "the second request was still answered"
+            );
+        }
+
+        /// "Full route dumps SHOULD be rate-limited, especially if they are sent over multicast."
+        ///
+        /// An answer is an ordinary queue entry keyed by (destination, neighbour owed), and a
+        /// second request for something already owed refreshes that entry without restarting its
+        /// send timer. So asking twice does not get the answer sent twice: the repeat is absorbed,
+        /// and the answer still goes out on the schedule the first one set.
+        ///
+        /// That is what keeps a node that asks in a loop from turning into a packet source — which
+        /// is the whole point of the SHOULD, and matters most for the wildcard request, where one
+        /// TLV is worth a whole table.
+        #[test]
+        fn a_repeated_request_does_not_get_the_answer_sent_again() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_IPV6,
+                PLEN,
+                &PREFIX_A_WIRE,
+            );
+            assert_eq!(
+                sent_updates(&mut r, t0, iface),
+                alloc::vec![SentUpdate::advertising(PLEN, &PREFIX_A_WIRE, COMPUTED)],
+                "the first request is answered straight away"
+            );
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_IPV6,
+                PLEN,
+                &PREFIX_A_WIRE,
+            );
+
+            assert_eq!(
+                sent_updates(&mut r, t0, iface),
+                alloc::vec![],
+                "asking again at the same instant does not buy a second answer"
+            );
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![update_answer(
+                    ORIGIN_1,
+                    PREFIX_A,
+                    PLEN,
+                    nbr_idx(iface, NEIGHBOUR_2_ADDR)
+                )],
+                "the answer is still owed, and goes out again when its own timer says so"
+            );
+        }
+
+        /// The same for the expensive case: a node asking for a table dump in a loop gets one
+        /// dump's worth of packets, not one per request.
+        #[test]
+        fn a_repeated_wildcard_request_does_not_dump_the_table_again() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0);
+
+            request(&mut r, t0, iface, NEIGHBOUR_2_ADDR, AE_WILDCARD, 0, &[]);
+            assert_eq!(
+                sent_updates(&mut r, t0, iface),
+                alloc::vec![SentUpdate::advertising(PLEN, &PREFIX_A_WIRE, COMPUTED)],
+            );
+
+            request(&mut r, t0, iface, NEIGHBOUR_2_ADDR, AE_WILDCARD, 0, &[]);
+
+            assert_eq!(sent_updates(&mut r, t0, iface), alloc::vec![]);
         }
     }
 }
