@@ -41,6 +41,8 @@ where
     MalformedBlanketRetraction { plen: u8, omitted: u8 },
     #[error("An Update TLV's Interval must not be 0")]
     ZeroUpdateInterval,
+    #[error("Route request plen must be 0 if ae is 0 - ae: {0}, plen: {1}")]
+    MalformedRouteRequest(u8, u8),
     #[error(transparent)]
     Len(#[from] LenError),
     #[error(transparent)]

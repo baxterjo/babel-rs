@@ -19,6 +19,7 @@ use crate::utils::{Duration, DurationMultiplier, Instant, Timer};
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct RouteIndex<A: AddressExt> {
     pub(crate) destination: RouteDestination<A>,
+    /// Neighbour that advertised the route.
     pub(crate) neighbour: NeighbourIndex<A>,
 }
 

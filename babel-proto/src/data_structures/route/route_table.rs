@@ -145,6 +145,19 @@ where
             // Map the chunk to a destination route.
             .map(DestinationGroup)
     }
+
+    /// Gets the selected route for the given destination.
+    pub(crate) fn get_selected(&self, destination: &RouteDestination<A>) -> Option<&Route<A>> {
+        let mut iter = self.inner.iter().filter(|r| r.destination() == destination);
+        let out = iter.next();
+        // This is a good spot to assert that only one route is selected for a given destination on
+        // non-optimized builds.
+        debug_assert!(
+            iter.next().is_none(),
+            "There should only be one selected route for a destination."
+        );
+        out
+    }
 }
 
 /// A non-empty run of route table entries that all lead to the same destination.

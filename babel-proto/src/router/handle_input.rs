@@ -1,7 +1,7 @@
 use crate::data_structures::interface::Interface;
 use crate::data_structures::neighbour::NeighbourIndex;
-use crate::data_structures::route::{Route, RouteError, RouteIndex};
-use crate::data_structures::source::{SourceIndex, SourceTable};
+use crate::data_structures::route::{RouteError, RouteIndex};
+use crate::data_structures::source::SourceIndex;
 use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
 use crate::data_types::destination::RouteDestination;
@@ -9,11 +9,10 @@ use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::input::{Receive, ReceiveDestination};
-use crate::metric::Metric;
 use crate::packet::packet_slice::PacketSlice;
 use crate::packet::parser::Parser;
 use crate::packet::tlv::reader::TlvReader;
-use crate::packet::tlv::{HelloSlice, IhuSlice, Tlv, UpdateSlice};
+use crate::packet::tlv::{HelloSlice, IhuSlice, RouteRequestSlice, Tlv, UpdateSlice};
 use crate::router::BabelRouter;
 use crate::utils::{Duration, Instant, InternallyKeyed, Timer};
 
@@ -574,13 +573,27 @@ where
 
         Ok(neighbour.key())
     }
-}
 
-/// Section 3.6's hard rules: a route with an infinite metric has been retracted, and an unfeasible
-/// one risks a routing loop.
-fn is_eligible<A: AddressExt>(source_table: &SourceTable<'_, A>, route: &Route<A>) -> bool {
-    route.computed_metric() != &Metric::INFINITY
-        && source_table.is_feasible(route.source(), route.advertised_metric(), &route.seqno)
+    //  _  _   _   _  _ ___  _    ___   ___  ___  _   _ _____ ___   ___ ___ ___
+    // | || | /_\ | \| |   \| |  | __| | _ \/ _ \| | | |_   _| __| | _ \ __/ _ \
+    // | __ |/ _ \| .` | |) | |__| _|  |   / (_) | |_| | | | | _|  |   / _| (_) |
+    // |_||_/_/ \_\_|\_|___/|____|___| |_|_\\___/ \___/  |_| |___| |_|_\___\__\_\
+    fn handle_route_request(
+        &mut self,
+        now: Instant,
+        interface: &Interface<A>,
+        source_addr: &Address<A>,
+        route_req: RouteRequestSlice<'_>,
+    ) -> Result<(), BabelError<A>> {
+        let (ae, plen, prefix) = (route_req.ae(), route_req.plen(), route_req.prefix()?);
+
+        if ae == 0 && plen != 0 {
+            return Err(BabelError::MalformedRouteRequest(ae, plen));
+        }
+
+        if ae == 0 {}
+        todo!()
+    }
 }
 
 /// Decides whether an IHU was meant for this node.
@@ -631,6 +644,7 @@ mod test {
     use crate::packet::writer::ready::Ready;
     use crate::packet::writer::{PacketWriter, PacketWriterStep};
     use crate::router::config::{BabelRouterConfig, DEFAULT_ROUTE_EXPIRY_TIME};
+    use crate::router::is_eligible;
     use crate::utils::{Duration, InternallyKeyed};
 
     // Long enough not to fire again mid-test, still inside the Timer bound.

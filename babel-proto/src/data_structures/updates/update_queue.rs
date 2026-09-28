@@ -1,5 +1,5 @@
-use crate::data_structures::interface::{Interface, InterfaceTable};
-use crate::data_structures::neighbour::NeighbourTable;
+use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTable};
+use crate::data_structures::neighbour::{NeighbourIndex, NeighbourTable};
 use crate::data_structures::route::{Route, RouteIndex, RouteTable};
 use crate::data_structures::source::SourceTable;
 use crate::data_structures::updates::{Update, UpdateError};
@@ -77,7 +77,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                 if let Err(err) = self.add_update(
                     Update::new(
                         now,
-                        route,
+                        *route.destination(),
                         neighbour.key(),
                         !interface.prefer_ucast,
                         false,
@@ -90,6 +90,27 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                 };
             }
         }
+    }
+
+    pub(crate) fn queue_route_response(
+        &mut self,
+        now: Instant,
+        interface: &Interface<A>,
+        destination: RouteDestination<A>,
+        neighbour: NeighbourIndex<A>,
+    ) -> Result<(), UpdateError> {
+        self.add_update(
+            Update::new(
+                now,
+                destination,
+                neighbour,
+                !interface.prefer_ucast,
+                false,
+                *interface.update_retry_interval,
+                interface.update_retry_limit,
+            ),
+            false,
+        )
     }
 
     /// Adds an update destined to a neighbour.
@@ -136,7 +157,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
         next_poll: &mut Duration,
         update_interval: Interval,
         sources: &mut SourceTable<'_, A>,
-        routes: &RouteTable<'_, A>,
+        routes: &RouteTable<'storage, A>,
         //sent_update: &mut Option<SourceIndex<A>>,
         mut writer: PacketWriterStep<'output, Ready>,
     ) -> Result<
@@ -148,47 +169,42 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
     {
         b_trace!("Polling for updates for {:?}", interface.key());
 
+        // First purge all expired updates.
+        self.inner.retain(|update| {
+            // Retain if send timer is still going or send count is greater than 0.
+            !update.send_timer.is_finished(now) || update.send_count > 0
+        });
+
+        // Flush and sort the table after modifying.
+        self.inner.flush();
+
         // Start the parser for the packet with the initial next hop equal to the address of the
         // interface this packet will be sent on.
         let mut parser: Parser<P> = Parser::new(interface.address);
 
-        let mut router_id_groups = self.router_id_groups_mut();
+        let mut router_id_groups = self.router_id_groups_mut(interface.key(), routes);
 
         let mut sent_dest: Option<RouteDestination<A>> = None;
 
         while let Some(mut rid_group) = router_id_groups.next_group() {
-            let router_id = rid_group.router_id;
-            for update_opt in rid_group
+            let router_id = rid_group.router_id_group;
+            for (update, route_opt) in rid_group
                 // Iterate over the slots, because this is where updates will be removed.
-                .iter_mut_slots()
-                // Filter for updates that are for the given interface.
-                .filter(|uo| uo.is_some_and(|u| u.neighbour().iface == interface.key()))
+                .iter_mut()
             {
-                let Some(update) = update_opt else {
-                    continue;
-                };
-
                 // If the timer still needs to fire then update the next poll value and continue.
                 if let Some(remaining) = update.send_timer.time_remaining(now) {
                     *next_poll = remaining.min(*next_poll);
                     continue;
                 }
 
-                // If the timer has expired and the send count is zero, remove the update.
-                // Holding on to updates past their final send count is how rate limiting is
-                // implemented.
-                if update.send_count == 0 {
-                    *update_opt = None;
-                    continue;
-                }
-
                 debug_assert_eq!(
                     router_id,
-                    update.source().router_id,
+                    route_opt.map(|r| r.source().router_id),
                     "Update router id does not match router id group"
                 );
 
-                let destination = update.source().destination;
+                let destination = update.destination();
 
                 // If the update cannot be sent to the current destination, then skip it.
                 if !update.can_send(active_dest) {
@@ -236,10 +252,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                     };
                 }
 
-                let (seqno, metric) = if let Some(route) = routes.inner.get_by_key(&RouteIndex {
-                    destination: update.source().destination,
-                    neighbour: update.advertising_neighbour,
-                }) {
+                let (seqno, metric) = if let Some(route) = route_opt {
                     // Perform source table maintenance for this route.
                     if let Err(err) = sources.perform_maintenance(
                         now,
@@ -250,10 +263,30 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                         b_debug!("Source Err: {}", err);
                         continue;
                     };
+                    // If the packet's router-id context is not this route's, write a router-id TLV.
+                    // A fresh packet has no context at all, so the first update in one always gets
+                    // a Router-Id TLV — without it the receiver cannot
+                    // attribute the Updates behind it.
+                    if parser
+                        .router_id()
+                        .is_none_or(|id| id != &route.source().router_id)
+                    {
+                        let router_id = route.source().router_id;
+                        b_debug!(
+                            "[SEND] RouterId - iface: {:?}, dest: {:?}, - router_id: {:?}",
+                            interface,
+                            active_dest,
+                            router_id
+                        );
+
+                        writer = writer.write_router_id(router_id)?.finish_tlv()?;
+                        parser.set_router_id(router_id);
+                    }
+
                     (route.seqno, *route.computed_metric())
                 } else {
                     // If there is no route for the queued update, then it can be assumed that it is
-                    // a retraction, in which case the seqno does not matter.
+                    // a retraction, in which case the seqno and router_id don't matter.
                     (SeqNo(0), Metric::INFINITY)
                 };
 
@@ -282,34 +315,15 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                     parser.set_next_hop(next_hop);
                 }
 
-                // If the packet's router-id context is not this route's, write a router-id TLV.
-                // A fresh packet has no context at all, so the first update in one always gets a
-                // Router-Id TLV — without it the receiver cannot attribute the Updates behind it.
-                if parser
-                    .router_id()
-                    .is_none_or(|id| id != &update.source().router_id)
-                {
-                    let router_id = update.source().router_id;
-                    b_debug!(
-                        "[SEND] RouterId - iface: {:?}, dest: {:?}, - router_id: {:?}",
-                        interface,
-                        active_dest,
-                        router_id
-                    );
-
-                    writer = writer.write_router_id(router_id)?.finish_tlv()?;
-                    parser.set_router_id(router_id);
-                }
-
                 // TODO: Address compression. To keep things simple I am going to bikeshed outgoing
                 // address compression. This is still compliant with the spec as this router can
                 // still RECEIVE compressed addresses, it just doesn't send them yet.
                 //
                 // TODO: Router ID optimization in update flags.
                 let flags = UpdateFlags::new(false, false);
-                let ae = update.source().destination.prefix().encoding();
+                let ae = destination.prefix().encoding();
                 let omitted = 0;
-                let trim = update.source().destination.prefix_len().div_ceil(8);
+                let trim = destination.prefix_len().div_ceil(8);
                 b_debug!(
                     "[SEND] Update - iface: {:?}, dest: {:?}, - \
                     {:?}, {:?}, plen: {}, omitted: {}, interval: {}, \
@@ -339,7 +353,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                     )?
                     .finish_tlv()?;
 
-                sent_dest = Some(destination);
+                sent_dest = Some(*destination);
                 update.send_count = update.send_count.saturating_sub(1);
                 update.send_timer.restart(now);
             }
@@ -352,9 +366,15 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
     }
 
     /// Get a [`RouterIdGroups`] cursor from self.
-    fn router_id_groups_mut(&mut self) -> RouterIdGroups<'_, 'storage, A> {
+    fn router_id_groups_mut<'a>(
+        &'a mut self,
+        interface: InterfaceHandle,
+        routes: &'a RouteTable<'storage, A>,
+    ) -> RouterIdGroups<'a, 'storage, A> {
         RouterIdGroups {
+            interface,
             update_queue: self,
+            routes,
             last: None,
         }
     }
@@ -362,54 +382,86 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
 
 /// A cursor that groups routes by [`RouterId`] to optimize network traffic for sending updates.
 ///
+/// Only iterates over updates that are destined for neighbours on `self.interface` to avoid
+/// unnecessary route lookups.
+///
 /// This cannot be an iterator because [`RouteTable`] is not ordered by [`RouterId`] and
 /// [`core::slice::chunk_by`] only yields contiguous chunks so it must first establish a starting
 /// [`RouterId`] for all routes (the minimum) and then ratchet up for each call of
 /// [`RouterIdGroups::next_group`]
-struct RouterIdGroups<'q, 'storage, A: AddressExt> {
-    update_queue: &'q mut UpdateQueue<'storage, A>,
+struct RouterIdGroups<'a, 'storage, A: AddressExt> {
+    interface: InterfaceHandle,
+    update_queue: &'a mut UpdateQueue<'storage, A>,
+    routes: &'a RouteTable<'storage, A>,
     /// The [`RouterId`] of the group handed out last.
-    last: Option<RouterId>,
+    last: Option<Option<RouterId>>,
 }
 
-impl<'q, 'storage, A: AddressExt> RouterIdGroups<'q, 'storage, A> {
+impl<'a, 'storage, A: AddressExt> RouterIdGroups<'a, 'storage, A> {
     /// Gets the next [`RouterIdGroup`] and advances the [`RouterId`] cursor.
     fn next_group(&mut self) -> Option<RouterIdGroup<'_, 'storage, A>> {
-        let router_id = self
+        let router_id_opt = self
             .update_queue
             .inner
             .iter()
-            // Get the RouterId that advertised the route.
-            .map(|u| u.source().router_id)
-            // Get all router_ids greater than last or all if last is None
-            .filter(|id| self.last.is_none_or(|last| *id > last))
+            .filter(|u| u.neighbour().iface == self.interface)
+            // Get the selected route's originating RouterId if it exists.
+            .map(|u| {
+                self.routes
+                    .get_selected(u.destination())
+                    .map(|ro| ro.source().router_id)
+            })
+            // On the first pass `self.last` will be None, so all reults of the above map will be
+            // yielded. After that if there are queued updates that don't have routes (retractions),
+            // those will be yielded. Then Updates with routes will be yielded in the order of
+            // RouterId.
+            .filter(|id| self.last.is_none_or(|ro| id > &ro))
             // Take the minimum router id of the filtered group.
             .min()?;
 
         // Ratchet up the minimum so no router id's less than this one can be yielded in subsequent
         // calls to next_group.
-        self.last = Some(router_id);
+        self.last = Some(router_id_opt);
 
         Some(RouterIdGroup {
-            router_id,
+            interface: self.interface,
+            router_id_group: router_id_opt,
             update_queue: self.update_queue,
+            routes: self.routes,
         })
     }
 }
 
 /// The routes that were originated by one router-id.
-struct RouterIdGroup<'q, 'storage, A: AddressExt> {
-    router_id: RouterId,
-    update_queue: &'q mut UpdateQueue<'storage, A>,
+struct RouterIdGroup<'a, 'storage, A: AddressExt> {
+    interface: InterfaceHandle,
+    router_id_group: Option<RouterId>,
+    update_queue: &'a mut UpdateQueue<'storage, A>,
+    routes: &'a RouteTable<'storage, A>,
 }
 
 impl<A: AddressExt> RouterIdGroup<'_, '_, A> {
-    /// Yields all routes that have this group's [`RouterId`]
-    fn iter_mut_slots(&mut self) -> impl Iterator<Item = &mut Option<Update<A>>> {
+    /// Yields all updates and corresponding routes that have this group's [`RouterId`]
+    ///
+    /// This iterates over the slots of the inner table to implement rate limiting of the update
+    /// queue.
+    fn iter_mut(&mut self) -> impl Iterator<Item = (&mut Update<A>, Option<&Route<A>>)> {
         self.update_queue
             .inner
-            .iter_mut_slots()
-            .filter(|uo| uo.is_some_and(|u| u.source().router_id == self.router_id))
+            .iter_mut()
+            // Filter out all updates that are not for this interface to avoid unnecessary lookups.
+            .filter(|u| u.neighbour().iface == self.interface)
+            .filter_map(|u| {
+                // Fetch the selected route for this destination.
+                let route_opt = self.routes.get_selected(u.destination());
+                // If the selected route matches the router id group, yield it and the route.
+                if route_opt.map(|r| r.source().router_id) == self.router_id_group {
+                    Some((u, route_opt))
+                } else {
+                    // Otherwise skip it.
+                    None
+                }
+            })
     }
 }
 

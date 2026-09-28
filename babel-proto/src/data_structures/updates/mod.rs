@@ -27,6 +27,8 @@ pub enum UpdateError {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) struct UpdateIndex<A: AddressExt> {
+    /// The destination this update is for.
     pub(crate) destination: RouteDestination<A>,
+    /// Neighbour this update is addressed to.
     pub(crate) neighbour: NeighbourIndex<A>,
 }
