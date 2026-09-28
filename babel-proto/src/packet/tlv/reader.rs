@@ -34,7 +34,7 @@ impl<'a> Iterator for TlvReader<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         // Get next slice.
         //
-        // Any error that occurs during parsing
+        // Any error that occurs during parsing is logged and skipped.
         loop {
             // Normal exit when entire packet has been read.
             if self.pos == self.slice.len() {
@@ -46,6 +46,7 @@ impl<'a> Iterator for TlvReader<'a> {
                     // When the slice parses as expected, position is advanced by the length of the
                     // slice. Any error after this point can be skipped.
                     self.pos += tlv.slice().len();
+                    b_trace!("TLV Slice: {:?}", tlv);
                     match Tlv::try_from(tlv) {
                         Ok(t) => {
                             // Happy path
@@ -59,14 +60,15 @@ impl<'a> Iterator for TlvReader<'a> {
                     }
                 }
                 Err(TlvError::Pad1) => {
-                    // When the slice is Pad1, the TLV header cannot fully parse, so an error is
+                    // When the slice is Pad1, the full TLV header is not present, so an error is
                     // returned but this is a normal condition. Advance the position by 1.
                     self.pos += 1;
                     return Some(Tlv::Pad1);
                 }
                 Err(other) => {
                     // Some other error occurred while parsing the header of the TLV slice. This
-                    // cannot be recovered from.
+                    // cannot be recovered from because at this point the parser has likely lost its
+                    // place. So we cannot recover.
                     b_debug!("Tlv Iter Err: {}", other);
                     return None;
                 }

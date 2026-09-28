@@ -68,7 +68,6 @@ where
         let mut neighbour_update: Option<NeighbourIndex<A>> = None;
 
         for tlv in TlvReader::new(packet.body()) {
-            b_trace!("{:?}", tlv);
             match tlv {
                 Tlv::Pad1 | Tlv::PadN(_) => {
                     continue;
@@ -78,6 +77,12 @@ where
                 // ones behind it hands any sender on the link a way to suppress
                 // them.
                 Tlv::Hello(hello) => {
+                    b_debug!(
+                        "[RECV] Hello - iface: {:?}, source: {:?} - {:?}",
+                        input.iface,
+                        input.source_addr,
+                        hello
+                    );
                     let neighbour_opt = ok_or_continue!(self.handle_hello(
                         now,
                         &interface,
@@ -87,6 +92,12 @@ where
                     neighbour_update = neighbour_update.or(neighbour_opt);
                 }
                 Tlv::Ihu(ihu) => {
+                    b_debug!(
+                        "[RECV] IHU - iface: {:?}, source: {:?} - {:?}",
+                        input.iface,
+                        input.source_addr,
+                        ihu
+                    );
                     let neighbour_opt = ok_or_continue!(self.handle_ihu(
                         now,
                         &interface,
@@ -99,7 +110,7 @@ where
                 Tlv::RouterId(router_id) => {
                     b_debug!(
                         "[RECV] RouterId - iface: {:?}, source: {:?} - {:?}",
-                        interface,
+                        input.iface,
                         input.source_addr,
                         router_id
                     );
@@ -108,13 +119,19 @@ where
                 Tlv::NextHop(next_hop) => {
                     b_debug!(
                         "[RECV] NextHop - iface: {:?}, source: {:?} - {:?}",
-                        interface,
+                        input.iface,
                         input.source_addr,
                         next_hop
                     );
                     ok_or_continue!(parser.handle_next_hop_tlv(next_hop));
                 }
                 Tlv::Update(update) => {
+                    b_debug!(
+                        "[RECV] Update - iface: {:?}, source: {:?} - {:?}",
+                        input.iface,
+                        input.source_addr,
+                        update
+                    );
                     let neighbour = ok_or_continue!(self.handle_update(
                         now,
                         &interface,
@@ -124,9 +141,38 @@ where
                     ));
                     neighbour_update = neighbour_update.or(Some(neighbour));
                 }
+                Tlv::RouteRequest(route_request) => {
+                    b_debug!(
+                        "[RECV] RouteRequest - iface: {:?}, source: {:?} - {:?}",
+                        input.iface,
+                        input.source_addr,
+                        route_request
+                    );
+                }
+                Tlv::SeqnoRequest(seqno_req) => {
+                    b_debug!(
+                        "[RECV] SeqnoRequest - iface: {:?}, source: {:?} - {:?}",
+                        input.iface,
+                        input.source_addr,
+                        seqno_req
+                    );
+                }
+                Tlv::AckReq(ack_req) => {
+                    b_debug!(
+                        "[RECV] AckRequest - iface: {:?}, source: {:?} - {:?}",
+                        input.iface,
+                        input.source_addr,
+                        ack_req
+                    );
+                }
                 // This covers the base-spec TLVs that are not implemented yet.
-                Tlv::AckReq(_) | Tlv::Ack(_) | Tlv::RouteRequest(_) | Tlv::SeqnoRequest(_) => {
-                    unimplemented!("Unimplemented base spec TLV found, Type: {}", tlv.r#type());
+                Tlv::Ack(ack) => {
+                    b_debug!(
+                        "[RECV] Ack - iface: {:?}, source: {:?} - {:?}",
+                        input.iface,
+                        input.source_addr,
+                        ack
+                    );
                 }
             }
         }
@@ -527,128 +573,6 @@ where
         };
 
         Ok(neighbour.key())
-    }
-
-    /// The recommended route selection procedure as defined in
-    /// [Section 3.6](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection)
-    /// and [Appendix A.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection)
-    ///
-    /// This method selects routes and publishes updates triggered as a result of route selection.
-    pub(super) fn select_routes(&mut self, now: Instant) {
-        // A shared borrow of one field while `route_table` is borrowed mutably below.
-        let source_table = &self.source_table;
-
-        b_debug!("Route selection...");
-
-        for mut destination_group in self.route_table.destination_groups_mut() {
-            let dest = destination_group.destination();
-            b_debug!("{:?} options for {:?}", dest, destination_group.len());
-            // The route this destination was pointing at before this run, whether or not it is
-            // still usable. Only the change detection at the bottom cares about that distinction.
-            let previous: Option<RouteIndex<A>> = destination_group
-                .iter()
-                .find(|route| route.selected)
-                .map(|route| route.key());
-
-            // The previously selected route, but only while it still passes the hard rules. One
-            // that has been retracted or has gone unfeasible cannot be used.
-            let incumbent = destination_group
-                .iter()
-                .find(|route| route.selected && is_eligible(source_table, route))
-                .map(|route| {
-                    (
-                        route.key(),
-                        *route.computed_metric(),
-                        *route.smoothed_metric(),
-                    )
-                });
-
-            let winner = match incumbent {
-                // A still-eligible incumbent keeps the destination unless some route beats it on
-                // the real metric *and* on the smoothed one.
-                Some((incumbent, incumbent_computed, incumbent_smoothed)) => Some(
-                    destination_group
-                        .iter()
-                        // A set of potential winners must be eligible
-                        .filter(|route| is_eligible(source_table, route))
-                        // A set of potential winners must have a computed and smoothed metric
-                        // better than the incumbent. If there are any items in the iterator after
-                        // this point, they are better than the incumbent.
-                        .filter(|route| {
-                            *route.computed_metric() < incumbent_computed
-                                && *route.smoothed_metric() < incumbent_smoothed
-                        })
-                        // Take the route that is the minimum of the routes better than the
-                        // incumbent. Breaking ties on the route index.
-                        .min_by_key(|route| (route.computed_metric(), route.key()))
-                        .map(|route| route.key())
-                        // If none of these conditions are met, then the incumbent wins.
-                        .unwrap_or(incumbent),
-                ),
-                // Nothing to defend the destination, so the best route takes it outright, with the
-                // smoothed metric ignored entirely. This is also the path a destination whose
-                // selected route was just retracted takes.
-                None => destination_group
-                    .iter()
-                    // Potential winners must be eligible
-                    .filter(|route| is_eligible(source_table, route))
-                    // Take the route with the minimum metric. Breaking ties on the route index.
-                    .min_by_key(|route| (route.computed_metric(), route.key()))
-                    .map(|route| route.key()),
-            };
-
-            b_trace!(
-                "previous: {:?}, incumbent: {:?}, winner: {:?}",
-                previous,
-                incumbent.map(|i| i.0),
-                winner
-            );
-
-            b_debug!("{:?} -> {:?}", dest, winner);
-
-            for route in destination_group.iter_mut() {
-                // Deselect everything, then switch the winner back on. Doing it in that order means
-                // a destination that no longer has an eligible route ends up with
-                // nothing selected.
-                route.selected = false;
-
-                match (previous, winner) {
-                    (prev_opt, Some(win)) => {
-                        if win == route.key() {
-                            // If this route is the winner then mark it selected.
-                            route.selected = true;
-
-                            // If a new winner has been selected OR a winner has been selected for
-                            // the first time, broadcast an updated.
-                            if prev_opt.is_none_or(|p| p != win) {
-                                self.update_queue.queue_triggered_update(
-                                    now,
-                                    route,
-                                    &self.iface_table,
-                                    &self.neighbor_table,
-                                );
-                            }
-                        }
-                    }
-                    (Some(prev), None) => {
-                        // If this route WAS selected before and there are now no eligible routes
-                        // due to a retraction, publish an update.
-                        if prev == route.key() && route.computed_metric() == &Metric::INFINITY {
-                            self.update_queue.queue_triggered_update(
-                                now,
-                                route,
-                                &self.iface_table,
-                                &self.neighbor_table,
-                            );
-                        }
-                    }
-                    (None, None) => {
-                        // If no winner has been selected and no winner is selected this time, do
-                        // nothing.
-                    }
-                }
-            }
-        }
     }
 }
 
