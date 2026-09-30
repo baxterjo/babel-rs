@@ -39,7 +39,7 @@ pub struct Interface<A: AddressExt> {
     /// How often this interface should mcast send hello messages.
     pub(crate) hello_timer: Timer,
 
-    /// How often this interface should send update messages
+    /// How often this interface should send periodic updates.
     pub(crate) update_timer: Timer,
 
     // User config
@@ -66,6 +66,10 @@ pub struct Interface<A: AddressExt> {
     ///
     /// This is **NOT** the number of retries that should be sent on a periodic update.
     pub(crate) update_retry_limit: u8,
+    /// The interval at which updates should be retried.
+    ///
+    /// This interval is pulling double duty, a queued update with 0 remaining retries will be held
+    /// for one more of this iterval to implement rate limiting.
     pub(crate) update_retry_interval: Interval,
 }
 
@@ -96,7 +100,7 @@ impl<A: AddressExt> Interface<A> {
             cost_calc: config.cost_calc,
             prefer_ucast: config.prefer_ucast,
             request_acks: config.request_acks,
-            update_retry_limit: config.update_retry_limit,
+            update_retry_limit: config.update_send_count,
             update_retry_interval: config.update_retry_interval,
         }
     }

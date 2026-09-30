@@ -190,7 +190,6 @@ where
                 interface,
                 &mut active_dest,
                 &mut next_poll,
-                self.update_timer.interval(),
                 &mut self.source_table,
                 &self.route_table,
                 writer
@@ -336,9 +335,10 @@ where
                 // If there is still time remaining until the next periodic update. Merge with
                 // next_poll and skip.
                 next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+                continue;
             } else {
                 // Otherwise reset the update timer.
-                self.update_timer.restart(now);
+                interface.update_timer.restart(now);
 
                 // And broadcast a periodic update.
                 self.update_queue.queue_periodic_update(
@@ -348,7 +348,7 @@ where
                     &self.neighbor_table,
                 );
 
-                let remaining = self.update_timer.duration();
+                let remaining = interface.update_timer.duration();
                 next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
             }
         }

@@ -3,9 +3,9 @@ use crate::data_structures::neighbour::{NeighbourIndex, NeighbourTable};
 use crate::data_structures::route::{Route, RouteTable};
 use crate::data_structures::source::SourceTable;
 use crate::data_structures::updates::{Update, UpdateError};
+use crate::data_types::RouterId;
 use crate::data_types::destination::RouteDestination;
 use crate::data_types::seqno::SeqNo;
-use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::metric::Metric;
@@ -107,7 +107,9 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                 !interface.prefer_ucast,
                 false,
                 *interface.update_retry_interval,
-                interface.update_retry_limit,
+                // The spec does not hold route request responses to the same "urgency" standard as
+                // triggered updates. So keep this at 1 to keep traffic low.
+                1,
             ),
             false,
         )
@@ -155,7 +157,6 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
         interface: &Interface<A>,
         active_dest: &mut DestAddr<A>,
         next_poll: &mut Duration,
-        update_interval: Interval,
         sources: &mut SourceTable<'_, A>,
         routes: &RouteTable<'storage, A>,
         //sent_update: &mut Option<SourceIndex<A>>,
@@ -177,6 +178,26 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
 
         // Flush and sort the table after modifying.
         self.inner.flush();
+
+        // First check to see if there are ANY updates due. This is a practical linear optimization
+        // to short circuit the quadratic iterator that is RouterIdGroups below.
+        //
+        // This method is short-circuiting, so any iteration that returns true will stop the
+        // iterator.
+        let update_due = !self.inner.iter().any(|u| {
+            if let Some(remaining) = u.send_timer.time_remaining(now) {
+                // In the case that no updates are due, this will ensure the next poll is updated.
+                *next_poll = remaining.min(*next_poll);
+                // If there is time remaining, this update is not due.
+                false
+            } else {
+                true
+            }
+        });
+
+        if update_due {
+            return Ok(writer);
+        }
 
         // Start the parser for the packet with the initial next hop equal to the address of the
         // interface this packet will be sent on.
@@ -334,7 +355,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                     flags,
                     destination.prefix_len(),
                     omitted,
-                    Duration::from(update_interval).as_centis(),
+                    interface.update_timer.duration().as_centis(),
                     seqno,
                     metric,
                     destination.prefix()
@@ -346,7 +367,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                         flags,
                         *destination.prefix_len(),
                         omitted,
-                        update_interval,
+                        interface.update_timer.interval(),
                         seqno,
                         metric,
                         &destination.prefix().as_wire()[..trim.into()],
@@ -978,9 +999,6 @@ mod test {
         /// The parser state used when no address-encoding extension is in play.
         type NoState = NoStateExtension<NoExtension>;
 
-        /// The interval every Update TLV written here advertises.
-        const UPDATE_INTERVAL: Interval = Interval::from_duration(Duration::from_secs(30));
-
         /// Seed for the running `next_poll` minimum, longer than anything a test schedules. A poll
         /// that leaves this untouched asked to be woken no sooner than it already was.
         const NEVER: Duration = Duration::from_secs(9999);
@@ -1078,7 +1096,6 @@ mod test {
                     iface,
                     &mut dest,
                     &mut next_poll,
-                    UPDATE_INTERVAL,
                     &mut empty_sources(),
                     &tables.routes,
                     writer,
@@ -1739,7 +1756,6 @@ mod test {
                     &interface(IFACE_1),
                     &mut dest,
                     &mut next_poll,
-                    UPDATE_INTERVAL,
                     &mut empty_sources(),
                     &tables.routes,
                     writer,

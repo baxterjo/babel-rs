@@ -32,9 +32,6 @@ where
     /// Router ID of this Babel router. This must be globally unique within your routing domain.
     pub(crate) id: RouterId,
 
-    // Implementation config
-    pub(crate) update_timer: Timer,
-
     pub(crate) magic_number: u8,
 
     pub(crate) version_number: u8,
@@ -119,7 +116,6 @@ where
     {
         Self {
             id: config.id,
-            update_timer: Timer::from_interval(now, config.update_interval),
             magic_number: config.magic_number,
             version_number: config.version,
             iface_table: InterfaceTable::new_with_storage(interface_table),

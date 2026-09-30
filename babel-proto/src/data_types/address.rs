@@ -138,7 +138,7 @@ where
 
     /// Reads an address out of the octets an encoding puts on the wire.
     ///
-    /// If given less octets than the length of the addresws, this method will fill the right side
+    /// If given less octets than the length of the address, this method will fill the right side
     /// with zeros
     ///
     /// More octets than the encoding has will error.

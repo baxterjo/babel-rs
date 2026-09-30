@@ -26,13 +26,15 @@ pub struct InterfaceConfig<A: AddressExt> {
     pub(crate) other_addresses: [Option<Address<A>>; MAX_OTHER_ADDRESSES],
     pub(crate) mcast_hello_interval: Interval,
     pub(crate) ucast_hello_interval: Option<Interval>,
+    /// Update interval spec. This is either a literal interval or a multiplier that is applied to
+    /// the `mcast_hello_interval`.
     pub(crate) update_interval_spec: DurationSpec,
     pub(crate) ihu_hold_time: DurationMultiplier,
     #[cfg_attr(feature = "defmt", defmt(Debug2Format))]
     pub(crate) cost_calc: &'static dyn LinkCostCalculator,
     pub(crate) prefer_ucast: bool,
     pub(crate) update_retry_interval: Interval,
-    pub(crate) update_retry_limit: u8,
+    pub(crate) update_send_count: u8,
     pub(crate) request_acks: bool,
 }
 
@@ -59,7 +61,7 @@ impl<A: AddressExt> InterfaceConfig<A> {
             cost_calc: &COST_CALC,
             prefer_ucast: false,
             update_retry_interval: DEFAULT_UPDATE_RETRY_INTERVAL,
-            update_retry_limit: DEFAULT_WIRED_UPDATE_RETRY_LIMIT,
+            update_send_count: DEFAULT_WIRED_UPDATE_RETRY_LIMIT,
             request_acks: false,
         }
     }
@@ -199,28 +201,28 @@ impl<A: AddressExt> InterfaceConfig<A> {
     }
 
     /// The interval between retries of an unacknowledged unicast update on this interface.
-    pub fn ucast_retry_interval(&self) -> Interval {
+    pub fn update_retry_interval(&self) -> Interval {
         self.update_retry_interval
     }
 
     /// Sets the interval between retries of an unacknowledged unicast update on this interface.
     ///
     /// The given interval will be clamped to `1 <= duration <= u16::MAX centiseconds`
-    pub fn set_ucast_retry_interval(&mut self, interval: Interval) {
+    pub fn set_update_retry_interval(&mut self, interval: Interval) {
         self.update_retry_interval = interval.max(Duration::from_centis(1).into());
     }
 
     /// The number of times an unacknowledged unicast update is retried before being given up on.
-    pub fn ucast_retry_limit(&self) -> u8 {
-        self.update_retry_limit
+    pub fn update_send_count(&self) -> u8 {
+        self.update_send_count
     }
 
-    /// Sets the number of times an unacknowledged unicast update is retried before being given up
+    /// Sets the number of times an unacknowledged update is sent before being given up
     /// on.
     ///
-    /// A limit of `0` disables retries; the update is sent once regardless of acknowledgement.
-    pub fn set_ucast_retry_limit(&mut self, limit: u8) {
-        self.update_retry_limit = limit.min(5);
+    /// This value is clamped between 1 and 5.
+    pub fn set_update_send_count(&mut self, limit: u8) {
+        self.update_send_count = limit.min(5).max(1);
     }
 
     /// Whether unicast updates sent on this interface carry an Acknowledgment Request TLV.
