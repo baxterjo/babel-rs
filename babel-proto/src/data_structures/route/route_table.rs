@@ -1,23 +1,16 @@
-use core::iter::zip;
-
 use crate::data_structures::interface::{Interface, InterfaceTable};
 use crate::data_structures::neighbour::{Neighbour, NeighbourIndex, NeighbourTable};
+use crate::data_structures::route::RouteError;
 use crate::data_structures::route::route_entry::Route;
-use crate::data_structures::route::updates::Update;
-use crate::data_structures::route::{RouteError, RouteIndex};
-use crate::data_structures::source::{SourceIndex, SourceTable};
+use crate::data_structures::source::SourceIndex;
+use crate::data_structures::updates::UpdateQueue;
 use crate::data_types::destination::RouteDestination;
 use crate::data_types::seqno::SeqNo;
-use crate::data_types::{Address, Interval, RouterId};
+use crate::data_types::{Address, Interval};
 use crate::extension::address::AddressExt;
-use crate::extension::parser_state::ParserStateExt;
 use crate::metric::Metric;
-use crate::packet::parser::Parser;
-use crate::packet::writer::ready::Ready;
-use crate::packet::writer::{PacketWriterError, PacketWriterStep};
-use crate::utils::destination::DestAddr;
-use crate::utils::storage::{InsertError, InternallyKeyed, MaybeInUse, Recycle, Table, TableSlot};
-use crate::utils::{Duration, DurationMultiplier, Instant, ManagedSlice};
+use crate::utils::storage::{InsertError, InternallyKeyed, Table, TableSlot};
+use crate::utils::{DurationMultiplier, Instant, ManagedSlice};
 
 pub const DEFAULT_SMOOTHING_MULTIPLE: DurationMultiplier = DurationMultiplier::new(3, 1);
 pub const METRIC_DIFFERENCE_THRESHOLD: Metric = Metric::from_raw(100);
@@ -26,7 +19,7 @@ pub const METRIC_DIFFERENCE_THRESHOLD: Metric = Metric::from_raw(100);
 /// [Section 3.2.6](https://datatracker.ietf.org/doc/html/rfc8966#name-the-route-table)
 pub struct RouteTable<'storage, A: AddressExt> {
     /// The inner slice for the table.
-    inner: Table<'storage, MaybeInUse<Route<'storage, A>>>,
+    pub(crate) inner: Table<'storage, Option<Route<A>>>,
 
     /// The multiple of a route's update interval that will determine how long this table keeps the
     /// route.
@@ -44,17 +37,6 @@ impl<'storage, A> RouteTable<'storage, A>
 where
     A: AddressExt,
 {
-    /// Initializes the route storage with update queue storage.
-    pub(crate) fn init_storage<const R: usize, const N: usize>(
-        route_storage: &mut [MaybeInUse<Route<'storage, A>>; R],
-        update_queue: &'storage mut [[Option<Update<A>>; N]; R],
-    ) {
-        for (route_slot, update_queue) in zip(route_storage.iter_mut(), update_queue.iter_mut()) {
-            update_queue.fill(None);
-            *route_slot = MaybeInUse::new_free(update_queue.as_mut_slice().into())
-        }
-    }
-
     /// Create a new source table with user provided storage.
     ///
     /// While interfaces are generally well known at compile time, the number of routes this
@@ -62,31 +44,13 @@ where
     /// this number for your specfic deployment or do what you can to enable the alloc feature.
     pub(crate) fn new_with_storage<T>(storage: T, route_expiry: DurationMultiplier) -> Self
     where
-        T: Into<ManagedSlice<'storage, MaybeInUse<Route<'storage, A>>>>,
+        T: Into<ManagedSlice<'storage, Option<Route<A>>>>,
     {
         Self {
             inner: Table::new(storage),
             route_expiry_time: route_expiry,
             smoothing_multiple: DEFAULT_SMOOTHING_MULTIPLE,
         }
-    }
-
-    pub(crate) fn retain_mut<F>(&mut self, f: F)
-    where
-        F: FnMut(&mut Route<A>) -> bool,
-    {
-        self.inner.retain_mut(f);
-    }
-
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<'storage, A>> {
-        self.inner.iter_mut()
-    }
-
-    pub(crate) fn get_mut_by_key(
-        &mut self,
-        key: &RouteIndex<A>,
-    ) -> Option<&mut Route<'storage, A>> {
-        self.inner.get_mut_by_key(key)
     }
 
     pub(crate) fn add_route(
@@ -100,11 +64,6 @@ where
         next_hop: Address<A>,
         interval: Interval,
     ) -> Result<(), RouteError> {
-        let storage = self
-            .inner
-            .get_storage()
-            .ok_or(RouteError::NoStorageAvailable)?;
-
         let route = Route::new(
             now,
             source,
@@ -117,48 +76,24 @@ where
             false,
             interval,
             self.route_expiry_time,
-            storage,
         );
 
         // If there is an error inserting the route then the storage needs to be returned to the
         // table.
         if let Err(err) = self.inner.insert(route) {
+            b_debug!("Error inserting route: {:?}", err);
+
             match err {
-                InsertError::Full(route) => {
-                    self.inner.return_storage(route.release());
+                InsertError::Full(_) => {
                     return Err(RouteError::Full);
                 }
-                InsertError::Duplicate(route) => {
-                    self.inner.return_storage(route.release());
+                InsertError::Duplicate(_) => {
                     return Err(RouteError::Duplicate);
                 }
             }
         };
 
         Ok(())
-    }
-
-    /// Queues updates for all selected routes to all neighbours on the given interface.
-    pub(crate) fn broadcast_periodic_update(
-        &mut self,
-        now: Instant,
-        interface: &Interface<A>,
-        neighbours: &NeighbourTable<A>,
-    ) {
-        for route in self.inner.iter_mut().filter(|r| r.selected) {
-            for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
-                if let Err(err) = route.add_update(Update::new(
-                    now,
-                    neighbour.key(),
-                    !interface.prefer_ucast,
-                    false,
-                    *interface.update_retry_interval,
-                    1,
-                )) {
-                    b_debug!("Failed to add update for {:?} - {:?}", route.key(), err);
-                };
-            }
-        }
     }
 
     /// Recomputes the metric of every route `neighbour` advertised, and queues a triggered update
@@ -173,6 +108,7 @@ where
         neighbour: &Neighbour<A>,
         interfaces: &InterfaceTable<A>,
         neighbours: &NeighbourTable<A>,
+        update_queue: &mut UpdateQueue<A>,
     ) {
         let smoothing_multiple = self.smoothing_multiple;
         let neighbour_idx = neighbour.key();
@@ -192,56 +128,15 @@ where
             if route.selected
                 && route.computed_metric().abs_diff(old_computed) > METRIC_DIFFERENCE_THRESHOLD
             {
-                route.broadcast_triggered_update(now, interfaces, neighbours);
+                update_queue.queue_triggered_update(now, route, interfaces, neighbours);
             }
         }
-    }
-
-    /// Writes out whatever the route updates this table owes on `interface`.
-    pub(crate) fn poll_for_updates<'output, P>(
-        &mut self,
-        now: Instant,
-        interface: &Interface<A>,
-        sources: &mut SourceTable<'_, A>,
-        update_interval: Interval,
-        active_dest: &mut DestAddr<A>,
-        next_poll: &mut Duration,
-        mut writer: PacketWriterStep<'output, Ready>,
-    ) -> Result<
-        PacketWriterStep<'output, Ready>,
-        (PacketWriterError, PacketWriterStep<'output, Ready>),
-    >
-    where
-        P: ParserStateExt<AddressEncoding = A::Encoding, Address = A>,
-    {
-        // Start the parser for the packet with the initial next hop equal to the address of the
-        // interface this packet will be sent on.
-        let mut parser: Parser<P> = Parser::new(interface.address);
-
-        let mut router_id_groups = self.router_id_groups_mut();
-
-        while let Some(mut rid_group) = router_id_groups.next_group() {
-            for route in rid_group.iter_mut() {
-                writer = route.poll_for_updates::<P>(
-                    now,
-                    interface,
-                    sources,
-                    update_interval,
-                    active_dest,
-                    next_poll,
-                    &mut parser,
-                    writer,
-                )?;
-            }
-        }
-
-        Ok(writer)
     }
 
     /// Get a [`DestinationGroup`] iterator from self.
     pub(crate) fn destination_groups_mut(
         &mut self,
-    ) -> impl Iterator<Item = DestinationGroup<'_, 'storage, A>> {
+    ) -> impl Iterator<Item = DestinationGroup<'_, A>> {
         self.inner
             // Chunk by runs of the same destination
             .chunk_by_mut(|a, b| destination_of(a) == destination_of(b))
@@ -251,21 +146,27 @@ where
             .map(DestinationGroup)
     }
 
-    /// Get a [`RouterIdGroups`] cursor from self.
-    fn router_id_groups_mut(&mut self) -> RouterIdGroups<'_, 'storage, A> {
-        RouterIdGroups {
-            routes: self,
-            last: None,
-        }
+    /// Gets the selected route for the given destination.
+    pub(crate) fn get_selected(&self, destination: &RouteDestination<A>) -> Option<&Route<A>> {
+        let mut iter = self
+            .inner
+            .iter()
+            .filter(|r| r.selected && r.destination() == destination);
+        let out = iter.next();
+        // This is a good spot to assert that only one route is selected for a given destination on
+        // non-optimized builds.
+        debug_assert!(
+            iter.next().is_none(),
+            "There should only be one selected route for a destination."
+        );
+        out
     }
 }
 
 /// A non-empty run of route table entries that all lead to the same destination.
-pub(crate) struct DestinationGroup<'a, 'storage, A: AddressExt>(
-    &'a mut [MaybeInUse<Route<'storage, A>>],
-);
+pub(crate) struct DestinationGroup<'a, A: AddressExt>(&'a mut [Option<Route<A>>]);
 
-impl<'storage, A: AddressExt> DestinationGroup<'_, 'storage, A> {
+impl<A: AddressExt> DestinationGroup<'_, A> {
     /// The destination that every route in this group leads to.
     pub(crate) fn destination(&self) -> RouteDestination<A> {
         *self
@@ -280,11 +181,11 @@ impl<'storage, A: AddressExt> DestinationGroup<'_, 'storage, A> {
         self.0.len()
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Route<'storage, A>> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Route<A>> {
         self.0.iter().filter_map(|r| r.value())
     }
 
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<'storage, A>> {
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<A>> {
         self.0.iter_mut().filter_map(|r| r.value_mut())
     }
 }
@@ -293,61 +194,8 @@ impl<'storage, A: AddressExt> DestinationGroup<'_, 'storage, A> {
 ///
 /// Free slots compare equal to each other and to nothing else, which is what collapses them into
 /// the single leading group that [`RouteTable::destination_groups_mut`] discards.
-fn destination_of<A: AddressExt>(entry: &MaybeInUse<Route<A>>) -> Option<RouteDestination<A>> {
+fn destination_of<A: AddressExt>(entry: &Option<Route<A>>) -> Option<RouteDestination<A>> {
     entry.value().map(|e| *e.destination())
-}
-
-/// A cursor that groups routes by [`RouterId`] to optimize network traffic for sending updates.
-///
-/// This cannot be an iterator because [`RouteTable`] is not ordered by [`RouterId`] and
-/// [`core::slice::chunk_by`] only yields contiguous chunks so it must first establish a starting
-/// [`RouterId`] for all routes (the minimum) and then ratchet up for each call of
-/// [`RouterIdGroups::next_group`]
-struct RouterIdGroups<'table, 'routes, A: AddressExt> {
-    routes: &'table mut RouteTable<'routes, A>,
-    /// The [`RouterId`] of the group handed out last.
-    last: Option<RouterId>,
-}
-
-impl<'routes, A: AddressExt> RouterIdGroups<'_, 'routes, A> {
-    /// Gets the next [`RouterIdGroup`] and advances the [`RouterId`] cursor.
-    fn next_group(&mut self) -> Option<RouterIdGroup<'_, 'routes, A>> {
-        let router_id = self
-            .routes
-            .inner
-            .iter()
-            // Get the RouterId that advertised the route.
-            .map(|r| r.source().router_id)
-            // Get all router_ids greater than last or all if last is None
-            .filter(|id| self.last.is_none_or(|last| *id > last))
-            // Take the minimum router id of the filtered group.
-            .min()?;
-
-        // Ratchet up the minimum so no router id's less than this one can be yielded in subsequent
-        // calls to next_group.
-        self.last = Some(router_id);
-
-        Some(RouterIdGroup {
-            router_id,
-            routes: self.routes,
-        })
-    }
-}
-
-/// The routes that were originated by one router-id.
-struct RouterIdGroup<'table, 'routes, A: AddressExt> {
-    router_id: RouterId,
-    routes: &'table mut RouteTable<'routes, A>,
-}
-
-impl<'routes, A: AddressExt> RouterIdGroup<'_, 'routes, A> {
-    /// Yields all routes that have this group's [`RouterId`]
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<'routes, A>> {
-        self.routes
-            .inner
-            .iter_mut()
-            .filter(|r| r.source().router_id == self.router_id)
-    }
 }
 
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
@@ -378,17 +226,7 @@ mod test {
         InterfaceHandle::try_from(IFACE).expect("bad interface handle")
     }
 
-    fn get_storage<'storage, const R: usize, const N: usize, A: AddressExt>() -> (
-        [MaybeInUse<Route<'storage, A>>; R],
-        [[Option<Update<A>>; N]; R],
-    ) {
-        ([const { MaybeInUse::Vacant }; R], [[const { None }; N]; R])
-    }
-
     /// Adds a route to `table`.
-    ///
-    /// A route owns the queue it was handed, so it can no longer be built standalone and handed to
-    /// the table afterwards: the queue has to come from the table it is going to live in.
     fn insert_route(
         table: &mut RouteTable<'_, NoExtension>,
         prefix: Ipv6Addr,
@@ -437,7 +275,7 @@ mod test {
                 neighbour.into(),
                 INTERVAL,
             )
-            .expect("the table has a free slot and update queue storage for the route");
+            .expect("the table has a free slot for the route");
     }
 
     /// The grouping is by destination, so two routes towards one prefix belong together even when
@@ -499,8 +337,7 @@ mod test {
     /// as a group of their own.
     #[test]
     fn skips_free_slots() {
-        let (mut route_storage, mut update_queue) = get_storage::<'_, 4, 4, NoExtension>();
-        RouteTable::init_storage(&mut route_storage, &mut update_queue);
+        let mut route_storage: [Option<Route<NoExtension>>; 4] = [const { None }; 4];
         let mut table =
             RouteTable::new_with_storage(&mut route_storage[..], DEFAULT_ROUTE_EXPIRY_TIME);
         insert_route(&mut table, DEST_A, 64, "rtr-a", NEIGHBOUR_1);

@@ -19,7 +19,8 @@ default = ["std", "log"]
 # default = ["defmt"]
 
 [dependencies]
-# Used for a single exponential smoothing function. Can likely be removed with some effort.
+# Used for a single exponential smoothing function. Can likely be removed with some effort. 
+# Conversely, this is a dependency of rust std lib. So it is probably a safe one.
 libm = "0.2.16"
 # Logging
 defmt = { version = "1", optional = true }

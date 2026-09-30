@@ -1,6 +1,5 @@
 use super::BabelRouter;
 use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
-use crate::data_structures::route::updates::Update;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -186,13 +185,13 @@ where
 
             // Check for updates first so urgent updates are sent.
             b_trace!("Polling for route updates");
-            writer = ok_or_try_send!(self.route_table.poll_for_updates::<P>(
+            writer = ok_or_try_send!(self.update_queue.poll_for_updates::<P>(
                 now,
                 interface,
-                &mut self.source_table,
-                self.update_timer.interval(),
                 &mut active_dest,
                 &mut next_poll,
+                &mut self.source_table,
+                &self.route_table,
                 writer
             ));
 
@@ -296,7 +295,7 @@ where
         });
 
         // Check for expired routes.
-        self.route_table.retain_mut(|route| {
+        self.route_table.inner.retain_mut(|route| {
             // Check if there is time remaining in the route.
             if let Some(remaining) = route.expiry.time_remaining(now) {
                 next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
@@ -336,14 +335,20 @@ where
                 // If there is still time remaining until the next periodic update. Merge with
                 // next_poll and skip.
                 next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
+                continue;
             } else {
-                // Otherwize reset the update timer.
-                self.update_timer.restart(now);
+                // Otherwise reset the update timer.
+                interface.update_timer.restart(now);
 
-                self.route_table
-                    .broadcast_periodic_update(now, interface, &self.neighbor_table);
+                // And broadcast a periodic update.
+                self.update_queue.queue_periodic_update(
+                    now,
+                    &self.route_table,
+                    interface,
+                    &self.neighbor_table,
+                );
 
-                let remaining = self.update_timer.duration();
+                let remaining = interface.update_timer.duration();
                 next_poll = Some(next_poll.map_or(remaining, |cur| cur.min(remaining)));
             }
         }
@@ -428,7 +433,6 @@ mod test {
             Instant::from_secs(0),
             BabelRouterConfig::new(RouterId::try_from(name).expect("bad router id")),
         )
-        .expect("bad router")
     }
 
     fn iface_handle(name: &str) -> InterfaceHandle {

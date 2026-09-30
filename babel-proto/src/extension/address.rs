@@ -21,6 +21,10 @@ where
     /// Return the big endian byte representation of the address.
     fn as_octets(&self) -> &[u8];
     /// Create the address type from un-compressed bytes.
+    ///
+    /// NOTE: The bytes passed in to this method are not guaranteed to be long enough to fill the
+    /// whole address. In this case the given bytes should be left aligned and right padded with
+    /// zeros.
     fn from_bytes(ae: &Self::Encoding, bytes: &[u8]) -> Result<Self, AddressError<Self>>;
     /// Get the encoding for this address.
     fn encoding(&self) -> Self::Encoding;

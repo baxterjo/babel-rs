@@ -350,4 +350,75 @@ impl<'a> PacketWriterStep<'a, Ready> {
             },
         })
     }
+
+    /// Writes a Route Request TLV.
+    ///
+    /// `prefix` is the Prefix field exactly as it goes on the wire, so the caller owns the
+    /// agreement between it, `ae` and `plen`: this writer copies what it is handed and never
+    /// inspects it. RFC 8966
+    /// [4.6.10](https://datatracker.ietf.org/doc/html/rfc8966#name-route-request) makes the field
+    /// `Plen/8` rounded upwards — less the octets the encoding implies, as everywhere else — and
+    /// forbids address compression, so there is no Omitted field to state.
+    ///
+    /// Nothing in the router asks for routes yet; only the receiving half of
+    /// [Section 3.8.1.1](https://datatracker.ietf.org/doc/html/rfc8966#name-route-requests) is
+    /// implemented. This exists so the tests for that half can frame a request with the same
+    /// writer every other packet goes through rather than a second, test-only encoder that can
+    /// drift from it. Drop the `cfg` when the router learns to send one.
+    #[cfg(test)]
+    pub(crate) fn write_route_request(
+        self,
+        ae: u8,
+        plen: u8,
+        prefix: &[u8],
+    ) -> Result<PacketWriterStep<'a, Tlv>, (PacketWriterError, Self)> {
+        use crate::packet::tlv::RouteRequestSlice;
+
+        let step = self;
+
+        if let Some(val) = step.state.remaining()
+            && val < TlvHeader::LEN + RouteRequestSlice::MIN_LEN
+        {
+            return Err((
+                PacketWriterError::BufferTooSmall {
+                    need: TlvHeader::LEN + RouteRequestSlice::MIN_LEN,
+                    remaining: val,
+                },
+                step,
+            ));
+        }
+
+        // Track starting position for backtrack.
+        let start_pos = step.state.position();
+
+        // Write type ID
+        let (_, step) = step.write_or_backtrack(&[RouteRequestSlice::TYPE_ID], start_pos)?;
+
+        // Mark length position and write zero in its place.
+        let (length_pos, step) = step.mark_and_skip_or_backtrack::<1>(start_pos)?;
+
+        // Start keeping track of tlv length.
+        let mut length = 0usize;
+
+        // Write ae
+        let (len, step) = step.write_or_backtrack(&[ae], start_pos)?;
+        length += len;
+
+        // Write plen
+        let (len, step) = step.write_or_backtrack(&[plen], start_pos)?;
+        length += len;
+
+        // Write prefix
+        let (len, step) = step.write_or_backtrack(prefix, start_pos)?;
+        length += len;
+
+        Ok(PacketWriterStep {
+            state: step.state,
+            step_state: Tlv {
+                start_pos,
+                length_pos,
+                tlv_length: length,
+            },
+        })
+    }
 }
