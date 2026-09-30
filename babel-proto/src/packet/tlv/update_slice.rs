@@ -7,8 +7,8 @@ use crate::packet::error::layer::Layer;
 use crate::packet::error::len_error::LenError;
 use crate::packet::error::tlv_err::TlvError;
 use crate::packet::len_source::LenSource;
-use crate::packet::tlv::TypedTlv;
 use crate::packet::tlv::tlv_header::TlvHeader;
+use crate::packet::tlv::{TypedTlv, prefix_field_len};
 use crate::packet::utils::get_unchecked_be_u16;
 use crate::utils::Duration;
 
@@ -180,41 +180,14 @@ impl<'a> UpdateSlice<'a> {
         }
     }
 
-    /// The size in octets of the Prefix field, `(Plen/8).ceil() - implied_octets - Omitted`.
-    ///
-    /// `implied_octets` is the number of leading octets the address encoding fixes itself and which
-    /// therefore never reach the wire - 8 for AE 3, whose `fe80::/64` prefix is implied, and 0 for
-    /// every other base-spec encoding. Plen counts the whole advertised prefix including those
-    /// octets, so they come off the field length as a second, implicit `Omitted`.
-    fn prefix_field_len(&self, implied_octets: usize) -> Result<usize, TlvError> {
-        let plen = self.plen();
-
-        // A Plen below the implied prefix names bits underneath the floor the encoding sets, so
-        // there is no prefix it could be describing.
-        if usize::from(plen) < implied_octets * 8 {
-            return Err(TlvError::PlenBelowImpliedPrefix {
-                plen,
-                implied_octets,
-            });
-        }
-
-        // The check above makes this subtraction safe.
-        let uncompressed_len = usize::from(plen.div_ceil(8)) - implied_octets;
-
-        let omitted = self.ommitted();
-        // Can't have a negative length.
-        if usize::from(omitted) > uncompressed_len {
-            return Err(TlvError::OmittedTooLong { plen, omitted });
-        }
-        Ok(uncompressed_len - usize::from(omitted))
-    }
-
     /// The prefix being advertised, as it appears on the wire.
     ///
     /// The field holds `(Plen/8).ceil() - implied_octets - Omitted` octets; see
     /// [`Self::prefix_field_len`] for what `implied_octets` means and why it is a parameter.
     pub fn prefix(&self, implied_octets: usize) -> Result<&'a [u8], TlvError> {
-        let idx_end = TlvHeader::LEN + Self::MIN_LEN + self.prefix_field_len(implied_octets)?;
+        let idx_end = TlvHeader::LEN
+            + Self::MIN_LEN
+            + prefix_field_len(self.plen(), self.ommitted(), implied_octets)?;
         // This **MUST** be checked as the source of idx_end is supplied through the tlv. So a
         // malicious packet could cause UB.
         Ok(self
@@ -234,7 +207,9 @@ impl<'a> UpdateSlice<'a> {
     /// The sub-TLVs start where the Prefix field ends, so this needs the same `implied_octets` as
     /// [`Self::prefix`].
     pub fn sub_tlvs(&self, implied_octets: usize) -> Result<&'a [u8], TlvError> {
-        let idx_end = TlvHeader::LEN + Self::MIN_LEN + self.prefix_field_len(implied_octets)?;
+        let idx_end = TlvHeader::LEN
+            + Self::MIN_LEN
+            + prefix_field_len(self.plen(), self.ommitted(), implied_octets)?;
         // This **MUST** be checked as the source of idx_end is supplied through the tlv. So a
         // malicious packet could cause UB.
         Ok(self.slice.get(idx_end..).ok_or(LenError {

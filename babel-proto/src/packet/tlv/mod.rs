@@ -195,3 +195,29 @@ where
         TlvSlice::from_typed(self)
     }
 }
+
+/// The size in octets of the Prefix field, `(Plen/8).ceil() - implied_octets - Omitted`.
+///
+/// `implied_octets` is the number of leading octets the address encoding fixes itself and which
+/// therefore never reach the wire - 8 for AE 3, whose `fe80::/64` prefix is implied, and 0 for
+/// every other base-spec encoding. Plen counts the whole advertised prefix including those
+/// octets, so they come off the field length as a second, implicit `Omitted`.
+fn prefix_field_len(plen: u8, omitted: u8, implied_octets: usize) -> Result<usize, TlvError> {
+    // A Plen below the implied prefix names bits underneath the floor the encoding sets, so
+    // there is no prefix it could be describing.
+    if usize::from(plen) < implied_octets * 8 {
+        return Err(TlvError::PlenBelowImpliedPrefix {
+            plen,
+            implied_octets,
+        });
+    }
+
+    // The check above makes this subtraction safe.
+    let uncompressed_len = usize::from(plen.div_ceil(8)) - implied_octets;
+
+    // Can't have a negative length.
+    if usize::from(omitted) > uncompressed_len {
+        return Err(TlvError::OmittedTooLong { plen, omitted });
+    }
+    Ok(uncompressed_len - usize::from(omitted))
+}

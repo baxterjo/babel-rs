@@ -622,7 +622,8 @@ where
             }
         } else {
             // Destination update, queue update for that destination.
-            let prefix = Address::from_bytes(AddressEncoding::try_from(ae)?, route_req.prefix()?)?;
+            let ae = AddressEncoding::try_from(ae)?;
+            let prefix = Address::from_bytes(ae, route_req.prefix(ae.implied_prefix_octets())?)?;
             self.update_queue.queue_route_response(
                 now,
                 interface,

@@ -5,9 +5,9 @@ use crate::packet::error::layer::Layer;
 use crate::packet::error::len_error::LenError;
 use crate::packet::error::tlv_err::TlvError;
 use crate::packet::len_source::LenSource;
-use crate::packet::tlv::TypedTlv;
 use crate::packet::tlv::tlv_header::TlvHeader;
 use crate::packet::tlv::tlv_slice::TlvSlice;
+use crate::packet::tlv::{TypedTlv, prefix_field_len};
 use crate::packet::utils::{get_unchecked_be_u16, slice_to_array};
 
 /// The seqno request slice as defined in
@@ -143,9 +143,9 @@ impl<'a> SeqnoRequestSlice<'a> {
     }
 
     /// The prefix being requested. This field's size is Plen/8 rounded upwards.
-    pub fn prefix(&self) -> Result<&'a [u8], TlvError> {
-        let prefix_len: usize = self.plen().div_ceil(8).into();
-        let idx_end = TlvHeader::LEN + Self::MIN_LEN + prefix_len;
+    pub fn prefix(&self, implied_octets: usize) -> Result<&'a [u8], TlvError> {
+        let idx_end =
+            TlvHeader::LEN + Self::MIN_LEN + prefix_field_len(self.plen(), 0, implied_octets)?;
         // This **MUST** be checked as the source of idx_end is supplied through the tlv. So a
         // malicious packet could cause UB.
         Ok(self
@@ -161,9 +161,12 @@ impl<'a> SeqnoRequestSlice<'a> {
     }
 
     /// This TLV is self-terminating and allows sub-TLVs.
-    pub fn sub_tlvs(&self) -> Result<&'a [u8], TlvError> {
-        let prefix_len: usize = self.plen().div_ceil(8).into();
-        let idx_start = TlvHeader::LEN + Self::MIN_LEN + prefix_len;
+    ///
+    /// The sub-TLVs start where the Prefix field ends, so this needs the same `implied_octets` as
+    /// [`Self::prefix`].
+    pub fn sub_tlvs(&self, implied_octets: usize) -> Result<&'a [u8], TlvError> {
+        let idx_start =
+            TlvHeader::LEN + Self::MIN_LEN + prefix_field_len(self.plen(), 0, implied_octets)?;
         // This **MUST** be checked as the source of idx_start is supplied through the tlv. So a
         // malicious packet could cause UB.
         Ok(self.slice.get(idx_start..).ok_or(LenError {
@@ -180,6 +183,8 @@ impl<'a> SeqnoRequestSlice<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::data_types::address_encoding::AddressEncoding;
+    use crate::extension::NoExtension;
     use crate::packet::tlv::tlv_slice::TlvSlice;
 
     #[test]
@@ -213,15 +218,21 @@ mod test {
             &[0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF],
             "Incorrect router id"
         );
+
+        let ae: AddressEncoding<NoExtension> =
+            AddressEncoding::try_from(seqno_request.ae()).expect("Bad address encoding");
+
         assert_eq!(
             seqno_request
-                .prefix()
+                .prefix(ae.implied_prefix_octets())
                 .expect("Should be able to get prefix"),
             &[192, 168, 0],
             "Incorrect prefix"
         );
         assert_eq!(
-            seqno_request.sub_tlvs().expect("Should have sub tlvs"),
+            seqno_request
+                .sub_tlvs(ae.implied_prefix_octets())
+                .expect("Should have sub tlvs"),
             &[1, 2, 3, 4, 5, 6, 7, 8, 9],
             "Incorrect sub tlvs"
         );
@@ -248,16 +259,18 @@ mod test {
             &[0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF],
             "Incorrect router id"
         );
+        let ae: AddressEncoding<NoExtension> =
+            AddressEncoding::try_from(seqno_request.ae()).expect("Bad address encoding");
         assert_eq!(
             seqno_request
-                .prefix()
+                .prefix(ae.implied_prefix_octets())
                 .expect("Should be able to get prefix"),
             &[192, 168, 0],
             "Incorrect prefix"
         );
         assert_eq!(
             seqno_request
-                .sub_tlvs()
+                .sub_tlvs(ae.implied_prefix_octets())
                 .expect("Should be able to get sub tlvs"),
             &[],
             "Should have no sub tlvs"
@@ -278,20 +291,312 @@ mod test {
         let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
         let seqno_request =
             SeqnoRequestSlice::from_untyped(tlv_slice).expect("Seqno Request should parse.");
+        let ae: AddressEncoding<NoExtension> =
+            AddressEncoding::try_from(seqno_request.ae()).expect("Bad address encoding");
 
         assert_eq!(
             seqno_request
-                .prefix()
+                .prefix(ae.implied_prefix_octets())
                 .expect("Should be able to get prefix"),
             &[],
             "Should have an empty prefix"
         );
         assert_eq!(
             seqno_request
-                .sub_tlvs()
+                .sub_tlvs(ae.implied_prefix_octets())
                 .expect("Should be able to get sub tlvs"),
             &[],
             "Should have no sub tlvs"
+        );
+    }
+
+    #[test]
+    fn ae_3_prefix_drops_the_implied_octets() {
+        // A request for fe80::102:304:506:708/128. AE 3 fixes the first 8 octets, so Plen counts
+        // all 128 bits of the prefix but only the 8 octet suffix is carried on the wire.
+        let packet: &[u8] = &[
+            10,  // Seqno Request Type ID
+            22,  // Length
+            3,   // AE
+            128, // Plen
+            0, 42, // Seqno
+            16, // Hop Count
+            0,  // Reserved
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, // Router-Id
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // Prefix
+        ];
+
+        let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
+        let seqno_request =
+            SeqnoRequestSlice::from_untyped(tlv_slice).expect("Seqno Request should parse.");
+
+        let ae: AddressEncoding<NoExtension> =
+            AddressEncoding::try_from(seqno_request.ae()).expect("Bad address encoding");
+        assert_eq!(ae.implied_prefix_octets(), 8, "AE 3 should imply 8 octets");
+
+        assert_eq!(
+            seqno_request
+                .prefix(ae.implied_prefix_octets())
+                .expect("Should be able to get prefix"),
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            "Incorrect prefix"
+        );
+
+        assert_eq!(
+            seqno_request
+                .sub_tlvs(ae.implied_prefix_octets())
+                .expect("Should be able to get sub tlvs"),
+            &[],
+            "Should have no sub tlvs"
+        );
+
+        // Without the implied octets coming off the length the field reads as the full 16 octets,
+        // which runs past the end of the TLV.
+        seqno_request
+            .prefix(0)
+            .expect_err("Prefix should run past the end of the TLV.");
+        seqno_request
+            .sub_tlvs(0)
+            .expect_err("Sub tlvs should start past the end of the TLV.");
+
+        // The same request with sub-TLVs after it. Both accessors have to put the end of the
+        // Prefix field in the same place or the sub-TLV region is read from the wrong offset.
+        let packet: &[u8] = &[
+            10,  // Seqno Request Type ID
+            25,  // Length
+            3,   // AE
+            128, // Plen
+            0, 42, // Seqno
+            16, // Hop Count
+            0,  // Reserved
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, // Router-Id
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // Prefix
+            1, 2, 3, // Sub TLVS
+        ];
+
+        let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
+        let seqno_request =
+            SeqnoRequestSlice::from_untyped(tlv_slice).expect("Seqno Request should parse.");
+
+        assert_eq!(
+            seqno_request
+                .prefix(ae.implied_prefix_octets())
+                .expect("Should be able to get prefix"),
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            "Incorrect prefix"
+        );
+        assert_eq!(
+            seqno_request
+                .sub_tlvs(ae.implied_prefix_octets())
+                .expect("Should have sub tlvs"),
+            &[1, 2, 3],
+            "Incorrect sub tlvs"
+        );
+    }
+
+    #[test]
+    fn ae_3_plen_at_the_implied_floor_has_an_empty_prefix() {
+        // fe80::/64 is described entirely by the encoding, so there is nothing left to put in the
+        // Prefix field.
+        let packet: &[u8] = &[
+            10, // Seqno Request Type ID
+            14, // Length
+            3,  // AE
+            64, // Plen
+            0, 42, // Seqno
+            16, // Hop Count
+            0,  // Reserved
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, // Router-Id
+        ];
+
+        let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
+        let seqno_request =
+            SeqnoRequestSlice::from_untyped(tlv_slice).expect("Seqno Request should parse.");
+
+        let ae: AddressEncoding<NoExtension> =
+            AddressEncoding::try_from(seqno_request.ae()).expect("Bad address encoding");
+
+        assert_eq!(
+            seqno_request
+                .prefix(ae.implied_prefix_octets())
+                .expect("Should be able to get prefix"),
+            &[],
+            "Should have an empty prefix"
+        );
+        assert_eq!(
+            seqno_request
+                .sub_tlvs(ae.implied_prefix_octets())
+                .expect("Should be able to get sub tlvs"),
+            &[],
+            "Should have no sub tlvs"
+        );
+
+        // A prefix that is not a whole number of octets past the floor is rounded upwards, so one
+        // bit over the /64 puts a single octet on the wire.
+        let packet: &[u8] = &[
+            10, // Seqno Request Type ID
+            15, // Length
+            3,  // AE
+            65, // Plen
+            0, 42, // Seqno
+            16, // Hop Count
+            0,  // Reserved
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, // Router-Id
+            0x80, // Prefix
+        ];
+
+        let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
+        let seqno_request =
+            SeqnoRequestSlice::from_untyped(tlv_slice).expect("Seqno Request should parse.");
+
+        assert_eq!(
+            seqno_request
+                .prefix(ae.implied_prefix_octets())
+                .expect("Should be able to get prefix"),
+            &[0x80],
+            "Incorrect prefix"
+        );
+        assert_eq!(
+            seqno_request
+                .sub_tlvs(ae.implied_prefix_octets())
+                .expect("Should be able to get sub tlvs"),
+            &[],
+            "Should have no sub tlvs"
+        );
+    }
+
+    #[test]
+    fn plen_below_the_implied_prefix_is_rejected() {
+        // Plen 8 names bits underneath the /64 that AE 3 fixes, so there is no prefix it could be
+        // describing.
+        let packet: &[u8] = &[
+            10, // Seqno Request Type ID
+            15, // Length
+            3,  // AE
+            8,  // Plen
+            0, 42, // Seqno
+            16, // Hop Count
+            0,  // Reserved
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, // Router-Id
+            0x01, // Prefix
+        ];
+
+        let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
+        let seqno_request =
+            SeqnoRequestSlice::from_untyped(tlv_slice).expect("Seqno Request should parse.");
+
+        let ae: AddressEncoding<NoExtension> =
+            AddressEncoding::try_from(seqno_request.ae()).expect("Bad address encoding");
+
+        assert_eq!(
+            seqno_request
+                .prefix(ae.implied_prefix_octets())
+                .expect_err("Plen is below the implied prefix"),
+            TlvError::PlenBelowImpliedPrefix {
+                plen: 8,
+                implied_octets: 8
+            },
+            "Incorrect error"
+        );
+
+        // The sub-TLV region is measured from the same Plen, so it is rejected for the same reason
+        // rather than reading the remainder from a bogus offset.
+        assert_eq!(
+            seqno_request
+                .sub_tlvs(ae.implied_prefix_octets())
+                .expect_err("Plen is below the implied prefix"),
+            TlvError::PlenBelowImpliedPrefix {
+                plen: 8,
+                implied_octets: 8
+            },
+            "Incorrect error"
+        );
+
+        // One bit under the floor is still under it, even though it rounds up to the same 8 octets.
+        let packet: &[u8] = &[
+            10, // Seqno Request Type ID
+            14, // Length
+            3,  // AE
+            63, // Plen
+            0, 42, // Seqno
+            16, // Hop Count
+            0,  // Reserved
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, // Router-Id
+        ];
+
+        let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
+        let seqno_request =
+            SeqnoRequestSlice::from_untyped(tlv_slice).expect("Seqno Request should parse.");
+
+        assert_eq!(
+            seqno_request
+                .prefix(ae.implied_prefix_octets())
+                .expect_err("Plen is below the implied prefix"),
+            TlvError::PlenBelowImpliedPrefix {
+                plen: 63,
+                implied_octets: 8
+            },
+            "Incorrect error"
+        );
+
+        // A Seqno Request never carries AE 0, so a Plen of 0 under AE 3 is a request below the
+        // floor rather than a wildcard.
+        let packet: &[u8] = &[
+            10, // Seqno Request Type ID
+            14, // Length
+            3,  // AE
+            0,  // Plen
+            0, 42, // Seqno
+            16, // Hop Count
+            0,  // Reserved
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, // Router-Id
+        ];
+
+        let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
+        let seqno_request =
+            SeqnoRequestSlice::from_untyped(tlv_slice).expect("Seqno Request should parse.");
+
+        assert_eq!(
+            seqno_request
+                .prefix(ae.implied_prefix_octets())
+                .expect_err("Plen is below the implied prefix"),
+            TlvError::PlenBelowImpliedPrefix {
+                plen: 0,
+                implied_octets: 8
+            },
+            "Incorrect error"
+        );
+    }
+
+    #[test]
+    fn encodings_with_no_implied_octets_are_unaffected() {
+        // AE 1 and 2 carry their whole address, so the Prefix field is Plen/8 rounded up with
+        // nothing taken off and no Plen is too short for the encoding.
+        let packet: &[u8] = &[
+            10, // Seqno Request Type ID
+            14, // Length
+            2,  // AE
+            0,  // Plen
+            0, 42, // Seqno
+            16, // Hop Count
+            0,  // Reserved
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, // Router-Id
+        ];
+
+        let tlv_slice = TlvSlice::from_slice(packet).expect("Untyped tlv should parse");
+        let seqno_request =
+            SeqnoRequestSlice::from_untyped(tlv_slice).expect("Seqno Request should parse.");
+
+        let ae: AddressEncoding<NoExtension> =
+            AddressEncoding::try_from(seqno_request.ae()).expect("Bad address encoding");
+        assert_eq!(ae.implied_prefix_octets(), 0, "AE 2 should imply no octets");
+
+        assert_eq!(
+            seqno_request
+                .prefix(ae.implied_prefix_octets())
+                .expect("Should be able to get prefix"),
+            &[],
+            "::/0 should have an empty prefix"
         );
     }
 
@@ -351,12 +656,14 @@ mod test {
 
         let seqno_request =
             SeqnoRequestSlice::from_untyped(untyped).expect("Seqno Request should parse");
+        let ae: AddressEncoding<NoExtension> =
+            AddressEncoding::try_from(seqno_request.ae()).expect("Bad address encoding");
 
         seqno_request
-            .prefix()
+            .prefix(ae.implied_prefix_octets())
             .expect_err("Prefix should be too short.");
         seqno_request
-            .sub_tlvs()
+            .sub_tlvs(ae.implied_prefix_octets())
             .expect_err("Sub tlvs should start past the end of the TLV.");
     }
 

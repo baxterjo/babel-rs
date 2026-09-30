@@ -66,6 +66,7 @@ impl<V: InternallyKeyed> TableSlot for Option<V> {
 ///
 /// Both variants return the value that was NOT inserted.
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum InsertError<V> {
     /// Every slot is occupied and the storage cannot grow.
     Full(V),
