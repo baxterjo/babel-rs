@@ -1,38 +1,105 @@
 ---
-title: Routes, Sources, and Updates
+title: Struct Relationships
 ---
 %%{init: {"layout": "elk"}}%%
 classDiagram
-class SourceIndex {
-  +RouterId router_id
-  +RouteDestination destination
-}
+note for RouteDestination "Address prefix for sending traffic."
 class RouteDestination {
   +Address prefix
   +u8 prefix_len
 }
+
+note for RouterId "Globally unique to routing domain"
+class RouterId {
+  +[u8; 8]
+}
+
+note for InterfaceHandle "User defined byte array for referencing<br>user owned interface"
+class InterfaceHandle {
+  +[u8; 8]
+}
+class Interface {
+  +InterfaceHandle handle
+  +Address address
+  ...
+  +key() InterfaceHandle
+}
+
+class SourceIndex {
+  +RouterId router_id
+  +RouteDestination destination
+}
+class Source {
+  +RouterId router_id
+  +RouteDestination destination
+  ...
+  +key() SourceIndex
+}
+
 class RouteIndex {
 +RouteDestination destination
+// Neighbour that advertised route
 +NeighbourIndex neighbour
-}
-class NeighbourIndex {
-  +InterfaceHandle iface
-  +Address addr
-}
-class UpdateIndex {
-  +NeighbourIndex dest_neighbour
 }
 class Route {
   +SourceIndex source
   +NeighbourIndex neighbour
-  +OrderedSet~UpdateIndex~
+  ...
   +key() RouteIndex
 }
-  RouteDestination --* SourceIndex: copy
-  RouteDestination --* RouteIndex: copy
-  NeighbourIndex --* RouteIndex: Neighbour that advertised route
-  NeighbourIndex --* UpdateIndex: Update destination
+
+note for NeighbourIndex "How to reach a neighbour"
+class NeighbourIndex {
+  +InterfaceHandle iface
+  +Address addr
+}
+class Neighbour {
+  +InterfaceHandle iface
+  // Address at which this interface can be reached
+  +Address addr
+  ...
+  +key(): NeighbourIndex
+}
+
+class UpdateIndex {
+  +RouteDestination destination
+  // Update destination
+  +NeighbourIndex neighbour
+}
+class Update {
+  +RouteDestination destination
+  +NeighbourIndex neighbour
+  ...
+  +key() UpdateIndex
+}
+
+class SeqnoRequestIndex {
+  +Address prefix
+  +u8 prefix_len
+  +RouterId router_id
+}
+
+class SeqnoRequest {
+  +Address prefix
+  +u8 prefix_len
+  +RouterId router_id
+  ...
+  +key() SeqnoRequestIndex
+}
+
+  RouteDestination --* SourceIndex
+  RouteDestination --* RouteIndex
+  RouteDestination --* UpdateIndex
+  InterfaceHandle --* NeighbourIndex
+  NeighbourIndex --* RouteIndex
+  NeighbourIndex --* UpdateIndex
+  RouterId --* SeqnoRequestIndex
+  RouterId --* SourceIndex
   SourceIndex --* Route
-  RouteIndex <|.. Route: Unique by
-  UpdateIndex --* Route
+  RouteIndex <|.. Route: Unique by<br>NOTE destination is taken from source.destination
+  UpdateIndex <|.. Update: Unique by
+  SourceIndex <|.. Source: Unique by
+  InterfaceHandle <|.. Interface: Unique by
+  NeighbourIndex <|.. Neighbour: Unique by
+  SeqnoRequestIndex <|.. SeqnoRequest: Unique by
   
