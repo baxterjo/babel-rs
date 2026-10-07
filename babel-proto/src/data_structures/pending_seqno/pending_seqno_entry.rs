@@ -1,52 +1,12 @@
-use super::neighbour::NeighbourIndex;
+use crate::data_structures::neighbour::NeighbourIndex;
 use crate::data_types::address::Address;
 use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Interval, RouterId};
 use crate::extension::address::AddressExt;
+use crate::utils::Instant;
 use crate::utils::storage::InternallyKeyed;
-use crate::utils::{Instant, ManagedSlice};
-
-pub struct PendingSeqnoRequestTable<'storage, A: AddressExt> {
-    inner: ManagedSlice<'storage, Option<SeqnoRequest<A>>>,
-}
-
-#[cfg(any(feature = "std", feature = "alloc"))]
-impl<'storage, A> Default for PendingSeqnoRequestTable<'storage, A>
-where
-    A: AddressExt,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<'storage, A> PendingSeqnoRequestTable<'storage, A>
-where
-    A: AddressExt,
-{
-    /// Create a new [`PendingSeqnoRequestTable`] with user provided storage.
-    ///
-    /// While interfaces are generally well known at compile time, the number of [`SeqnoRequest`]s
-    /// this Babel speaker might see is specific to its deployment. So it is important to right size
-    /// this number for your specfic deployment.
-    pub(crate) fn new_with_storage<T>(table: T) -> Self
-    where
-        T: Into<ManagedSlice<'storage, Option<SeqnoRequest<A>>>>,
-    {
-        Self {
-            inner: table.into(),
-        }
-    }
-
-    #[cfg(any(feature = "std", feature = "alloc"))]
-    pub fn new() -> Self {
-        Self {
-            inner: ManagedSlice::Owned(Default::default()),
-        }
-    }
-}
-
 /// 3.2.7-1: The table of pending seqno requests contains a list of seqno requests that the local
+///
 /// node has sent (either because they have been originated locally, or because they were forwarded)
 /// and to which no reply has been received yet. This table is indexed by triples of the form
 /// (prefix, plen, router-id) (see [`SeqnoRequestIndex`]), and every entry in this table contains

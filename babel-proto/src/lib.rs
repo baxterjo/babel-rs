@@ -3,7 +3,7 @@
 
 use crate::data_structures::interface::Interface;
 use crate::data_structures::neighbour::Neighbour;
-use crate::data_structures::pending_seqno::SeqnoRequest;
+use crate::data_structures::pending_seqno::pending_seqno_entry::SeqnoRequest;
 use crate::data_structures::route::Route;
 use crate::data_structures::source::Source;
 use crate::data_structures::updates::Update;

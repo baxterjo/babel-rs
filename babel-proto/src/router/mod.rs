@@ -7,7 +7,8 @@ use crate::data_structures::interface::{
 use crate::data_structures::neighbour::{
     Neighbour, NeighbourConfig, NeighbourIndex, NeighbourTable,
 };
-use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
+use crate::data_structures::pending_seqno::pending_seqno_entry::SeqnoRequest;
+use crate::data_structures::pending_seqno::pending_seqno_table::PendingSeqnoRequestTable;
 use crate::data_structures::route::{Route, RouteIndex, RouteTable};
 use crate::data_structures::source::{Source, SourceTable};
 use crate::data_structures::updates::{Update, UpdateQueue};
@@ -18,7 +19,7 @@ use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
 use crate::metric::Metric;
 use crate::router::config::BabelRouterConfig;
-use crate::utils::{Instant, InternallyKeyed, ManagedSlice, Timer};
+use crate::utils::{Instant, InternallyKeyed, ManagedSlice};
 
 pub mod config;
 pub mod handle_input;
