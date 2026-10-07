@@ -43,6 +43,10 @@ where
     ZeroUpdateInterval,
     #[error("Route request plen must be 0 if ae is 0 - ae: {0}, plen: {1}")]
     MalformedRouteRequest(u8, u8),
+    #[error("The AE field in {0} TLVs cannot be zero")]
+    AECannotBeZero(&'static str),
+    #[error("The hop count in a SeqnoRequest TLV cannot be zero")]
+    HopCountCannotBeZero,
     #[error(transparent)]
     Len(#[from] LenError),
     #[error(transparent)]

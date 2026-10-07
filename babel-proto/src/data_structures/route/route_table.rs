@@ -161,6 +161,25 @@ where
         );
         out
     }
+
+    /// Gets the selected route for the given destination.
+    pub(crate) fn get_selected_mut(
+        &mut self,
+        destination: &RouteDestination<A>,
+    ) -> Option<&mut Route<A>> {
+        let mut iter = self
+            .inner
+            .iter_mut()
+            .filter(|r| r.selected && r.destination() == destination);
+        let out = iter.next();
+        // This is a good spot to assert that only one route is selected for a given destination on
+        // non-optimized builds.
+        debug_assert!(
+            iter.next().is_none(),
+            "There should only be one selected route for a destination."
+        );
+        out
+    }
 }
 
 /// A non-empty run of route table entries that all lead to the same destination.

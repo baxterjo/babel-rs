@@ -1,18 +1,25 @@
-use crate::data_structures::interface::Interface;
+use crate::data_structures::interface::interface_entry::{
+    DEFAULT_HOP_COUNT, DEFAULT_REQUEST_INTERVAL_SEC, DEFAULT_REQUEST_RETRIES,
+};
+use crate::data_structures::interface::{DEFAULT_MULTICAST_HELLO_INTERVAL_SECS, Interface};
 use crate::data_structures::neighbour::NeighbourIndex;
+use crate::data_structures::pending_seqno::pending_seqno_entry::SeqnoRequest;
 use crate::data_structures::route::{RouteError, RouteIndex};
 use crate::data_structures::source::SourceIndex;
-use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
 use crate::data_types::destination::RouteDestination;
+use crate::data_types::{Address, RouterId};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::input::{Receive, ReceiveDestination};
+use crate::metric::Metric;
 use crate::packet::packet_slice::PacketSlice;
 use crate::packet::parser::Parser;
 use crate::packet::tlv::reader::TlvReader;
-use crate::packet::tlv::{HelloSlice, IhuSlice, RouteRequestSlice, Tlv, UpdateSlice};
+use crate::packet::tlv::{
+    HelloSlice, IhuSlice, RouteRequestSlice, SeqnoRequestSlice, Tlv, UpdateSlice,
+};
 use crate::router::BabelRouter;
 use crate::utils::{Duration, Instant, InternallyKeyed, Timer};
 
@@ -73,8 +80,7 @@ where
                 }
                 // A TLV that cannot be handled is skipped rather than aborting the packet. TLVs
                 // are (mostly) independent of one another, so letting one bad TLV discard the valid
-                // ones behind it hands any sender on the link a way to suppress
-                // them.
+                // ones behind it hands any sender on the link a way to suppress them.
                 Tlv::Hello(hello) => {
                     b_debug!(
                         "[RECV] Hello - iface: {:?}, source: {:?} - {:?}",
@@ -161,6 +167,12 @@ where
                         input.source_addr,
                         seqno_req
                     );
+                    ok_or_continue!(self.handle_seqno_req(
+                        now,
+                        &interface,
+                        &input.source_addr,
+                        seqno_req
+                    ))
                 }
                 Tlv::AckReq(ack_req) => {
                     b_debug!(
@@ -630,6 +642,96 @@ where
                 RouteDestination::new(prefix, plen)?,
                 neighbour.key(),
             )?;
+        }
+        Ok(())
+    }
+
+    //  _  _   _   _  _ ___  _    ___   ___ ___ ___  _  _  ___    ___ ___ ___
+    // | || | /_\ | \| |   \| |  | __| / __| __/ _ \| \| |/ _ \  | _ \ __/ _ \
+    // | __ |/ _ \| .` | |) | |__| _|  \__ \ _| (_) | .` | (_) | |   / _| (_) |
+    // |_||_/_/ \_\_|\_|___/|____|___| |___/___\__\_\_|\_|\___/  |_|_\___\__\_\
+
+    /// Handles seqno requests as outlined in
+    /// [Section 3.8.1.2](https://datatracker.ietf.org/doc/html/rfc8966#name-seqno-requests)
+    fn handle_seqno_req(
+        &mut self,
+        now: Instant,
+        interface: &Interface<A>,
+        source_addr: &Address<A>,
+        seqno_req: SeqnoRequestSlice<'_>,
+    ) -> Result<(), BabelError<A>> {
+        // AE **MUST NOT** be zero for this TLV
+        if seqno_req.ae() == 0 {
+            return Err(BabelError::AECannotBeZero("SeqnoRequest"));
+        }
+
+        // Hop count **MUST NOT** be zero for this TLV
+        if seqno_req.hop_count() == 0 {
+            return Err(BabelError::HopCountCannotBeZero);
+        }
+
+        let ae = AddressEncoding::try_from(seqno_req.ae())?;
+        let prefix_bytes = seqno_req.prefix(ae.implied_prefix_octets())?;
+
+        let prefix = Address::from_bytes(ae, prefix_bytes)?;
+        if let Some(selected_route) = self
+            .route_table
+            .get_selected_mut(&RouteDestination::new(prefix, seqno_req.plen())?)
+        {
+            if selected_route.computed_metric().is_infinite() {
+                todo!("Selected route with infinite metric")
+            }
+
+            if selected_route.seqno >= seqno_req.seqno() {
+                self.update_queue.queue_route_response(
+                    now,
+                    interface,
+                    *selected_route.destination(),
+                    NeighbourIndex {
+                        iface: *interface.handle(),
+                        addr: *source_addr,
+                    },
+                )?;
+                return Ok(());
+            }
+
+            let requested_router_id = RouterId::from(seqno_req.router_id());
+
+            if requested_router_id == selected_route.source().router_id
+                && seqno_req.seqno() > selected_route.seqno
+            {
+                if requested_router_id == self.id {
+                    selected_route.seqno += 1;
+                    self.update_queue.queue_route_response(
+                        now,
+                        interface,
+                        *selected_route.destination(),
+                        NeighbourIndex {
+                            iface: *interface.handle(),
+                            addr: *source_addr,
+                        },
+                    )?;
+                } else if seqno_req.hop_count() >= 2 {
+                    let request = SeqnoRequest::new(
+                        now,
+                        prefix,
+                        seqno_req.plen(),
+                        requested_router_id,
+                        seqno_req.seqno(),
+                        Some(NeighbourIndex {
+                            iface: *interface.handle(),
+                            addr: *source_addr,
+                        }),
+                        DEFAULT_REQUEST_RETRIES,
+                        Duration::from_secs(DEFAULT_REQUEST_INTERVAL_SEC).into(),
+                        seqno_req.hop_count(),
+                    );
+
+                    if let Err(err) = self.pending_seqno.insert(request) {
+                        b_debug!("Err: {:?}", err);
+                    }
+                }
+            }
         }
         Ok(())
     }
