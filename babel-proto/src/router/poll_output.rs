@@ -429,10 +429,9 @@ mod test {
     /// `Instant::now` is `std` only, and it would put the router's birth decades ahead of the `t0`
     /// every test below starts from.
     fn router(name: &'static str) -> BabelRouter<'static> {
-        BabelRouter::new(
-            Instant::from_secs(0),
-            BabelRouterConfig::new(RouterId::try_from(name).expect("bad router id")),
-        )
+        BabelRouter::new(BabelRouterConfig::new(
+            RouterId::try_from(name).expect("bad router id"),
+        ))
     }
 
     fn iface_handle(name: &str) -> InterfaceHandle {

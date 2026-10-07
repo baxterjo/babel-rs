@@ -65,10 +65,9 @@ where
 {
     /// Create a new Babel Router from config.
     #[cfg(any(feature = "std", feature = "alloc"))]
-    pub fn new(now: Instant, config: BabelRouterConfig) -> Self {
+    pub fn new(config: BabelRouterConfig) -> Self {
         use alloc::vec::Vec;
         Self::new_with_storage_inner(
-            now,
             config,
             Vec::new(),
             Vec::new(),
@@ -81,12 +80,10 @@ where
 
     /// Create a new Babel Router with user provided, statically sized storage.
     pub fn new_with_storage(
-        now: Instant,
         config: BabelRouterConfig,
         storage: BorrowedMemoryPool<'storage, A>,
     ) -> Self {
         Self::new_with_storage_inner(
-            now,
             config,
             storage.interface_table,
             storage.neighbour_table,
@@ -98,7 +95,6 @@ where
     }
 
     fn new_with_storage_inner<IF, N, PS, R, S, U>(
-        now: Instant,
         config: BabelRouterConfig,
         interface_table: IF,
         neighbour_table: N,
