@@ -1,4 +1,4 @@
-use crate::data_structures::interface::{InterfaceConfig, InterfaceError, InterfaceHandle};
+use crate::data_structures::interface::{InterfaceConfig, InterfaceHandle};
 use crate::data_types::address_encoding::AddressFamily;
 use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Address, Interval};
@@ -14,6 +14,18 @@ use crate::utils::{Duration, DurationMultiplier, Instant, InternallyKeyed, Timer
 //
 // TODO: Make this a const generic for interface?
 pub const MAX_OTHER_ADDRESSES: usize = 3;
+
+/// The spec default maximum number of retries for a request.
+pub const DEFAULT_REQUEST_RETRIES: u8 = 3;
+
+/// The spec default number of seconds to wait between retrying a request.
+///
+/// The spec default also has a backoff strategy of doubling this interval every time a request is
+/// sent.
+pub const DEFAULT_REQUEST_INTERVAL_SEC: u64 = 2;
+
+// The spec default hop count for seqno requests.
+pub const DEFAULT_HOP_COUNT: u8 = 64;
 
 /// Interfaces that speak the Babel Protocol
 #[derive(Debug, Clone, Copy)]
@@ -188,6 +200,7 @@ mod test {
     use core::net::{Ipv4Addr, Ipv6Addr};
 
     use super::*;
+    use crate::data_structures::interface::InterfaceError;
     use crate::data_types::address_encoding::AddressEncoding;
     use crate::extension::NoExtension;
 

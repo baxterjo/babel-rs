@@ -7,7 +7,8 @@ use crate::data_structures::interface::{
 use crate::data_structures::neighbour::{
     Neighbour, NeighbourConfig, NeighbourIndex, NeighbourTable,
 };
-use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
+use crate::data_structures::pending_seqno::pending_seqno_entry::SeqnoRequest;
+use crate::data_structures::pending_seqno::pending_seqno_table::PendingSeqnoRequestTable;
 use crate::data_structures::route::{Route, RouteIndex, RouteTable};
 use crate::data_structures::source::{Source, SourceTable};
 use crate::data_structures::updates::{Update, UpdateQueue};
@@ -18,7 +19,7 @@ use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
 use crate::metric::Metric;
 use crate::router::config::BabelRouterConfig;
-use crate::utils::{Instant, InternallyKeyed, ManagedSlice, Timer};
+use crate::utils::{Instant, InternallyKeyed, ManagedSlice};
 
 pub mod config;
 pub mod handle_input;
@@ -64,10 +65,9 @@ where
 {
     /// Create a new Babel Router from config.
     #[cfg(any(feature = "std", feature = "alloc"))]
-    pub fn new(now: Instant, config: BabelRouterConfig) -> Self {
+    pub fn new(config: BabelRouterConfig) -> Self {
         use alloc::vec::Vec;
         Self::new_with_storage_inner(
-            now,
             config,
             Vec::new(),
             Vec::new(),
@@ -80,12 +80,10 @@ where
 
     /// Create a new Babel Router with user provided, statically sized storage.
     pub fn new_with_storage(
-        now: Instant,
         config: BabelRouterConfig,
         storage: BorrowedMemoryPool<'storage, A>,
     ) -> Self {
         Self::new_with_storage_inner(
-            now,
             config,
             storage.interface_table,
             storage.neighbour_table,
@@ -97,7 +95,6 @@ where
     }
 
     fn new_with_storage_inner<IF, N, PS, R, S, U>(
-        now: Instant,
         config: BabelRouterConfig,
         interface_table: IF,
         neighbour_table: N,

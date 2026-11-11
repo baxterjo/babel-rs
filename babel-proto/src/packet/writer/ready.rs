@@ -421,4 +421,97 @@ impl<'a> PacketWriterStep<'a, Ready> {
             },
         })
     }
+
+    /// Writes a Seqno Request TLV.
+    ///
+    /// `prefix` is the Prefix field exactly as it goes on the wire, so the caller owns the
+    /// agreement between it, `ae` and `plen`, the same as [`Self::write_route_request`]. RFC 8966
+    /// [4.6.11](https://datatracker.ietf.org/doc/html/rfc8966#name-seqno-request) forbids address
+    /// compression here too. Nor is anything else checked: AE 0 and a Hop Count of 0 are both
+    /// written as handed over, so the tests can send the requests the receiver has to reject.
+    ///
+    /// Nothing in the router originates or forwards a seqno request yet; this exists so the tests
+    /// for the receiving half of
+    /// [Section 3.8.1.2](https://datatracker.ietf.org/doc/html/rfc8966#name-seqno-requests) can
+    /// frame one with the same writer every other packet goes through. Drop the `cfg` when the
+    /// router learns to send one.
+    #[cfg(test)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one argument per field of the TLV"
+    )]
+    pub(crate) fn write_seqno_request(
+        self,
+        ae: u8,
+        plen: u8,
+        seqno: SeqNo,
+        hop_count: u8,
+        router_id: RouterId,
+        prefix: &[u8],
+    ) -> Result<PacketWriterStep<'a, Tlv>, (PacketWriterError, Self)> {
+        use crate::packet::tlv::SeqnoRequestSlice;
+
+        let step = self;
+
+        if let Some(val) = step.state.remaining()
+            && val < TlvHeader::LEN + SeqnoRequestSlice::MIN_LEN
+        {
+            return Err((
+                PacketWriterError::BufferTooSmall {
+                    need: TlvHeader::LEN + SeqnoRequestSlice::MIN_LEN,
+                    remaining: val,
+                },
+                step,
+            ));
+        }
+
+        // Track starting position for backtrack.
+        let start_pos = step.state.position();
+
+        // Write type ID
+        let (_, step) = step.write_or_backtrack(&[SeqnoRequestSlice::TYPE_ID], start_pos)?;
+
+        // Mark length position and write zero in its place.
+        let (length_pos, step) = step.mark_and_skip_or_backtrack::<1>(start_pos)?;
+
+        // Start keeping track of tlv length.
+        let mut length = 0usize;
+
+        // Write ae
+        let (len, step) = step.write_or_backtrack(&[ae], start_pos)?;
+        length += len;
+
+        // Write plen
+        let (len, step) = step.write_or_backtrack(&[plen], start_pos)?;
+        length += len;
+
+        // Write seqno
+        let (len, step) = step.write_or_backtrack(&seqno.to_wire(), start_pos)?;
+        length += len;
+
+        // Write hop count
+        let (len, step) = step.write_or_backtrack(&[hop_count], start_pos)?;
+        length += len;
+
+        // Write reserved
+        let (len, step) = step.write_or_backtrack(&[0], start_pos)?;
+        length += len;
+
+        // Write router id
+        let (len, step) = step.write_or_backtrack(router_id.as_octets(), start_pos)?;
+        length += len;
+
+        // Write prefix
+        let (len, step) = step.write_or_backtrack(prefix, start_pos)?;
+        length += len;
+
+        Ok(PacketWriterStep {
+            state: step.state,
+            step_state: Tlv {
+                start_pos,
+                length_pos,
+                tlv_length: length,
+            },
+        })
+    }
 }

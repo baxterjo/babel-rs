@@ -1,18 +1,25 @@
-use crate::data_structures::interface::Interface;
+use crate::data_structures::interface::interface_entry::{
+    DEFAULT_HOP_COUNT, DEFAULT_REQUEST_INTERVAL_SEC, DEFAULT_REQUEST_RETRIES,
+};
+use crate::data_structures::interface::{DEFAULT_MULTICAST_HELLO_INTERVAL_SECS, Interface};
 use crate::data_structures::neighbour::NeighbourIndex;
+use crate::data_structures::pending_seqno::pending_seqno_entry::SeqnoRequest;
 use crate::data_structures::route::{RouteError, RouteIndex};
 use crate::data_structures::source::SourceIndex;
-use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
 use crate::data_types::destination::RouteDestination;
+use crate::data_types::{Address, RouterId};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::input::{Receive, ReceiveDestination};
+use crate::metric::Metric;
 use crate::packet::packet_slice::PacketSlice;
 use crate::packet::parser::Parser;
 use crate::packet::tlv::reader::TlvReader;
-use crate::packet::tlv::{HelloSlice, IhuSlice, RouteRequestSlice, Tlv, UpdateSlice};
+use crate::packet::tlv::{
+    HelloSlice, IhuSlice, RouteRequestSlice, SeqnoRequestSlice, Tlv, UpdateSlice,
+};
 use crate::router::BabelRouter;
 use crate::utils::{Duration, Instant, InternallyKeyed, Timer};
 
@@ -73,8 +80,7 @@ where
                 }
                 // A TLV that cannot be handled is skipped rather than aborting the packet. TLVs
                 // are (mostly) independent of one another, so letting one bad TLV discard the valid
-                // ones behind it hands any sender on the link a way to suppress
-                // them.
+                // ones behind it hands any sender on the link a way to suppress them.
                 Tlv::Hello(hello) => {
                     b_debug!(
                         "[RECV] Hello - iface: {:?}, source: {:?} - {:?}",
@@ -161,6 +167,12 @@ where
                         input.source_addr,
                         seqno_req
                     );
+                    ok_or_continue!(self.handle_seqno_req(
+                        now,
+                        &interface,
+                        &input.source_addr,
+                        seqno_req
+                    ))
                 }
                 Tlv::AckReq(ack_req) => {
                     b_debug!(
@@ -633,6 +645,106 @@ where
         }
         Ok(())
     }
+
+    //  _  _   _   _  _ ___  _    ___   ___ ___ ___  _  _  ___    ___ ___ ___
+    // | || | /_\ | \| |   \| |  | __| / __| __/ _ \| \| |/ _ \  | _ \ __/ _ \
+    // | __ |/ _ \| .` | |) | |__| _|  \__ \ _| (_) | .` | (_) | |   / _| (_) |
+    // |_||_/_/ \_\_|\_|___/|____|___| |___/___\__\_\_|\_|\___/  |_|_\___\__\_\
+
+    /// Handles seqno requests as outlined in
+    /// [Section 3.8.1.2](https://datatracker.ietf.org/doc/html/rfc8966#name-seqno-requests)
+    fn handle_seqno_req(
+        &mut self,
+        now: Instant,
+        interface: &Interface<A>,
+        source_addr: &Address<A>,
+        seqno_req: SeqnoRequestSlice<'_>,
+    ) -> Result<(), BabelError<A>> {
+        let idx = NeighbourIndex {
+            iface: interface.key(),
+            addr: *source_addr,
+        };
+        let Some(_neighbour) = self.neighbor_table.inner.get_by_key(&idx) else {
+            return Err(BabelError::TlvFromUnknownNeighbour("route_request", idx));
+        };
+
+        // AE **MUST NOT** be zero for this TLV
+        if seqno_req.ae() == 0 {
+            return Err(BabelError::AECannotBeZero("SeqnoRequest"));
+        }
+
+        // Hop count **MUST NOT** be zero for this TLV
+        if seqno_req.hop_count() == 0 {
+            return Err(BabelError::HopCountCannotBeZero);
+        }
+
+        let ae = AddressEncoding::try_from(seqno_req.ae())?;
+        let prefix_bytes = seqno_req.prefix(ae.implied_prefix_octets())?;
+
+        let prefix = Address::from_bytes(ae, prefix_bytes)?;
+        if let Some(selected_route) = self
+            .route_table
+            .get_selected_mut(&RouteDestination::new(prefix, seqno_req.plen())?)
+        {
+            if selected_route.computed_metric().is_infinite() {
+                return Ok(());
+            }
+
+            if selected_route.seqno >= seqno_req.seqno()
+                || selected_route.source().router_id != RouterId::from(seqno_req.router_id())
+            {
+                self.update_queue.queue_route_response(
+                    now,
+                    interface,
+                    *selected_route.destination(),
+                    NeighbourIndex {
+                        iface: *interface.handle(),
+                        addr: *source_addr,
+                    },
+                )?;
+                return Ok(());
+            }
+
+            let requested_router_id = RouterId::from(seqno_req.router_id());
+
+            if requested_router_id == selected_route.source().router_id
+                && seqno_req.seqno() > selected_route.seqno
+            {
+                if requested_router_id == self.id {
+                    selected_route.seqno += 1;
+                    self.update_queue.queue_route_response(
+                        now,
+                        interface,
+                        *selected_route.destination(),
+                        NeighbourIndex {
+                            iface: *interface.handle(),
+                            addr: *source_addr,
+                        },
+                    )?;
+                } else if seqno_req.hop_count() >= 2 {
+                    let request = SeqnoRequest::new(
+                        now,
+                        prefix,
+                        seqno_req.plen(),
+                        requested_router_id,
+                        seqno_req.seqno(),
+                        Some(NeighbourIndex {
+                            iface: *interface.handle(),
+                            addr: *source_addr,
+                        }),
+                        DEFAULT_REQUEST_RETRIES,
+                        Duration::from_secs(DEFAULT_REQUEST_INTERVAL_SEC).into(),
+                        seqno_req.hop_count(),
+                    );
+
+                    if let Err(err) = self.pending_seqno.insert(request) {
+                        b_debug!("Err: {:?}", err);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Decides whether an IHU was meant for this node.
@@ -699,10 +811,9 @@ mod test {
     /// `Instant::now` is `std` only, and it would put the router's birth decades ahead of the `t0`
     /// every test below starts from.
     fn router(name: &'static str) -> BabelRouter<'static> {
-        BabelRouter::new(
-            Instant::from_secs(0),
-            BabelRouterConfig::new(RouterId::try_from(name).expect("bad router id")),
-        )
+        BabelRouter::new(BabelRouterConfig::new(
+            RouterId::try_from(name).expect("bad router id"),
+        ))
     }
 
     fn iface_handle(name: &str) -> InterfaceHandle {
@@ -815,6 +926,37 @@ mod test {
                     .expect("route request should write")
                     .finish_tlv()
                     .expect("route request should finish"),
+            )
+        }
+
+        /// `prefix` is the Prefix field as it goes on the wire, the same as for
+        /// [`Self::route_request`]: Plen/8 rounded upwards, less what `ae` implies, uncompressed.
+        #[allow(
+            clippy::too_many_arguments,
+            reason = "one argument per field of the TLV"
+        )]
+        fn seqno_request(
+            self,
+            ae: u8,
+            plen: u8,
+            seqno: u16,
+            hop_count: u8,
+            router_id: [u8; 8],
+            prefix: &[u8],
+        ) -> Self {
+            Self(
+                self.0
+                    .write_seqno_request(
+                        ae,
+                        plen,
+                        SeqNo(seqno),
+                        hop_count,
+                        RouterId::from(&router_id),
+                        prefix,
+                    )
+                    .expect("seqno request should write")
+                    .finish_tlv()
+                    .expect("seqno request should finish"),
             )
         }
 
@@ -5029,6 +5171,720 @@ mod test {
             request(&mut r, t0, iface, NEIGHBOUR_2_ADDR, AE_WILDCARD, 0, &[]);
 
             assert_eq!(sent_updates(&mut r, t0, iface), alloc::vec![]);
+        }
+    }
+
+    //  ___ ___ ___  _  _  ___    ___ ___ ___  _   _ ___ ___ _____ ___
+    // / __| __/ _ \| \| |/ _ \  | _ \ __/ _ \| | | | __/ __|_   _/ __|
+    // \__ \ _| (_) | .` | (_) | |   / _| (_) | |_| | _|\__ \ | | \__ \
+    // |___/___\__\_\_|\_|\___/  |_|_\___\__\_\\___/|___|___/ |_| |___/
+
+    /// RFC 8966 [3.8.1.2](https://datatracker.ietf.org/doc/html/rfc8966#name-seqno-requests):
+    ///
+    /// > When a node receives a seqno request for a given router-id and sequence number, it checks
+    /// > whether its route table contains a selected entry for that prefix. If a selected route for
+    /// > the given prefix exists and has finite metric, and either the router-ids are different or
+    /// > the router-ids are equal and the entry's sequence number is no smaller (modulo 2^16) than
+    /// > the requested sequence number, the node MUST send an update for the given prefix. If the
+    /// > router-ids match but the requested seqno is larger (modulo 2^16) than the route entry's,
+    /// > the node compares the router-id against its own router-id. If the router-id is its own,
+    /// > then it increases its sequence number by 1 (modulo 2^16) and sends an update. A node MUST
+    /// > NOT increase its sequence number by more than 1 in reaction to a single seqno request.
+    /// >
+    /// > Otherwise, if the requested router-id is not its own, the received request's Hop Count is
+    /// > 2 or more, and the node is advertising the prefix to its neighbours, the node selects a
+    /// > neighbour to forward the request to [...]
+    ///
+    /// So a request ends in one of three ways, and the tests below are grouped by them: it is
+    /// answered (an update owed to the requester), it is forwarded (an entry in the pending seqno
+    /// table, held on the requester's behalf), or it is dropped. The forwarding itself — choosing
+    /// the next hop and putting the request back on the wire — belongs to the poll, so what is
+    /// checked here is only that the entry it will work from was filed correctly.
+    mod seqno_requests {
+        use super::*;
+
+        /// The only encoding these tests ask in. AE 0 is the one a seqno request may not use.
+        const AE_IPV6: u8 = 2;
+        const AE_WILDCARD: u8 = 0;
+
+        /// The seqno the route below is advertised with, and requests either side of it.
+        const ROUTE_SEQNO: u16 = 10;
+        const OLDER_SEQNO: u16 = ROUTE_SEQNO - 5;
+        const NEWER_SEQNO: u16 = ROUTE_SEQNO + 10;
+
+        /// A Hop Count that leaves room to forward, and the one that does not.
+        const HOPS: u8 = 3;
+        const LAST_HOP: u8 = 1;
+
+        /// An interface with [`NEIGHBOUR_1_ADDR`], [`NEIGHBOUR_2_ADDR`] and [`NEIGHBOUR_3_ADDR`]
+        /// established on it. The route is always learned from neighbour 1 and the request always
+        /// comes from neighbour 2, so "answered the requester" and "answered the next hop" come
+        /// out different.
+        fn three_neighbours(r: &mut BabelRouter<'static>, now: Instant) -> InterfaceHandle {
+            let iface = drained_iface(r, now, "iface_1");
+            for addr in [NEIGHBOUR_1_ADDR, NEIGHBOUR_2_ADDR, NEIGHBOUR_3_ADDR] {
+                established_neighbour(r, now, iface, addr);
+            }
+            iface
+        }
+
+        /// A router holding one selected route, `PREFIX_A/64` at [`ROUTE_SEQNO`], learned from
+        /// [`NEIGHBOUR_1_ADDR`] and originated by `origin`, with nothing owed to anybody.
+        fn one_route(
+            r: &mut BabelRouter<'static>,
+            now: Instant,
+            origin: [u8; 8],
+        ) -> InterfaceHandle {
+            let iface = three_neighbours(r, now);
+            send_updates(
+                r,
+                now,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                origin,
+                &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).seqno(ROUTE_SEQNO)],
+            );
+            assert!(
+                is_selected(r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN),
+                "the only route to the destination should hold it"
+            );
+            drain_updates(r);
+            iface
+        }
+
+        /// The router-id this node goes by, as it would arrive in a Router-Id TLV.
+        fn own_id(r: &BabelRouter<'static>) -> [u8; 8] {
+            *r.id.as_octets()
+        }
+
+        /// Sends a Seqno Request for `PREFIX_A/64` from `from` over unicast, and runs the tick
+        /// `handle_input` requires of its caller.
+        ///
+        /// A TLV the router cannot handle is skipped rather than failing the packet, so this
+        /// expects `Ok` even of the requests that are meant to be dropped; what became of one is
+        /// read off the update queue and the pending seqno table.
+        fn request(
+            r: &mut BabelRouter<'static>,
+            now: Instant,
+            iface: InterfaceHandle,
+            from: Ipv6Addr,
+            seqno: u16,
+            hop_count: u8,
+            router_id: [u8; 8],
+        ) {
+            request_with_ae(r, now, iface, from, AE_IPV6, seqno, hop_count, router_id);
+        }
+
+        /// [`request`] with the encoding chosen by the caller.
+        #[allow(
+            clippy::too_many_arguments,
+            reason = "one argument per field under test"
+        )]
+        fn request_with_ae(
+            r: &mut BabelRouter<'static>,
+            now: Instant,
+            iface: InterfaceHandle,
+            from: Ipv6Addr,
+            ae: u8,
+            seqno: u16,
+            hop_count: u8,
+            router_id: [u8; 8],
+        ) {
+            let pkt = PacketBuilder::new()
+                .seqno_request(ae, PLEN, seqno, hop_count, router_id, &PREFIX_A_WIRE)
+                .build();
+            r.handle_input(now, receive(iface, from, ReceiveDestination::Unicast, &pkt))
+                .expect("a seqno request must never fail the packet it arrived in");
+            tick(r, now);
+        }
+
+        /// Every update the router owes, reduced to who it is owed to and for what.
+        fn answers(r: &mut BabelRouter<'static>) -> Vec<UpdateIndex<NoExtension>> {
+            pending_updates(r)
+                .iter()
+                .map(|(_, update)| update.key())
+                .collect()
+        }
+
+        /// The answer to a request for `PREFIX_A/64` from neighbour 2.
+        fn answer_to_requester(iface: InterfaceHandle) -> UpdateIndex<NoExtension> {
+            UpdateIndex {
+                destination: dest(PREFIX_A, PLEN),
+                neighbour: nbr_idx(iface, NEIGHBOUR_2_ADDR),
+            }
+        }
+
+        /// A pending seqno table entry, reduced to what the poll will forward it from.
+        #[derive(Debug, PartialEq, Eq)]
+        struct Pending {
+            prefix: Address<NoExtension>,
+            plen: u8,
+            router_id: RouterId,
+            seqno: SeqNo,
+            on_behalf_of: Option<NeighbourIndex<NoExtension>>,
+            hop_count: u8,
+        }
+
+        impl Pending {
+            /// A request for `PREFIX_A/64` forwarded on behalf of neighbour 2.
+            fn for_requester(
+                iface: InterfaceHandle,
+                router_id: [u8; 8],
+                seqno: u16,
+                hop_count: u8,
+            ) -> Self {
+                Self {
+                    prefix: PREFIX_A.into(),
+                    plen: PLEN,
+                    router_id: RouterId::from(&router_id),
+                    seqno: SeqNo(seqno),
+                    on_behalf_of: Some(nbr_idx(iface, NEIGHBOUR_2_ADDR)),
+                    hop_count,
+                }
+            }
+        }
+
+        fn pending_requests(r: &BabelRouter<'static>) -> Vec<Pending> {
+            r.pending_seqno
+                .inner
+                .iter()
+                .map(|req| Pending {
+                    prefix: *req.prefix(),
+                    plen: *req.prefix_len(),
+                    router_id: *req.router_id(),
+                    seqno: req.seqno,
+                    on_behalf_of: req.neighbour,
+                    hop_count: *req.hop_count(),
+                })
+                .collect()
+        }
+
+        fn route_seqno(r: &mut BabelRouter<'static>, iface: InterfaceHandle) -> SeqNo {
+            route_for(r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN)
+                .expect("the route should still be in the table")
+                .seqno
+        }
+
+        //    _   _  _ _____      _____ ___ ___ ___
+        //   /_\ | \| / __\ \    / / __| _ \ __|   \
+        //  / _ \| .` \__ \\ \/\/ /| _||   / _|| |) |
+        // /_/ \_\_|\_|___/ \_/\_/ |___|_|_\___|___/
+
+        /// The selected route already carries the seqno that was asked for, so this node can
+        /// satisfy the request itself: it owes the requester an update, and nobody else anything.
+        #[test]
+        fn a_request_for_the_seqno_the_route_already_has_is_answered() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0, ORIGIN_1);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                ROUTE_SEQNO,
+                HOPS,
+                ORIGIN_1,
+            );
+
+            assert_eq!(answers(&mut r), alloc::vec![answer_to_requester(iface)]);
+            assert_eq!(
+                pending_requests(&r),
+                alloc::vec![],
+                "a request this node can satisfy is not forwarded"
+            );
+        }
+
+        /// "no smaller (modulo 2^16)" — a seqno the route has already moved past is satisfied
+        /// just the same.
+        #[test]
+        fn a_request_for_an_older_seqno_is_answered() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0, ORIGIN_1);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                OLDER_SEQNO,
+                HOPS,
+                ORIGIN_1,
+            );
+
+            assert_eq!(answers(&mut r), alloc::vec![answer_to_requester(iface)]);
+            assert_eq!(pending_requests(&r), alloc::vec![]);
+            assert_eq!(
+                route_seqno(&mut r, iface),
+                SeqNo(ROUTE_SEQNO),
+                "answering does not touch the route's seqno"
+            );
+        }
+
+        /// Modulo 2^16: a route at seqno 2 is newer than a request for 65534, so the request is
+        /// satisfied even though the number on the route is smaller.
+        #[test]
+        fn a_request_for_a_seqno_from_before_a_wraparound_is_answered() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = three_neighbours(&mut r, t0);
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).seqno(2)],
+            );
+            drain_updates(&mut r);
+
+            request(&mut r, t0, iface, NEIGHBOUR_2_ADDR, 65534, HOPS, ORIGIN_1);
+
+            assert_eq!(answers(&mut r), alloc::vec![answer_to_requester(iface)]);
+            assert_eq!(pending_requests(&r), alloc::vec![]);
+        }
+
+        /// "either the router-ids are different or [...]" — a request names the originator it
+        /// wants a newer seqno from. If the selected route comes from a different originator, the
+        /// requester's starvation is already over: an update from this node carries a router-id it
+        /// has no feasibility history for. So the node answers whatever the seqno says.
+        #[test]
+        fn a_request_naming_a_different_router_id_is_answered() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0, ORIGIN_1);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                NEWER_SEQNO,
+                HOPS,
+                ORIGIN_2,
+            );
+
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![answer_to_requester(iface)],
+                "the selected route's originator is not the one the request names"
+            );
+            assert_eq!(
+                pending_requests(&r),
+                alloc::vec![],
+                "and there is nothing to forward a request for an originator this node does not \
+                 route through"
+            );
+        }
+
+        /// The originator of the route is this node, so this node is the one the requested seqno
+        /// has to come from. It is raised by exactly one, however far ahead the request is — "A
+        /// node MUST NOT increase its sequence number by more than 1 in reaction to a single seqno
+        /// request" — and the requester is answered with the new one.
+        #[test]
+        fn a_request_to_the_originator_raises_its_seqno_by_one_and_is_answered() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let origin = own_id(&r);
+            let iface = one_route(&mut r, t0, origin);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                NEWER_SEQNO,
+                HOPS,
+                origin,
+            );
+
+            assert_eq!(
+                route_seqno(&mut r, iface),
+                SeqNo(ROUTE_SEQNO + 1),
+                "one step, not all the way to the requested seqno"
+            );
+            assert_eq!(answers(&mut r), alloc::vec![answer_to_requester(iface)]);
+            assert_eq!(
+                pending_requests(&r),
+                alloc::vec![],
+                "the originator has nobody to forward to"
+            );
+        }
+
+        /// The Hop Count limits how far a request travels, not whether the originator answers
+        /// it: a request with no hops left to spend still reaches the node it was meant for.
+        #[test]
+        fn a_last_hop_request_to_the_originator_is_still_answered() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let origin = own_id(&r);
+            let iface = one_route(&mut r, t0, origin);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                NEWER_SEQNO,
+                LAST_HOP,
+                origin,
+            );
+
+            assert_eq!(route_seqno(&mut r, iface), SeqNo(ROUTE_SEQNO + 1));
+            assert_eq!(answers(&mut r), alloc::vec![answer_to_requester(iface)]);
+        }
+
+        //  ___ ___  _____      ___   ___ ___  ___ ___
+        // | __/ _ \| _ \ \    / /_\ | _ \   \| __|   \
+        // | _| (_) |   /\ \/\/ / _ \|   / |) | _|| |) |
+        // |_| \___/|_|_\ \_/\_/_/ \_\_|_\___/|___|___/
+
+        /// The seqno asked for is newer than anything this node has, and the originator is
+        /// somebody else, so the only way to satisfy it is to pass it on. The entry is filed under
+        /// exactly what was asked for, on behalf of the neighbour that asked — that is who the
+        /// reply is relayed to when it arrives — and carries the Hop Count the poll will decrement
+        /// when it forwards it.
+        #[test]
+        fn a_request_for_a_newer_seqno_is_forwarded_on_behalf_of_the_requester() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0, ORIGIN_1);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                NEWER_SEQNO,
+                HOPS,
+                ORIGIN_1,
+            );
+
+            assert_eq!(
+                pending_requests(&r),
+                alloc::vec![Pending::for_requester(iface, ORIGIN_1, NEWER_SEQNO, HOPS)],
+            );
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![],
+                "an update at the old seqno would not satisfy the requester, so none is owed yet"
+            );
+            assert_eq!(
+                route_seqno(&mut r, iface),
+                SeqNo(ROUTE_SEQNO),
+                "only the originator may raise a route's seqno"
+            );
+        }
+
+        /// 4.6.11: "A request MUST NOT be forwarded if its Hop Count field is 1." And with this
+        /// node unable to satisfy it either, there is nothing left to do with it.
+        #[test]
+        fn a_last_hop_request_is_not_forwarded() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0, ORIGIN_1);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                NEWER_SEQNO,
+                LAST_HOP,
+                ORIGIN_1,
+            );
+
+            assert_eq!(pending_requests(&r), alloc::vec![]);
+            assert_eq!(answers(&mut r), alloc::vec![]);
+        }
+
+        /// A Hop Count of 2 is the smallest that may still be forwarded: it arrives at the next
+        /// hop as 1.
+        #[test]
+        fn a_request_with_two_hops_left_is_forwarded() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0, ORIGIN_1);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                NEWER_SEQNO,
+                2,
+                ORIGIN_1,
+            );
+
+            assert_eq!(
+                pending_requests(&r),
+                alloc::vec![Pending::for_requester(iface, ORIGIN_1, NEWER_SEQNO, 2)],
+            );
+        }
+
+        /// "A node SHOULD compare every incoming seqno request against its list of recently
+        /// forwarded seqno requests and avoid forwarding the request if it is redundant." A request
+        /// for an older seqno than one already in flight is satisfied by the reply to that one, so
+        /// it does not displace it. A newer one does.
+        #[test]
+        fn a_redundant_request_does_not_displace_the_one_already_forwarded() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0, ORIGIN_1);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                NEWER_SEQNO,
+                HOPS,
+                ORIGIN_1,
+            );
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                NEWER_SEQNO - 1,
+                HOPS,
+                ORIGIN_1,
+            );
+
+            assert_eq!(
+                pending_requests(&r),
+                alloc::vec![Pending::for_requester(iface, ORIGIN_1, NEWER_SEQNO, HOPS)],
+                "the request already in flight asks for more than the second one did"
+            );
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                NEWER_SEQNO + 1,
+                HOPS,
+                ORIGIN_1,
+            );
+
+            assert_eq!(
+                pending_requests(&r),
+                alloc::vec![Pending::for_requester(
+                    iface,
+                    ORIGIN_1,
+                    NEWER_SEQNO + 1,
+                    HOPS
+                )],
+                "a request for more than is in flight replaces it rather than sitting beside it"
+            );
+        }
+
+        //  ___  ___  ___  ___ ___ ___ ___
+        // |   \| _ \/ _ \| _ \ _ \ __|   \
+        // | |) |   / (_) |  _/  _/ _|| |) |
+        // |___/|_|_\\___/|_| |_| |___|___/
+
+        /// "it checks whether its route table contains a selected entry for that prefix" — with no
+        /// such entry, there is no update to send and no next hop to forward to.
+        #[test]
+        fn a_request_for_a_prefix_with_no_selected_route_is_dropped() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = three_neighbours(&mut r, t0);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                NEWER_SEQNO,
+                HOPS,
+                ORIGIN_1,
+            );
+
+            assert_eq!(answers(&mut r), alloc::vec![]);
+            assert_eq!(pending_requests(&r), alloc::vec![]);
+        }
+
+        /// A route that was retracted stays in the table at an infinite metric but holds nothing,
+        /// so it is no more a selected entry than a route that was never heard of.
+        #[test]
+        fn a_request_for_a_retracted_prefix_is_dropped() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0, ORIGIN_1);
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE)],
+            );
+            drain_updates(&mut r);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                ROUTE_SEQNO,
+                HOPS,
+                ORIGIN_1,
+            );
+
+            assert_eq!(answers(&mut r), alloc::vec![]);
+            assert_eq!(pending_requests(&r), alloc::vec![]);
+        }
+
+        /// The same, before route selection has had a chance to run: a retraction and a request
+        /// for the prefix it retracts, in one packet. The route is still marked selected when the
+        /// request is handled, but its metric is already infinite, and 3.8.1.2 only acts on "a
+        /// selected route [...] [that] has finite metric".
+        ///
+        /// This is reachable by anybody on the link, so it must not take the router down.
+        #[test]
+        fn a_request_behind_a_retraction_in_the_same_packet_is_dropped() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0, ORIGIN_1);
+
+            let pkt = PacketBuilder::new()
+                .update(&UpdateTlv::retraction_of(PLEN, &PREFIX_A_WIRE))
+                .seqno_request(AE_IPV6, PLEN, NEWER_SEQNO, HOPS, ORIGIN_1, &PREFIX_A_WIRE)
+                .build();
+            r.handle_input(
+                t0,
+                receive(iface, NEIGHBOUR_1_ADDR, ReceiveDestination::Unicast, &pkt),
+            )
+            .expect("a seqno request must never fail the packet it arrived in");
+
+            assert_eq!(pending_requests(&r), alloc::vec![]);
+        }
+
+        /// 4.6.11: AE 0 is not allowed in a seqno request — there is no such thing as a wildcard
+        /// seqno, since a seqno belongs to one prefix.
+        #[test]
+        fn a_request_with_the_wildcard_encoding_is_dropped() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0, ORIGIN_1);
+
+            request_with_ae(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                AE_WILDCARD,
+                ROUTE_SEQNO,
+                HOPS,
+                ORIGIN_1,
+            );
+
+            assert_eq!(answers(&mut r), alloc::vec![]);
+            assert_eq!(pending_requests(&r), alloc::vec![]);
+        }
+
+        /// 4.6.11: the Hop Count MUST NOT be 0. A request that has already run out of hops should
+        /// never have been sent, so it is not acted on even where a valid one would be answered.
+        #[test]
+        fn a_request_with_a_hop_count_of_zero_is_dropped() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0, ORIGIN_1);
+
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                ROUTE_SEQNO,
+                0,
+                ORIGIN_1,
+            );
+
+            assert_eq!(answers(&mut r), alloc::vec![]);
+            assert_eq!(pending_requests(&r), alloc::vec![]);
+        }
+
+        /// An answer is owed to a *neighbour*, and an address the neighbour table has never heard
+        /// of names nobody to owe it to — the same rule route requests follow. Acting anyway would
+        /// let an off-link address make this node send updates, or file forwarding state on its
+        /// behalf.
+        #[test]
+        fn a_request_from_an_unknown_neighbour_is_dropped() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = drained_iface(&mut r, t0, "iface_1");
+            established_neighbour(&mut r, t0, iface, NEIGHBOUR_1_ADDR);
+            send_updates(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                &[UpdateTlv::v6(PLEN, &PREFIX_A_WIRE, 100).seqno(ROUTE_SEQNO)],
+            );
+            drain_updates(&mut r);
+
+            // Neighbour 2 was never established: no hello of its own has ever arrived.
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                ROUTE_SEQNO,
+                HOPS,
+                ORIGIN_1,
+            );
+            request(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_2_ADDR,
+                NEWER_SEQNO,
+                HOPS,
+                ORIGIN_1,
+            );
+
+            assert_eq!(answers(&mut r), alloc::vec![]);
+            assert_eq!(pending_requests(&r), alloc::vec![]);
+        }
+
+        /// TLVs in a packet are independent, so a request the router rejects must be skipped
+        /// rather than aborting the ones behind it.
+        #[test]
+        fn a_malformed_request_does_not_discard_the_requests_behind_it() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = one_route(&mut r, t0, ORIGIN_1);
+
+            let pkt = PacketBuilder::new()
+                .seqno_request(
+                    AE_WILDCARD,
+                    PLEN,
+                    ROUTE_SEQNO,
+                    HOPS,
+                    ORIGIN_1,
+                    &PREFIX_A_WIRE,
+                )
+                .seqno_request(AE_IPV6, PLEN, ROUTE_SEQNO, 0, ORIGIN_1, &PREFIX_A_WIRE)
+                .seqno_request(AE_IPV6, PLEN, ROUTE_SEQNO, HOPS, ORIGIN_1, &PREFIX_A_WIRE)
+                .build();
+            r.handle_input(
+                t0,
+                receive(iface, NEIGHBOUR_2_ADDR, ReceiveDestination::Unicast, &pkt),
+            )
+            .expect("a seqno request must never fail the packet it arrived in");
+            tick(&mut r, t0);
+
+            assert_eq!(
+                answers(&mut r),
+                alloc::vec![answer_to_requester(iface)],
+                "the third request was still answered"
+            );
         }
     }
 }

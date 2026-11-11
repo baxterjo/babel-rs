@@ -18,6 +18,7 @@ pub struct BabelRouterConfig {
     pub(crate) version: u8,
     pub(crate) update_interval: Interval,
     pub(crate) route_expiry_multiplier: DurationMultiplier,
+    pub(crate) starting_seqno: u16,
 }
 
 impl BabelRouterConfig {
@@ -32,6 +33,7 @@ impl BabelRouterConfig {
             version: PacketHeader::VERSION_NUMBER,
             update_interval: DEFAULT_UPDATE_INTERVAL,
             route_expiry_multiplier: DEFAULT_ROUTE_EXPIRY_TIME,
+            starting_seqno: 0,
         }
     }
 
@@ -60,5 +62,13 @@ impl BabelRouterConfig {
     /// expiry.
     pub fn set_route_expiry(&mut self, multiplier: DurationMultiplier) {
         self.route_expiry_multiplier = multiplier;
+    }
+
+    /// Sets the starting seqno of the router.
+    ///
+    /// This seqno is what the router broadcasts for self originated routes. It is global to all
+    /// self originated routes.
+    pub fn set_starting_seqno(&mut self, seqno: u16) {
+        self.starting_seqno = seqno
     }
 }
