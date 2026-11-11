@@ -4,7 +4,7 @@ use crate::utils::storage::{InsertError, Table};
 use crate::utils::{InternallyKeyed, ManagedSlice};
 
 pub struct PendingSeqnoRequestTable<'storage, A: AddressExt> {
-    inner: Table<'storage, Option<SeqnoRequest<A>>>,
+    pub(crate) inner: Table<'storage, Option<SeqnoRequest<A>>>,
 }
 
 impl<'storage, A> PendingSeqnoRequestTable<'storage, A>
