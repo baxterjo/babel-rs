@@ -11,6 +11,7 @@ use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoReque
 use crate::data_structures::route::{Route, RouteIndex, RouteTable};
 use crate::data_structures::source::{Source, SourceTable};
 use crate::data_structures::updates::{Update, UpdateQueue};
+use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Address, RouterId};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
@@ -35,6 +36,8 @@ where
     pub(crate) magic_number: u8,
 
     pub(crate) version_number: u8,
+
+    pub(crate) route_seqno: SeqNo,
 
     // Tables
     pub(crate) iface_table: InterfaceTable<'storage, A>,
@@ -118,6 +121,7 @@ where
             id: config.id,
             magic_number: config.magic_number,
             version_number: config.version,
+            route_seqno: SeqNo(config.starting_seqno),
             iface_table: InterfaceTable::new_with_storage(interface_table),
             neighbor_table: NeighbourTable::new_with_storage(neighbour_table),
             pending_seqno: PendingSeqnoRequestTable::new_with_storage(pending_seqno_table),
@@ -128,6 +132,10 @@ where
             _state_ext_marker: PhantomData,
             _addr_ext_marker: PhantomData,
         }
+    }
+
+    pub fn route_seqno(&self) -> u16 {
+        self.route_seqno.0
     }
 
     /// Register a new interface with the router.
