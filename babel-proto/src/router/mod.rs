@@ -7,6 +7,10 @@ use crate::data_structures::interface::{
 use crate::data_structures::neighbour::{
     Neighbour, NeighbourConfig, NeighbourIndex, NeighbourTable,
 };
+use crate::data_structures::originated_route::originated_route_entry::{
+    OriginatedRoute, OriginatedRouteIndex,
+};
+use crate::data_structures::originated_route::originated_route_table::OriginatedRouteTable;
 use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
 use crate::data_structures::route::{Route, RouteIndex, RouteTable};
 use crate::data_structures::source::{Source, SourceTable};
@@ -52,6 +56,8 @@ where
 
     pub(crate) update_queue: UpdateQueue<'storage, A>,
 
+    pub(crate) originated_routes: OriginatedRouteTable<'storage, A>,
+
     // Router state
     pub(crate) route_selection_due: bool,
 
@@ -78,6 +84,7 @@ where
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         )
     }
 
@@ -96,10 +103,11 @@ where
             storage.route_table,
             storage.source_table,
             storage.update_queue,
+            storage.originated_routes,
         )
     }
 
-    fn new_with_storage_inner<IF, N, PS, R, S, U>(
+    fn new_with_storage_inner<IF, N, PS, R, S, U, OR>(
         now: Instant,
         config: BabelRouterConfig,
         interface_table: IF,
@@ -108,6 +116,7 @@ where
         route_table: R,
         source_table: S,
         update_queue: U,
+        originated_routes: OR,
     ) -> Self
     where
         IF: Into<ManagedSlice<'storage, Option<Interface<A>>>>,
@@ -116,6 +125,7 @@ where
         R: Into<ManagedSlice<'storage, Option<Route<A>>>>,
         S: Into<ManagedSlice<'storage, Option<Source<A>>>>,
         U: Into<ManagedSlice<'storage, Option<Update<A>>>>,
+        OR: Into<ManagedSlice<'storage, Option<OriginatedRoute<A>>>>,
     {
         Self {
             id: config.id,
@@ -128,6 +138,7 @@ where
             route_table: RouteTable::new_with_storage(route_table, config.route_expiry_multiplier),
             source_table: SourceTable::new_with_storage(source_table),
             update_queue: UpdateQueue::new_with_storage(update_queue),
+            originated_routes: OriginatedRouteTable::new_with_storage(originated_routes),
             route_selection_due: false,
             _state_ext_marker: PhantomData,
             _addr_ext_marker: PhantomData,
@@ -151,6 +162,44 @@ where
         A: AddressExt,
     {
         Ok(self.iface_table.register_interface(now, config)?)
+    }
+
+    /// Inserts a self originated route into the protocol.
+    ///
+    /// This route has no expiration, the metric must be maintained by the user.
+    pub fn originate_route(
+        &mut self,
+        now: Instant,
+        route: OriginatedRouteIndex<A>,
+        metric: Metric,
+    ) -> Result<(), BabelError<A>> {
+        if metric.is_infinite() {
+            self.remove_originated_route(now, route);
+            return Ok(());
+        }
+
+        if let Some(old_route) = self.originated_routes.inner.get_mut_by_key(&route) {
+            old_route.metric = metric;
+            return Ok(());
+        }
+
+        Ok(self.originated_routes.insert_route(route, metric)?)
+    }
+
+    pub fn remove_originated_route(&mut self, now: Instant, route: OriginatedRouteIndex<A>) {
+        if self.originated_routes.inner.get_by_key(&route).is_none() {
+            b_trace!("Tried to remove non-existant route.");
+            return;
+        }
+
+        self.originated_routes.inner.free(&route);
+
+        self.update_queue.queue_triggered_update(
+            now,
+            &route.destination,
+            &self.iface_table,
+            &self.neighbor_table,
+        );
     }
 
     /// Add a new neighbour to the router.
@@ -299,7 +348,7 @@ where
                             if prev_opt.is_none_or(|p| p != win) {
                                 self.update_queue.queue_triggered_update(
                                     now,
-                                    route,
+                                    route.destination(),
                                     &self.iface_table,
                                     &self.neighbor_table,
                                 );
@@ -312,7 +361,7 @@ where
                         if prev == route.key() && route.computed_metric() == &Metric::INFINITY {
                             self.update_queue.queue_triggered_update(
                                 now,
-                                route,
+                                route.destination(),
                                 &self.iface_table,
                                 &self.neighbor_table,
                             );

@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
 use crate::data_structures::neighbour::{NeighbourError, NeighbourIndex};
+use crate::data_structures::originated_route::OriginatedRouteError;
 use crate::data_structures::route::RouteError;
 use crate::data_structures::updates::UpdateError;
 use crate::data_types::address::AddressError;
@@ -65,4 +66,6 @@ where
     Timer(#[from] TimerError),
     #[error(transparent)]
     Update(#[from] UpdateError),
+    #[error(transparent)]
+    OriginatedRoute(#[from] OriginatedRouteError),
 }

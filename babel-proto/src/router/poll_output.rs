@@ -344,6 +344,7 @@ where
                 self.update_queue.queue_periodic_update(
                     now,
                     &self.route_table,
+                    &self.originated_routes,
                     interface,
                     &self.neighbor_table,
                 );

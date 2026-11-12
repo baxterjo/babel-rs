@@ -149,6 +149,7 @@ where
         Ok(())
     }
 
+    /// Frees the slot that contains the given key.
     pub(crate) fn free(&mut self, key: &<S::Value as InternallyKeyed>::Key) {
         check_sorted!(self);
         if let Some(idx) = locate(&self.0[..], key) {

@@ -1,5 +1,6 @@
 use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTable};
 use crate::data_structures::neighbour::{NeighbourIndex, NeighbourTable};
+use crate::data_structures::originated_route::originated_route_table::OriginatedRouteTable;
 use crate::data_structures::route::{Route, RouteTable};
 use crate::data_structures::source::SourceTable;
 use crate::data_structures::updates::{Update, UpdateError};
@@ -40,7 +41,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
     pub(crate) fn queue_triggered_update(
         &mut self,
         now: Instant,
-        route: &Route<A>,
+        destination: &RouteDestination<A>,
         interfaces: &InterfaceTable<A>,
         neighbours: &NeighbourTable<A>,
     ) {
@@ -49,7 +50,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                 if let Err(err) = self.add_update(
                     Update::new(
                         now,
-                        *route.destination(),
+                        *destination,
                         neighbour.key(),
                         !interface.prefer_ucast,
                         false,
@@ -58,7 +59,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                     ),
                     true,
                 ) {
-                    b_debug!("Failed to add update for {:?} - {:?}", route, err);
+                    b_debug!("Failed to add update for {:?} - {:?}", destination, err);
                 };
             }
         }
@@ -69,11 +70,31 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
         &mut self,
         now: Instant,
         routes: &RouteTable<A>,
+        originated_routes: &OriginatedRouteTable<A>,
         interface: &Interface<A>,
         neighbours: &NeighbourTable<A>,
     ) {
-        for route in routes.inner.iter().filter(|r| r.selected) {
-            for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
+        for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
+            // Queue updates for all originated routes.
+            for o_route in originated_routes.inner.iter() {
+                if let Err(err) = self.add_update(
+                    Update::new(
+                        now,
+                        o_route.destination,
+                        neighbour.key(),
+                        !interface.prefer_ucast,
+                        false,
+                        *interface.update_retry_interval,
+                        1,
+                    ),
+                    false,
+                ) {
+                    b_debug!("Failed to add update for {:?} - {:?}", o_route.key(), err);
+                };
+            }
+
+            // Queue updates for all selected routes.
+            for route in routes.inner.iter().filter(|r| r.selected) {
                 if let Err(err) = self.add_update(
                     Update::new(
                         now,
@@ -184,7 +205,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
         //
         // This method is short-circuiting, so any iteration that returns true will stop the
         // iterator.
-        let update_due = !self.inner.iter().any(|u| {
+        let update_due = self.inner.iter().any(|u| {
             if let Some(remaining) = u.send_timer.time_remaining(now) {
                 // In the case that no updates are due, this will ensure the next poll is updated.
                 *next_poll = remaining.min(*next_poll);
@@ -195,7 +216,8 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
             }
         });
 
-        if update_due {
+        // If no update is due, return.
+        if !update_due {
             return Ok(writer);
         }
 

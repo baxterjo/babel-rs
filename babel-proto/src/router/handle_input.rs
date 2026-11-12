@@ -563,7 +563,7 @@ where
                         if was_selected {
                             self.update_queue.queue_triggered_update(
                                 now,
-                                route,
+                                route.destination(),
                                 &self.iface_table,
                                 &self.neighbor_table,
                             );

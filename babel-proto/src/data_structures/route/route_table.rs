@@ -37,7 +37,7 @@ impl<'storage, A> RouteTable<'storage, A>
 where
     A: AddressExt,
 {
-    /// Create a new source table with user provided storage.
+    /// Create a new route table with user provided storage.
     ///
     /// While interfaces are generally well known at compile time, the number of routes this
     /// Babel speaker might see is specific to its deployment. So it is important to right size
@@ -128,7 +128,12 @@ where
             if route.selected
                 && route.computed_metric().abs_diff(old_computed) > METRIC_DIFFERENCE_THRESHOLD
             {
-                update_queue.queue_triggered_update(now, route, interfaces, neighbours);
+                update_queue.queue_triggered_update(
+                    now,
+                    route.destination(),
+                    interfaces,
+                    neighbours,
+                );
             }
         }
     }

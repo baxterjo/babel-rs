@@ -3,6 +3,7 @@
 
 use crate::data_structures::interface::Interface;
 use crate::data_structures::neighbour::Neighbour;
+use crate::data_structures::originated_route::originated_route_entry::OriginatedRoute;
 use crate::data_structures::pending_seqno::SeqnoRequest;
 use crate::data_structures::route::Route;
 use crate::data_structures::source::Source;
@@ -62,6 +63,7 @@ impl<T> MaybeDefmt for T {}
 /// * `R`: Maximum number of routes
 /// * `S`: Maximum number of sources
 /// * `PS`: Maximum number of pending seqno requests.
+/// * `OR`: Maximum number of routes that will be advertised by this router.
 pub struct BabelMemoryPool<
     A: AddressExt,
     const I: usize,
@@ -69,6 +71,7 @@ pub struct BabelMemoryPool<
     const R: usize,
     const S: usize,
     const PS: usize,
+    const OR: usize,
 > {
     interface_table: [Option<Interface<A>>; I],
     neighbour_table: [Option<Neighbour<A>>; N],
@@ -77,6 +80,7 @@ pub struct BabelMemoryPool<
     pending_seqno_table: [Option<SeqnoRequest<A>>; PS],
     /// The maximum possible number of updates is the maximum routes * maximum neighbours.
     update_queue: [[Option<Update<A>>; N]; R],
+    originated_routes: [Option<OriginatedRoute<A>>; OR],
 }
 
 pub struct BorrowedMemoryPool<'storage, A: AddressExt> {
@@ -86,18 +90,33 @@ pub struct BorrowedMemoryPool<'storage, A: AddressExt> {
     pub(crate) source_table: &'storage mut [Option<Source<A>>],
     pub(crate) pending_seqno_table: &'storage mut [Option<SeqnoRequest<A>>],
     pub(crate) update_queue: &'storage mut [Option<Update<A>>],
+    pub(crate) originated_routes: &'storage mut [Option<OriginatedRoute<A>>],
 }
 
-impl<A: AddressExt, const I: usize, const N: usize, const R: usize, const S: usize, const PS: usize>
-    Default for BabelMemoryPool<A, I, N, R, S, PS>
+impl<
+    A: AddressExt,
+    const I: usize,
+    const N: usize,
+    const R: usize,
+    const S: usize,
+    const PS: usize,
+    const OR: usize,
+> Default for BabelMemoryPool<A, I, N, R, S, PS, OR>
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<A: AddressExt, const I: usize, const N: usize, const R: usize, const S: usize, const PS: usize>
-    BabelMemoryPool<A, I, N, R, S, PS>
+impl<
+    A: AddressExt,
+    const I: usize,
+    const N: usize,
+    const R: usize,
+    const S: usize,
+    const PS: usize,
+    const OR: usize,
+> BabelMemoryPool<A, I, N, R, S, PS, OR>
 {
     pub const fn new() -> Self {
         Self {
@@ -107,6 +126,7 @@ impl<A: AddressExt, const I: usize, const N: usize, const R: usize, const S: usi
             source_table: [const { None }; S],
             pending_seqno_table: [const { None }; PS],
             update_queue: [[const { None }; N]; R],
+            originated_routes: [const { None }; OR],
         }
     }
 
@@ -118,6 +138,7 @@ impl<A: AddressExt, const I: usize, const N: usize, const R: usize, const S: usi
             source_table: &mut self.source_table,
             pending_seqno_table: &mut self.pending_seqno_table,
             update_queue: self.update_queue.as_flattened_mut(),
+            originated_routes: &mut self.originated_routes,
         }
     }
 }
