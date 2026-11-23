@@ -5,6 +5,7 @@ use crate::data_structures::source::SourceIndex;
 use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
 use crate::data_types::destination::RouteDestination;
+use crate::data_views::AllRoutes;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -377,6 +378,16 @@ where
             return Err(BabelError::ZeroUpdateInterval);
         }
 
+        // An update carrying this router's own router-id is a neighbour echoing back a route this
+        // router originates. This router keeps no source entry for itself, so the echo would pass
+        // the feasibility check, and selecting it once the prefix is withdrawn here would route
+        // this router's own prefix through the neighbour that echoed it: a loop. It is dropped
+        // after resolving so the parser state the next TLVs depend on is still updated.
+        if resolved_update.router_id == self.id {
+            b_debug!("Update carries this router's own router-id - Discarded");
+            return Ok(neighbour.key());
+        }
+
         let source = SourceIndex {
             router_id: resolved_update.router_id,
             destination: resolved_update.destination,
@@ -563,7 +574,7 @@ where
                         if was_selected {
                             self.update_queue.queue_triggered_update(
                                 now,
-                                route,
+                                route.destination(),
                                 &self.iface_table,
                                 &self.neighbor_table,
                             );
@@ -611,12 +622,16 @@ where
         }
 
         if ae == 0 {
-            // Wildcard update, send all routes.
-            for route in self.route_table.inner.iter().filter(|r| r.selected) {
+            // Wildcard request, send a full route table dump: every destination with a selected
+            // route, whether this router originates it or learned it. A destination has at most
+            // one selected route, so each is answered once however many routes towards it there
+            // are.
+            let all_routes = AllRoutes::new(&self.originated_routes, &self.route_table);
+            for destination in all_routes.selected_destinations() {
                 self.update_queue.queue_route_response(
                     now,
                     interface,
-                    *route.destination(),
+                    destination,
                     neighbour.key(),
                 )?;
             }
@@ -674,6 +689,7 @@ mod test {
     use crate::data_structures::updates::{Update, UpdateIndex};
     use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Interval, RouterId};
+    use crate::data_views::all_routes::is_eligible;
     use crate::extension::NoExtension;
     use crate::metric::{Metric, RxCost, TxCost};
     use crate::output::DatagramSend;
@@ -683,7 +699,6 @@ mod test {
     use crate::packet::writer::ready::Ready;
     use crate::packet::writer::{PacketWriter, PacketWriterStep};
     use crate::router::config::{BabelRouterConfig, DEFAULT_ROUTE_EXPIRY_TIME};
-    use crate::router::is_eligible;
     use crate::utils::{Duration, InternallyKeyed};
 
     // Long enough not to fire again mid-test, still inside the Timer bound.
@@ -4201,6 +4216,7 @@ mod test {
     /// retraction.
     mod route_requests {
         use super::*;
+        use crate::data_structures::originated_route::originated_route_entry::OriginatedRouteIndex;
         use crate::output::{Output, TransmitDestination};
 
         /// A wildcard request: "dump your route table". Plen must be 0 alongside it.
@@ -4827,6 +4843,262 @@ mod test {
                 )],
                 "one destination, one answer, under the winner's originator"
             );
+        }
+
+        /// A full route table dump includes the routes this router originates, not just the ones it
+        /// learned. A neighbour coming up asks for a dump to learn everything at once, and this
+        /// router's own prefixes are part of everything.
+        #[test]
+        fn a_wildcard_dump_includes_the_routes_this_router_originates() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = three_neighbours(&mut r, t0);
+
+            r.originate_route(
+                t0,
+                OriginatedRouteIndex {
+                    destination: dest(PREFIX_B, PLEN),
+                    interface: iface,
+                },
+                Metric::from(0),
+            )
+            .expect("the originated route table has room");
+            advertise(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                PLEN,
+                &PREFIX_A_WIRE,
+                ADVERTISED,
+            );
+            drain_updates(&mut r);
+
+            request(&mut r, t0, iface, NEIGHBOUR_2_ADDR, AE_WILDCARD, 0, &[]);
+
+            let mut sent = sent_updates(&mut r, t0, iface);
+            // Updates are written grouped by router-id, which says nothing about these two
+            // destinations' order, so compare them in prefix order.
+            sent.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+            assert_eq!(
+                sent,
+                alloc::vec![
+                    SentUpdate::advertising(PLEN, &PREFIX_A_WIRE, COMPUTED),
+                    SentUpdate::advertising(PLEN, &PREFIX_B_WIRE, 0),
+                ],
+                "the learned route at its computed metric, and the originated route at its \
+                 configured metric"
+            );
+        }
+
+        /// The lifecycle of a route this router originates: changing its metric, removing it, and
+        /// neighbours echoing it back.
+        ///
+        /// It lives under route requests to share their wire helpers. What is measured is what a
+        /// neighbour would hear.
+        mod originated_routes {
+            use super::*;
+
+            /// Originates `PREFIX_A/PLEN` on `iface` at `metric`, then runs the selection that
+            /// follows.
+            fn originate(
+                r: &mut BabelRouter<'static>,
+                now: Instant,
+                iface: InterfaceHandle,
+                metric: u16,
+            ) {
+                r.originate_route(now, originated_index(iface), Metric::from_raw(metric))
+                    .expect("the originated route table has room");
+                tick(r, now);
+            }
+
+            /// Removes `PREFIX_A/PLEN` on `iface`, then runs the selection that follows.
+            fn remove(r: &mut BabelRouter<'static>, now: Instant, iface: InterfaceHandle) {
+                r.remove_originated_route(now, originated_index(iface));
+                tick(r, now);
+            }
+
+            fn originated_index(iface: InterfaceHandle) -> OriginatedRouteIndex<NoExtension> {
+                OriginatedRouteIndex {
+                    destination: dest(PREFIX_A, PLEN),
+                    interface: iface,
+                }
+            }
+
+            fn originated_is_selected(r: &BabelRouter<'static>, iface: InterfaceHandle) -> bool {
+                r.originated_routes
+                    .inner
+                    .get_by_key(&originated_index(iface))
+                    .is_some_and(|route| route.selected)
+            }
+
+            /// Learns `PREFIX_A/PLEN` from [`NEIGHBOUR_1_ADDR`], which computes to [`COMPUTED`].
+            fn learn(r: &mut BabelRouter<'static>, now: Instant, iface: InterfaceHandle) {
+                advertise(
+                    r,
+                    now,
+                    iface,
+                    NEIGHBOUR_1_ADDR,
+                    ORIGIN_1,
+                    PLEN,
+                    &PREFIX_A_WIRE,
+                    ADVERTISED,
+                );
+            }
+
+            /// Raising the metric of the selected originated route above a learned alternative
+            /// hands the destination over, and neighbours hear the learned route's metric.
+            #[test]
+            fn raising_the_originated_metric_hands_over_to_a_learned_route() {
+                let mut r = router("node_1");
+                let t0 = Instant::from_secs(0);
+                let iface = three_neighbours(&mut r, t0);
+                originate(&mut r, t0, iface, 0);
+                learn(&mut r, t0, iface);
+                assert!(originated_is_selected(&r, iface));
+                drain_updates(&mut r);
+
+                originate(&mut r, t0, iface, COMPUTED + 100);
+
+                assert!(!originated_is_selected(&r, iface));
+                assert!(is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN));
+                assert_eq!(
+                    sent_updates(&mut r, t0, iface),
+                    alloc::vec![SentUpdate::advertising(PLEN, &PREFIX_A_WIRE, COMPUTED)]
+                );
+            }
+
+            /// Lowering the metric of an unselected originated route below the selected learned one
+            /// takes the destination back.
+            #[test]
+            fn lowering_the_originated_metric_takes_the_destination_back() {
+                let mut r = router("node_1");
+                let t0 = Instant::from_secs(0);
+                let iface = three_neighbours(&mut r, t0);
+                originate(&mut r, t0, iface, COMPUTED + 100);
+                learn(&mut r, t0, iface);
+                assert!(is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN));
+                drain_updates(&mut r);
+
+                originate(&mut r, t0, iface, 0);
+
+                assert!(originated_is_selected(&r, iface));
+                assert_eq!(
+                    sent_updates(&mut r, t0, iface),
+                    alloc::vec![SentUpdate::advertising(PLEN, &PREFIX_A_WIRE, 0)]
+                );
+            }
+
+            /// A new metric on the selected originated route is sent even when nothing competes
+            /// with it, so the route keeps the destination.
+            #[test]
+            fn a_new_metric_on_the_selected_originated_route_is_sent() {
+                let mut r = router("node_1");
+                let t0 = Instant::from_secs(0);
+                let iface = three_neighbours(&mut r, t0);
+                originate(&mut r, t0, iface, 0);
+                drain_updates(&mut r);
+
+                originate(&mut r, t0, iface, 50);
+
+                assert!(originated_is_selected(&r, iface));
+                assert_eq!(
+                    sent_updates(&mut r, t0, iface),
+                    alloc::vec![SentUpdate::advertising(PLEN, &PREFIX_A_WIRE, 50)]
+                );
+            }
+
+            /// Removing the selected originated route, with nothing to replace it, retracts the
+            /// destination, and the route is freed.
+            #[test]
+            fn removing_the_selected_originated_route_retracts_it() {
+                let mut r = router("node_1");
+                let t0 = Instant::from_secs(0);
+                let iface = three_neighbours(&mut r, t0);
+                originate(&mut r, t0, iface, 0);
+                drain_updates(&mut r);
+
+                remove(&mut r, t0, iface);
+
+                assert_eq!(r.originated_routes.inner.iter().count(), 0);
+                assert_eq!(
+                    sent_updates(&mut r, t0, iface),
+                    alloc::vec![SentUpdate::retracting(PLEN, &PREFIX_A_WIRE)]
+                );
+            }
+
+            /// Removing an originated route that never held the destination changes nothing a
+            /// neighbour can see, so nothing is sent.
+            #[test]
+            fn removing_an_unselected_originated_route_sends_nothing() {
+                let mut r = router("node_1");
+                let t0 = Instant::from_secs(0);
+                let iface = three_neighbours(&mut r, t0);
+                originate(&mut r, t0, iface, COMPUTED + 100);
+                learn(&mut r, t0, iface);
+                drain_updates(&mut r);
+
+                remove(&mut r, t0, iface);
+
+                assert_eq!(r.originated_routes.inner.iter().count(), 0);
+                assert!(is_selected(&mut r, iface, NEIGHBOUR_1_ADDR, PREFIX_A, PLEN));
+                assert_eq!(sent_updates(&mut r, t0, iface), alloc::vec![]);
+            }
+
+            /// An originated route has to name an interface this router has registered.
+            #[test]
+            fn originating_on_an_unregistered_interface_is_refused() {
+                let mut r = router("node_1");
+                let t0 = Instant::from_secs(0);
+                three_neighbours(&mut r, t0);
+                let unknown = iface_handle("nope");
+
+                let result = r.originate_route(t0, originated_index(unknown), Metric::from_raw(0));
+
+                assert!(matches!(
+                    result,
+                    Err(BabelError::InterfaceDoesntExist(handle)) if handle == unknown
+                ));
+                assert_eq!(r.originated_routes.inner.iter().count(), 0);
+            }
+
+            /// A neighbour echoing back a route this router originates, under this router's own
+            /// router-id, is ignored. Otherwise the echo would be selected once the prefix is
+            /// removed here, and this router would route its own prefix through the neighbour.
+            #[test]
+            fn an_echo_of_an_originated_route_is_ignored() {
+                let mut r = router("node_1");
+                let t0 = Instant::from_secs(0);
+                let iface = three_neighbours(&mut r, t0);
+                originate(&mut r, t0, iface, 0);
+                let own_id = *r.id.as_octets();
+
+                advertise(
+                    &mut r,
+                    t0,
+                    iface,
+                    NEIGHBOUR_1_ADDR,
+                    own_id,
+                    PLEN,
+                    &PREFIX_A_WIRE,
+                    ADVERTISED,
+                );
+                assert_eq!(
+                    r.route_table.inner.iter().count(),
+                    0,
+                    "the echo is not stored"
+                );
+                drain_updates(&mut r);
+
+                remove(&mut r, t0, iface);
+
+                assert_eq!(r.route_table.inner.iter().count(), 0, "nothing replaced it");
+                assert_eq!(
+                    sent_updates(&mut r, t0, iface),
+                    alloc::vec![SentUpdate::retracting(PLEN, &PREFIX_A_WIRE)]
+                );
+            }
         }
 
         /// A node with nothing selected still has an answer to give — it just has nothing to

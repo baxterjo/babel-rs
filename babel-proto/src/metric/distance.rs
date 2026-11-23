@@ -48,6 +48,11 @@ macro_rules! distance_newtype {
             }
 
             #[inline]
+            pub const fn is_finite(self) -> bool {
+                !self.is_infinite()
+            }
+
+            #[inline]
             pub const fn to_wire(&self)-> [u8;2]{
                 self.0.to_be_bytes()
             }

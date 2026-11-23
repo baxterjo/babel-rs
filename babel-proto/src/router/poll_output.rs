@@ -1,5 +1,6 @@
 use super::BabelRouter;
 use crate::data_structures::interface::{InterfaceError, InterfaceHandle};
+use crate::data_views::{AllRoutes, LocalOrigin};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -191,7 +192,11 @@ where
                 &mut active_dest,
                 &mut next_poll,
                 &mut self.source_table,
-                &self.route_table,
+                AllRoutes::new(&self.originated_routes, &self.route_table),
+                LocalOrigin {
+                    router_id: self.id,
+                    seqno: self.route_seqno,
+                },
                 writer
             ));
 
@@ -343,7 +348,7 @@ where
                 // And broadcast a periodic update.
                 self.update_queue.queue_periodic_update(
                     now,
-                    &self.route_table,
+                    AllRoutes::new(&self.originated_routes, &self.route_table),
                     interface,
                     &self.neighbor_table,
                 );

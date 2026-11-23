@@ -4,12 +4,11 @@ use crate::data_structures::route::RouteError;
 use crate::data_structures::route::route_entry::Route;
 use crate::data_structures::source::SourceIndex;
 use crate::data_structures::updates::UpdateQueue;
-use crate::data_types::destination::RouteDestination;
 use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Address, Interval};
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
-use crate::utils::storage::{InsertError, InternallyKeyed, Table, TableSlot};
+use crate::utils::storage::{InsertError, InternallyKeyed, Table};
 use crate::utils::{DurationMultiplier, Instant, ManagedSlice};
 
 pub const DEFAULT_SMOOTHING_MULTIPLE: DurationMultiplier = DurationMultiplier::new(3, 1);
@@ -37,7 +36,7 @@ impl<'storage, A> RouteTable<'storage, A>
 where
     A: AddressExt,
 {
-    /// Create a new source table with user provided storage.
+    /// Create a new route table with user provided storage.
     ///
     /// While interfaces are generally well known at compile time, the number of routes this
     /// Babel speaker might see is specific to its deployment. So it is important to right size
@@ -128,26 +127,25 @@ where
             if route.selected
                 && route.computed_metric().abs_diff(old_computed) > METRIC_DIFFERENCE_THRESHOLD
             {
-                update_queue.queue_triggered_update(now, route, interfaces, neighbours);
+                update_queue.queue_triggered_update(
+                    now,
+                    route.destination(),
+                    interfaces,
+                    neighbours,
+                );
             }
         }
     }
 
-    /// Get a [`DestinationGroup`] iterator from self.
-    pub(crate) fn destination_groups_mut(
-        &mut self,
-    ) -> impl Iterator<Item = DestinationGroup<'_, A>> {
-        self.inner
-            // Chunk by runs of the same destination
-            .chunk_by_mut(|a, b| destination_of(a) == destination_of(b))
-            // Filter out empty chunks and chunks that don't contain routes
-            .filter(|group| group.first().is_some_and(|first| first.value().is_some()))
-            // Map the chunk to a destination route.
-            .map(DestinationGroup)
-    }
-
-    /// Gets the selected route for the given destination.
-    pub(crate) fn get_selected(&self, destination: &RouteDestination<A>) -> Option<&Route<A>> {
+    /// Gets the selected learned route for the given destination.
+    ///
+    /// Only the tests read the learned table on its own. Everything else resolves a destination
+    /// across both tables with [`crate::data_views::AllRoutes::get_selected`].
+    #[cfg(test)]
+    pub(crate) fn get_selected(
+        &self,
+        destination: &crate::data_types::destination::RouteDestination<A>,
+    ) -> Option<&Route<A>> {
         let mut iter = self
             .inner
             .iter()
@@ -160,190 +158,5 @@ where
             "There should only be one selected route for a destination."
         );
         out
-    }
-}
-
-/// A non-empty run of route table entries that all lead to the same destination.
-pub(crate) struct DestinationGroup<'a, A: AddressExt>(&'a mut [Option<Route<A>>]);
-
-impl<A: AddressExt> DestinationGroup<'_, A> {
-    /// The destination that every route in this group leads to.
-    pub(crate) fn destination(&self) -> RouteDestination<A> {
-        *self
-            .iter()
-            .next()
-            .expect("a destination group always holds at least one route")
-            .destination()
-    }
-
-    /// The number of routes towards this destination.
-    pub(crate) fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Route<A>> {
-        self.0.iter().filter_map(|r| r.value())
-    }
-
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route<A>> {
-        self.0.iter_mut().filter_map(|r| r.value_mut())
-    }
-}
-
-/// The destination of an occupied slot, or `None` for a free one.
-///
-/// Free slots compare equal to each other and to nothing else, which is what collapses them into
-/// the single leading group that [`RouteTable::destination_groups_mut`] discards.
-fn destination_of<A: AddressExt>(entry: &Option<Route<A>>) -> Option<RouteDestination<A>> {
-    entry.value().map(|e| *e.destination())
-}
-
-#[cfg(all(test, any(feature = "std", feature = "alloc")))]
-mod test {
-    use alloc::vec::Vec;
-    use core::net::Ipv6Addr;
-
-    use super::*;
-    use crate::data_structures::interface::InterfaceHandle;
-    use crate::data_structures::neighbour::NeighbourIndex;
-    use crate::data_types::seqno::SeqNo;
-    use crate::data_types::{Interval, RouterId};
-    use crate::extension::NoExtension;
-    use crate::router::config::DEFAULT_ROUTE_EXPIRY_TIME;
-    use crate::utils::Duration;
-
-    /// Long enough that nothing expires mid-test, still inside the Timer bound.
-    const INTERVAL: Interval = Interval::from_duration(Duration::from_secs(600));
-
-    const DEST_A: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, 0);
-    const DEST_B: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 2, 0, 0, 0, 0);
-    const NEIGHBOUR_1: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
-    const NEIGHBOUR_2: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
-
-    const IFACE: &str = "eth0";
-
-    fn iface_handle() -> InterfaceHandle {
-        InterfaceHandle::try_from(IFACE).expect("bad interface handle")
-    }
-
-    /// Adds a route to `table`.
-    fn insert_route(
-        table: &mut RouteTable<'_, NoExtension>,
-        prefix: Ipv6Addr,
-        prefix_len: u8,
-        router_id: &str,
-        neighbour: Ipv6Addr,
-    ) {
-        insert_route_with_metrics(
-            table,
-            prefix,
-            prefix_len,
-            router_id,
-            neighbour,
-            Metric::from(10),
-            Metric::from(10),
-        )
-    }
-
-    /// [`insert_route`], with the advertised and computed metrics the caller wants it settled at.
-    /// The smoothed metric starts out equal to the computed one, as it does for any freshly created
-    /// entry.
-    fn insert_route_with_metrics(
-        table: &mut RouteTable<'_, NoExtension>,
-        prefix: Ipv6Addr,
-        prefix_len: u8,
-        router_id: &str,
-        neighbour: Ipv6Addr,
-        advertised_metric: Metric,
-        computed_metric: Metric,
-    ) {
-        table
-            .add_route(
-                Instant::from_secs(0),
-                SourceIndex {
-                    destination: RouteDestination::new(prefix.into(), prefix_len)
-                        .expect("bad destination"),
-                    router_id: RouterId::try_from(router_id).expect("bad router id"),
-                },
-                NeighbourIndex {
-                    iface: iface_handle(),
-                    addr: neighbour.into(),
-                },
-                SeqNo(0),
-                advertised_metric,
-                computed_metric,
-                neighbour.into(),
-                INTERVAL,
-            )
-            .expect("the table has a free slot for the route");
-    }
-
-    /// The grouping is by destination, so two routes towards one prefix belong together even when
-    /// they were originated by different routers. Section 3.7.2 depends on that: the selected
-    /// router-id for a destination can only *change* if routes with differing router-ids compete
-    /// against each other.
-    #[test]
-    fn groups_by_destination_across_router_ids_and_neighbours() {
-        let mut table = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
-
-        // Inserted out of order, and with a same-prefix/different-plen pair, to show the grouping
-        // does not lean on insertion order and that plen is part of the destination.
-        insert_route(&mut table, DEST_B, 64, "rtr-b", NEIGHBOUR_1);
-        insert_route(&mut table, DEST_A, 64, "rtr-b", NEIGHBOUR_2);
-        insert_route(&mut table, DEST_A, 32, "rtr-a", NEIGHBOUR_1);
-        insert_route(&mut table, DEST_A, 64, "rtr-a", NEIGHBOUR_1);
-
-        // A route owns its update queue, so it cannot be lifted out of the table to be inspected
-        // later. Its source carries both things the assertions below are about -- destination and
-        // router-id -- and is `Copy`, so that is what gets collected.
-        let groups: Vec<(RouteDestination<NoExtension>, Vec<SourceIndex<NoExtension>>)> = table
-            .destination_groups_mut()
-            .map(|group| {
-                (
-                    group.destination(),
-                    group.iter().map(|r| *r.source()).collect(),
-                )
-            })
-            .collect();
-
-        assert_eq!(
-            groups.len(),
-            3,
-            "(DEST_A, 32), (DEST_A, 64) and (DEST_B, 64)"
-        );
-
-        for (destination, sources) in &groups {
-            assert!(!sources.is_empty(), "empty slots must not be yielded");
-            assert!(
-                sources.iter().all(|s| &s.destination == destination),
-                "every route in a group shares one destination"
-            );
-        }
-
-        // The two routes towards (DEST_A, 64) land in one group despite differing in both
-        // router-id and neighbour.
-        let (_, dest_a_64) = groups
-            .iter()
-            .find(|(d, _)| d == &RouteDestination::new(DEST_A.into(), 64).unwrap())
-            .expect("(DEST_A, 64) group");
-        assert_eq!(dest_a_64.len(), 2);
-        assert_ne!(
-            dest_a_64[0].router_id, dest_a_64[1].router_id,
-            "router-id is not part of the destination"
-        );
-    }
-
-    /// Free slots sort ahead of every occupied one, so they have to be dropped rather than yielded
-    /// as a group of their own.
-    #[test]
-    fn skips_free_slots() {
-        let mut route_storage: [Option<Route<NoExtension>>; 4] = [const { None }; 4];
-        let mut table =
-            RouteTable::new_with_storage(&mut route_storage[..], DEFAULT_ROUTE_EXPIRY_TIME);
-        insert_route(&mut table, DEST_A, 64, "rtr-a", NEIGHBOUR_1);
-
-        let groups: Vec<usize> = table.destination_groups_mut().map(|g| g.len()).collect();
-
-        assert_eq!(groups, alloc::vec![1], "three free slots, one real group");
     }
 }

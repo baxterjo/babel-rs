@@ -17,3 +17,6 @@ pub mod pending_seqno;
 
 /// Table containing pending updates.
 pub mod updates;
+
+/// Table containing routes that are originated from this router. These routes do not expire.
+pub mod originated_route;

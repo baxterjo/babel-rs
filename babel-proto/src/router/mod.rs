@@ -7,18 +7,24 @@ use crate::data_structures::interface::{
 use crate::data_structures::neighbour::{
     Neighbour, NeighbourConfig, NeighbourIndex, NeighbourTable,
 };
+use crate::data_structures::originated_route::originated_route_entry::{
+    OriginatedRoute, OriginatedRouteIndex,
+};
+use crate::data_structures::originated_route::originated_route_table::OriginatedRouteTable;
 use crate::data_structures::pending_seqno::{PendingSeqnoRequestTable, SeqnoRequest};
-use crate::data_structures::route::{Route, RouteIndex, RouteTable};
+use crate::data_structures::route::{Route, RouteTable};
 use crate::data_structures::source::{Source, SourceTable};
 use crate::data_structures::updates::{Update, UpdateQueue};
+use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Address, RouterId};
+use crate::data_views::{AllRoutesMut, Selection};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::extension::{NoExtension, NoStateExtension};
 use crate::metric::Metric;
 use crate::router::config::BabelRouterConfig;
-use crate::utils::{Instant, InternallyKeyed, ManagedSlice, Timer};
+use crate::utils::{Instant, ManagedSlice, Timer};
 
 pub mod config;
 pub mod handle_input;
@@ -36,6 +42,8 @@ where
 
     pub(crate) version_number: u8,
 
+    pub(crate) route_seqno: SeqNo,
+
     // Tables
     pub(crate) iface_table: InterfaceTable<'storage, A>,
 
@@ -48,6 +56,8 @@ where
     pub(crate) source_table: SourceTable<'storage, A>,
 
     pub(crate) update_queue: UpdateQueue<'storage, A>,
+
+    pub(crate) originated_routes: OriginatedRouteTable<'storage, A>,
 
     // Router state
     pub(crate) route_selection_due: bool,
@@ -75,6 +85,7 @@ where
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         )
     }
 
@@ -93,10 +104,11 @@ where
             storage.route_table,
             storage.source_table,
             storage.update_queue,
+            storage.originated_routes,
         )
     }
 
-    fn new_with_storage_inner<IF, N, PS, R, S, U>(
+    fn new_with_storage_inner<IF, N, PS, R, S, U, OR>(
         now: Instant,
         config: BabelRouterConfig,
         interface_table: IF,
@@ -105,6 +117,7 @@ where
         route_table: R,
         source_table: S,
         update_queue: U,
+        originated_routes: OR,
     ) -> Self
     where
         IF: Into<ManagedSlice<'storage, Option<Interface<A>>>>,
@@ -113,21 +126,32 @@ where
         R: Into<ManagedSlice<'storage, Option<Route<A>>>>,
         S: Into<ManagedSlice<'storage, Option<Source<A>>>>,
         U: Into<ManagedSlice<'storage, Option<Update<A>>>>,
+        OR: Into<ManagedSlice<'storage, Option<OriginatedRoute<A>>>>,
     {
         Self {
             id: config.id,
             magic_number: config.magic_number,
             version_number: config.version,
+            route_seqno: config.starting_seqno,
             iface_table: InterfaceTable::new_with_storage(interface_table),
             neighbor_table: NeighbourTable::new_with_storage(neighbour_table),
             pending_seqno: PendingSeqnoRequestTable::new_with_storage(pending_seqno_table),
             route_table: RouteTable::new_with_storage(route_table, config.route_expiry_multiplier),
             source_table: SourceTable::new_with_storage(source_table),
             update_queue: UpdateQueue::new_with_storage(update_queue),
+            originated_routes: OriginatedRouteTable::new_with_storage(originated_routes),
             route_selection_due: false,
             _state_ext_marker: PhantomData,
             _addr_ext_marker: PhantomData,
         }
+    }
+
+    /// The seqno this router announces every route it originates with.
+    ///
+    /// Seqnos wrap, so compare them as [`SeqNo`]s, which order modulo 2^16 as Section 3.2.1
+    /// requires, rather than as the raw `u16` inside.
+    pub fn route_seqno(&self) -> SeqNo {
+        self.route_seqno
     }
 
     /// Register a new interface with the router.
@@ -143,6 +167,74 @@ where
         A: AddressExt,
     {
         Ok(self.iface_table.register_interface(now, config)?)
+    }
+
+    /// Inserts a self originated route into the protocol, or changes the metric of one already
+    /// originated.
+    ///
+    /// This route has no expiration, the metric must be maintained by the user. It is advertised
+    /// on every interface. `route.interface` names the interface the prefix is attached to, and
+    /// must be registered with this router.
+    pub fn originate_route(
+        &mut self,
+        now: Instant,
+        route: OriginatedRouteIndex<A>,
+        metric: Metric,
+    ) -> Result<(), BabelError<A>> {
+        if self
+            .iface_table
+            .inner
+            .get_by_key(&route.interface)
+            .is_none()
+        {
+            return Err(BabelError::InterfaceDoesntExist(route.interface));
+        }
+
+        if metric.is_infinite() {
+            self.remove_originated_route(now, route);
+            return Ok(());
+        }
+
+        if let Some(old_route) = self.originated_routes.inner.get_mut_by_key(&route) {
+            if old_route.metric == metric {
+                return Ok(());
+            }
+            old_route.metric = metric;
+
+            // A new metric on the selected route changes what this router advertises even if the
+            // route keeps the destination, and route selection only reacts to a change of route.
+            if old_route.selected {
+                self.update_queue.queue_triggered_update(
+                    now,
+                    &route.destination,
+                    &self.iface_table,
+                    &self.neighbor_table,
+                );
+            }
+        } else {
+            self.originated_routes.insert_route(route, metric)?;
+        }
+
+        // A new metric can win or lose the destination either way, so selection must re-run.
+        self.route_selection_due = true;
+
+        Ok(())
+    }
+
+    /// Removes a self originated route from the protocol.
+    ///
+    /// The route is retracted rather than freed: its metric becomes infinite, so route selection
+    /// sees that it was the selected route and sends the retraction, or the replacement route,
+    /// only when it was. Route selection then frees it.
+    pub fn remove_originated_route(&mut self, _now: Instant, route: OriginatedRouteIndex<A>) {
+        let Some(originated) = self.originated_routes.inner.get_mut_by_key(&route) else {
+            b_trace!("Tried to remove non-existant route.");
+            return;
+        };
+
+        originated.metric = Metric::INFINITY;
+
+        self.route_selection_due = true;
     }
 
     /// Add a new neighbour to the router.
@@ -201,128 +293,53 @@ where
     /// [Section 3.6](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection)
     /// and [Appendix A.3](https://datatracker.ietf.org/doc/html/rfc8966#name-route-selection)
     ///
-    /// This method selects routes and publishes updates triggered as a result of route selection.
+    /// Which route wins a destination is decided by [`DestinationGroup::choose`], over originated
+    /// and learned routes alike. This method applies each decision and owns its consequences:
+    /// publishing the updates triggered as a result of route selection.
+    ///
+    /// [`DestinationGroup::choose`]: crate::data_views::all_routes::DestinationGroup::choose
     fn select_routes(&mut self, now: Instant) {
-        // A shared borrow of one field while `route_table` is borrowed mutably below.
-        let source_table = &self.source_table;
-
         b_debug!("Route selection...");
 
-        for mut destination_group in self.route_table.destination_groups_mut() {
-            let dest = destination_group.destination();
-            b_debug!("{:?} options for {:?}", dest, destination_group.len());
-            // The route this destination was pointing at before this run, whether or not it is
-            // still usable. Only the change detection at the bottom cares about that distinction.
-            let previous: Option<RouteIndex<A>> = destination_group
-                .iter()
-                .find(|route| route.selected)
-                .map(|route| route.key());
+        let mut all_routes = AllRoutesMut::new(&mut self.originated_routes, &mut self.route_table);
 
-            // The previously selected route, but only while it still passes the hard rules. One
-            // that has been retracted or has gone unfeasible cannot be used.
-            let incumbent = destination_group
-                .iter()
-                .find(|route| route.selected && is_eligible(source_table, route))
-                .map(|route| {
-                    (
-                        route.key(),
-                        *route.computed_metric(),
-                        *route.smoothed_metric(),
-                    )
-                });
+        for mut group in all_routes.destination_groups_mut() {
+            let dest = group.destination();
+            b_trace!("{:?} options for {:?}", group.len(), dest);
 
-            let winner = match incumbent {
-                // A still-eligible incumbent keeps the destination unless some route beats it on
-                // the real metric *and* on the smoothed one.
-                Some((incumbent, incumbent_computed, incumbent_smoothed)) => Some(
-                    destination_group
-                        .iter()
-                        // A set of potential winners must be eligible
-                        .filter(|route| is_eligible(source_table, route))
-                        // A set of potential winners must have a computed and smoothed metric
-                        // better than the incumbent. If there are any items in the iterator after
-                        // this point, they are better than the incumbent.
-                        .filter(|route| {
-                            *route.computed_metric() < incumbent_computed
-                                && *route.smoothed_metric() < incumbent_smoothed
-                        })
-                        // Take the route that is the minimum of the routes better than the
-                        // incumbent. Breaking ties on the route index.
-                        .min_by_key(|route| (route.computed_metric(), route.key()))
-                        .map(|route| route.key())
-                        // If none of these conditions are met, then the incumbent wins.
-                        .unwrap_or(incumbent),
-                ),
-                // Nothing to defend the destination, so the best route takes it outright, with the
-                // smoothed metric ignored entirely. This is also the path a destination whose
-                // selected route was just retracted takes.
-                None => destination_group
-                    .iter()
-                    // Potential winners must be eligible
-                    .filter(|route| is_eligible(source_table, route))
-                    // Take the route with the minimum metric. Breaking ties on the route index.
-                    .min_by_key(|route| (route.computed_metric(), route.key()))
-                    .map(|route| route.key()),
-            };
-
-            b_trace!(
-                "previous: {:?}, incumbent: {:?}, winner: {:?}",
-                previous,
-                incumbent.map(|i| i.0),
-                winner
-            );
+            let Selection { previous, winner } = group.choose(&self.source_table);
 
             b_debug!("{:?} -> {:?}", dest, winner);
 
-            for route in destination_group.iter_mut() {
-                // Deselect everything, then switch the winner back on. Doing it in that order means
-                // a destination that no longer has an eligible route ends up with
-                // nothing selected.
-                route.selected = false;
+            // Deselects everything, then switches the winner back on, so a destination that no
+            // longer has an eligible route ends up with nothing selected.
+            group.select(winner);
 
-                match (previous, winner) {
-                    (prev_opt, Some(win)) => {
-                        if win == route.key() {
-                            // If this route is the winner then mark it selected.
-                            route.selected = true;
+            let changed = match (previous, winner) {
+                // A new winner has been selected OR a winner has been selected for the first time.
+                (previous, Some(winner)) => previous.is_none_or(|(prev, _)| prev != winner),
+                // The route that WAS selected has been retracted, and there are now no eligible
+                // routes to replace it.
+                (Some((_, prev_metric)), None) => prev_metric == Metric::INFINITY,
+                // No winner before and no winner now.
+                (None, None) => false,
+            };
 
-                            // If a new winner has been selected OR a winner has been selected for
-                            // the first time, broadcast an updated.
-                            if prev_opt.is_none_or(|p| p != win) {
-                                self.update_queue.queue_triggered_update(
-                                    now,
-                                    route,
-                                    &self.iface_table,
-                                    &self.neighbor_table,
-                                );
-                            }
-                        }
-                    }
-                    (Some(prev), None) => {
-                        // If this route WAS selected before and there are now no eligible routes
-                        // due to a retraction, publish an update.
-                        if prev == route.key() && route.computed_metric() == &Metric::INFINITY {
-                            self.update_queue.queue_triggered_update(
-                                now,
-                                route,
-                                &self.iface_table,
-                                &self.neighbor_table,
-                            );
-                        }
-                    }
-                    (None, None) => {
-                        // If no winner has been selected and no winner is selected this time, do
-                        // nothing.
-                    }
-                }
+            if changed {
+                self.update_queue.queue_triggered_update(
+                    now,
+                    &dest,
+                    &self.iface_table,
+                    &self.neighbor_table,
+                );
             }
         }
-    }
-}
 
-/// Section 3.6's hard rules: a route with an infinite metric has been retracted, and an
-/// unfeasible one risks a routing loop.
-fn is_eligible<A: AddressExt>(source_table: &SourceTable<'_, A>, route: &Route<A>) -> bool {
-    route.computed_metric() != &Metric::INFINITY
-        && source_table.is_feasible(route.source(), route.advertised_metric(), &route.seqno)
+        // Originated routes are removed by retracting them, and the selection above has now seen
+        // each retraction. An infinite metric is never eligible, so none of them is selected any
+        // more and they can be freed.
+        self.originated_routes
+            .inner
+            .retain(|route| route.metric.is_finite());
+    }
 }

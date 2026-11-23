@@ -1,4 +1,5 @@
 use crate::data_structures::interface::DEFAULT_MULTICAST_HELLO_INTERVAL_SECS;
+use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Interval, RouterId};
 use crate::packet::packet_header::PacketHeader;
 use crate::utils::{Duration, DurationMultiplier};
@@ -17,6 +18,7 @@ pub struct BabelRouterConfig {
     pub(crate) magic_number: u8,
     pub(crate) version: u8,
     pub(crate) update_interval: Interval,
+    pub(crate) starting_seqno: SeqNo,
     pub(crate) route_expiry_multiplier: DurationMultiplier,
 }
 
@@ -30,6 +32,7 @@ impl BabelRouterConfig {
             id,
             magic_number: PacketHeader::MAGIC_NUMBER,
             version: PacketHeader::VERSION_NUMBER,
+            starting_seqno: SeqNo(0),
             update_interval: DEFAULT_UPDATE_INTERVAL,
             route_expiry_multiplier: DEFAULT_ROUTE_EXPIRY_TIME,
         }
@@ -60,5 +63,10 @@ impl BabelRouterConfig {
     /// expiry.
     pub fn set_route_expiry(&mut self, multiplier: DurationMultiplier) {
         self.route_expiry_multiplier = multiplier;
+    }
+
+    /// Sets the starting seqno for the router. Default is 0.
+    pub fn set_starting_seqno(&mut self, value: SeqNo) {
+        self.starting_seqno = value;
     }
 }
