@@ -1,3 +1,4 @@
+use core::cmp::Ordering;
 use core::fmt::Debug as DebugT;
 use core::ops::{Deref, DerefMut};
 
@@ -208,6 +209,25 @@ where
         self.0.deref_mut().iter_mut().filter_map(|i| i.value_mut())
     }
 
+    /// The run of values that `f` marks [`Ordering::Equal`], in key order, found by binary search.
+    ///
+    /// `f` compares a value against the run being looked for, and must agree with the table's key
+    /// order: [`Ordering::Less`] for every value ahead of the run and [`Ordering::Greater`] for
+    /// every value after it. A comparison on any prefix of the key qualifies. Free slots sort ahead
+    /// of every value, so they are never part of the run.
+    pub(crate) fn iter_run<'a, F>(&'a self, f: F) -> impl Iterator<Item = &'a S::Value>
+    where
+        F: Fn(&S::Value) -> Ordering,
+        S::Value: 'a,
+    {
+        check_sorted!(self);
+        let slice = self.0.deref();
+        let start = slice.partition_point(|s| s.value().is_none_or(|v| f(v) == Ordering::Less));
+        slice[start..]
+            .iter()
+            .map_while(move |s| s.value().filter(|v| f(v) == Ordering::Equal))
+    }
+
     pub(crate) fn iter_slots<'a>(&'a self) -> impl Iterator<Item = &'a S>
     where
         S::Value: 'a,
@@ -337,6 +357,33 @@ mod test {
                 key_b: self.b,
             }
         }
+    }
+
+    /// A run looked up on a key prefix holds exactly the values sharing that prefix, in key order,
+    /// and the free slots that sort ahead of every value are never part of it.
+    #[test]
+    fn iter_run_yields_the_values_sharing_a_key_prefix() {
+        let storage: &mut [Option<TestValue>] = &mut [const { None }; 8];
+        let mut table: Table<'_, Option<TestValue>> = Table::new(storage);
+        for (a, b) in [(2, 1), (1, 5), (2, 0), (3, 0), (2, 9)] {
+            table
+                .insert(TestValue { a, b, _c: 0 })
+                .expect("the table has room");
+        }
+
+        // Compared as iterators rather than collected, so the test runs without `alloc`.
+        let run_is = |a: u8, expected: &[u16]| {
+            table
+                .iter_run(|v| v.a.cmp(&a))
+                .map(|v| v.b)
+                .eq(expected.iter().copied())
+        };
+
+        assert!(run_is(2, &[0, 1, 9]));
+        assert!(run_is(1, &[5]));
+        assert!(run_is(3, &[0]));
+        assert!(run_is(0, &[]));
+        assert!(run_is(4, &[]));
     }
 
     /// Pins the borrowed-storage `Full` path.

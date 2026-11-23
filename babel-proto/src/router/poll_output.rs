@@ -192,7 +192,7 @@ where
                 &mut active_dest,
                 &mut next_poll,
                 &mut self.source_table,
-                &AllRoutes::new(&mut self.originated_routes, &mut self.route_table),
+                AllRoutes::new(&self.originated_routes, &self.route_table),
                 LocalOrigin {
                     router_id: self.id,
                     seqno: self.route_seqno,
@@ -348,7 +348,7 @@ where
                 // And broadcast a periodic update.
                 self.update_queue.queue_periodic_update(
                     now,
-                    &mut AllRoutes::new(&mut self.originated_routes, &mut self.route_table),
+                    AllRoutes::new(&self.originated_routes, &self.route_table),
                     interface,
                     &self.neighbor_table,
                 );

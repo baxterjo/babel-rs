@@ -67,24 +67,18 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
     /// Queues an update for every destination that has a selected route, originated or learned, to
     /// all neighbours on the given interface.
     ///
-    /// Walking the routes a destination at a time means each destination is queued once, for the
-    /// one route that holds it, however many routes towards it either table has.
+    /// Only selected routes are walked, and a destination has at most one, so each destination is
+    /// queued once however many routes towards it either table has. A destination with nothing
+    /// selected has nothing to advertise: if it lost its route, the retraction was owed as a
+    /// triggered update, not a periodic one.
     pub(crate) fn queue_periodic_update(
         &mut self,
         now: Instant,
-        routes: &mut AllRoutes<'_, '_, A>,
+        routes: AllRoutes<'_, '_, A>,
         interface: &Interface<A>,
         neighbours: &NeighbourTable<A>,
     ) {
-        for group in routes.destination_groups_mut() {
-            // A destination with nothing selected has nothing to advertise. If it lost its route,
-            // the retraction was owed as a triggered update, not a periodic one.
-            if group.selected().is_none() {
-                continue;
-            }
-
-            let destination = group.destination();
-
+        for destination in routes.selected_destinations() {
             for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
                 if let Err(err) = self.add_update(
                     Update::new(
@@ -174,7 +168,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
         active_dest: &mut DestAddr<A>,
         next_poll: &mut Duration,
         sources: &mut SourceTable<'_, A>,
-        routes: &AllRoutes<'_, '_, A>,
+        routes: AllRoutes<'_, '_, A>,
         origin: LocalOrigin,
         mut writer: PacketWriterStep<'output, Ready>,
     ) -> Result<
@@ -415,7 +409,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
     fn router_id_groups_mut<'a, 'v, 'vs>(
         &'a mut self,
         interface: InterfaceHandle,
-        routes: &'a AllRoutes<'v, 'vs, A>,
+        routes: AllRoutes<'v, 'vs, A>,
         origin: LocalOrigin,
     ) -> RouterIdGroups<'a, 'storage, 'v, 'vs, A> {
         RouterIdGroups {
@@ -438,14 +432,14 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
 /// [`RouterId`] for all routes (the minimum) and then ratchet up for each call of
 /// [`RouterIdGroups::next_group`]
 ///
-/// `'v` and `'vs` are the borrow and the storage of the [`AllRoutes`] view. They are kept apart
-/// from the queue's own `'storage` because the view holds its tables by `&mut`, which pins both.
+/// `'v` and `'vs` are the borrow and the storage of the [`AllRoutes`] view, kept apart from the
+/// queue's own `'storage`.
 struct RouterIdGroups<'a, 'storage, 'v, 'vs, A: AddressExt> {
     interface: InterfaceHandle,
     /// The source an originated route is advertised under.
     origin: LocalOrigin,
     update_queue: &'a mut UpdateQueue<'storage, A>,
-    routes: &'a AllRoutes<'v, 'vs, A>,
+    routes: AllRoutes<'v, 'vs, A>,
     /// The [`RouterId`] of the group handed out last.
     last: Option<Option<RouterId>>,
 }
@@ -494,15 +488,15 @@ struct RouterIdGroup<'a, 'storage, 'v, 'vs, A: AddressExt> {
     origin: LocalOrigin,
     router_id_group: Option<RouterId>,
     update_queue: &'a mut UpdateQueue<'storage, A>,
-    routes: &'a AllRoutes<'v, 'vs, A>,
+    routes: AllRoutes<'v, 'vs, A>,
 }
 
-impl<A: AddressExt> RouterIdGroup<'_, '_, '_, '_, A> {
+impl<'v, A: AddressExt> RouterIdGroup<'_, '_, 'v, '_, A> {
     /// Yields all updates and corresponding routes that have this group's [`RouterId`]
     ///
     /// This iterates over the slots of the inner table to implement rate limiting of the update
     /// queue.
-    fn iter_mut(&mut self) -> impl Iterator<Item = (&mut Update<A>, Option<AnyRoute<'_, A>>)> {
+    fn iter_mut(&mut self) -> impl Iterator<Item = (&mut Update<A>, Option<AnyRoute<'v, A>>)> {
         let origin = self.origin;
         let interface = self.interface;
         let router_id_group = self.router_id_group;
@@ -1175,7 +1169,7 @@ mod test {
                     &mut dest,
                     &mut next_poll,
                     &mut empty_sources(),
-                    &AllRoutes::new(&mut tables.originated, &mut tables.routes),
+                    AllRoutes::new(&tables.originated, &tables.routes),
                     origin(),
                     writer,
                 )
@@ -1516,7 +1510,7 @@ mod test {
 
             tables.updates.queue_periodic_update(
                 t0(),
-                &mut AllRoutes::new(&mut tables.originated, &mut tables.routes),
+                AllRoutes::new(&tables.originated, &tables.routes),
                 &interface(IFACE_1),
                 &neighbours,
             );
@@ -1983,7 +1977,7 @@ mod test {
                     &mut dest,
                     &mut next_poll,
                     &mut empty_sources(),
-                    &AllRoutes::new(&mut tables.originated, &mut tables.routes),
+                    AllRoutes::new(&tables.originated, &tables.routes),
                     origin(),
                     writer,
                 )

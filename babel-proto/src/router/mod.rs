@@ -17,7 +17,7 @@ use crate::data_structures::source::{Source, SourceTable};
 use crate::data_structures::updates::{Update, UpdateQueue};
 use crate::data_types::seqno::SeqNo;
 use crate::data_types::{Address, RouterId};
-use crate::data_views::{AllRoutes, Selection};
+use crate::data_views::{AllRoutesMut, Selection};
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -132,7 +132,7 @@ where
             id: config.id,
             magic_number: config.magic_number,
             version_number: config.version,
-            route_seqno: SeqNo(config.starting_seqno),
+            route_seqno: config.starting_seqno,
             iface_table: InterfaceTable::new_with_storage(interface_table),
             neighbor_table: NeighbourTable::new_with_storage(neighbour_table),
             pending_seqno: PendingSeqnoRequestTable::new_with_storage(pending_seqno_table),
@@ -146,8 +146,12 @@ where
         }
     }
 
-    pub fn route_seqno(&self) -> u16 {
-        self.route_seqno.0
+    /// The seqno this router announces every route it originates with.
+    ///
+    /// Seqnos wrap, so compare them as [`SeqNo`]s, which order modulo 2^16 as Section 3.2.1
+    /// requires, rather than as the raw `u16` inside.
+    pub fn route_seqno(&self) -> SeqNo {
+        self.route_seqno
     }
 
     /// Register a new interface with the router.
@@ -165,48 +169,72 @@ where
         Ok(self.iface_table.register_interface(now, config)?)
     }
 
-    /// Inserts a self originated route into the protocol.
+    /// Inserts a self originated route into the protocol, or changes the metric of one already
+    /// originated.
     ///
-    /// This route has no expiration, the metric must be maintained by the user.
+    /// This route has no expiration, the metric must be maintained by the user. It is advertised
+    /// on every interface. `route.interface` names the interface the prefix is attached to, and
+    /// must be registered with this router.
     pub fn originate_route(
         &mut self,
         now: Instant,
         route: OriginatedRouteIndex<A>,
         metric: Metric,
     ) -> Result<(), BabelError<A>> {
+        if self
+            .iface_table
+            .inner
+            .get_by_key(&route.interface)
+            .is_none()
+        {
+            return Err(BabelError::InterfaceDoesntExist(route.interface));
+        }
+
         if metric.is_infinite() {
             self.remove_originated_route(now, route);
             return Ok(());
         }
 
         if let Some(old_route) = self.originated_routes.inner.get_mut_by_key(&route) {
+            if old_route.metric == metric {
+                return Ok(());
+            }
             old_route.metric = metric;
-            return Ok(());
-        }
-        self.originated_routes.insert_route(route, metric)?;
 
+            // A new metric on the selected route changes what this router advertises even if the
+            // route keeps the destination, and route selection only reacts to a change of route.
+            if old_route.selected {
+                self.update_queue.queue_triggered_update(
+                    now,
+                    &route.destination,
+                    &self.iface_table,
+                    &self.neighbor_table,
+                );
+            }
+        } else {
+            self.originated_routes.insert_route(route, metric)?;
+        }
+
+        // A new metric can win or lose the destination either way, so selection must re-run.
         self.route_selection_due = true;
 
         Ok(())
     }
 
     /// Removes a self originated route from the protocol.
-    pub fn remove_originated_route(&mut self, now: Instant, route: OriginatedRouteIndex<A>) {
-        if self.originated_routes.inner.get_by_key(&route).is_none() {
+    ///
+    /// The route is retracted rather than freed: its metric becomes infinite, so route selection
+    /// sees that it was the selected route and sends the retraction, or the replacement route,
+    /// only when it was. Route selection then frees it.
+    pub fn remove_originated_route(&mut self, _now: Instant, route: OriginatedRouteIndex<A>) {
+        let Some(originated) = self.originated_routes.inner.get_mut_by_key(&route) else {
             b_trace!("Tried to remove non-existant route.");
             return;
-        }
+        };
 
-        self.originated_routes.inner.free(&route);
+        originated.metric = Metric::INFINITY;
 
         self.route_selection_due = true;
-
-        self.update_queue.queue_triggered_update(
-            now,
-            &route.destination,
-            &self.iface_table,
-            &self.neighbor_table,
-        );
     }
 
     /// Add a new neighbour to the router.
@@ -273,7 +301,7 @@ where
     fn select_routes(&mut self, now: Instant) {
         b_debug!("Route selection...");
 
-        let mut all_routes = AllRoutes::new(&mut self.originated_routes, &mut self.route_table);
+        let mut all_routes = AllRoutesMut::new(&mut self.originated_routes, &mut self.route_table);
 
         for mut group in all_routes.destination_groups_mut() {
             let dest = group.destination();
@@ -306,5 +334,12 @@ where
                 );
             }
         }
+
+        // Originated routes are removed by retracting them, and the selection above has now seen
+        // each retraction. An infinite metric is never eligible, so none of them is selected any
+        // more and they can be freed.
+        self.originated_routes
+            .inner
+            .retain(|route| route.metric.is_finite());
     }
 }

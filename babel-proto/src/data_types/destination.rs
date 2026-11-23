@@ -5,7 +5,7 @@ use crate::packet::parser::MAX_ADDRESS_LEN;
 
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub(crate) struct RouteDestination<A: AddressExt> {
+pub struct RouteDestination<A: AddressExt> {
     prefix: Address<A>,
     prefix_len: u8,
 }

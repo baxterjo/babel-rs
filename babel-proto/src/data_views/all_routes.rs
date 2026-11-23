@@ -19,15 +19,26 @@ use crate::utils::storage::{InternallyKeyed, TableSlot};
 /// ([Section 3.2.6](https://datatracker.ietf.org/doc/html/rfc8966#name-the-route-table)) and the
 /// routes this node originates live in their own table. They carry the same kind of information
 /// under different names and types, so this view presents both through [`AnyRoute`].
+///
+/// This view only reads. [`AllRoutesMut`] is the one route selection works through.
 pub(crate) struct AllRoutes<'a, 'storage, A: AddressExt> {
-    originated: &'a mut OriginatedRouteTable<'storage, A>,
-    learned: &'a mut RouteTable<'storage, A>,
+    originated: &'a OriginatedRouteTable<'storage, A>,
+    learned: &'a RouteTable<'storage, A>,
 }
+
+// Written by hand so that copying the view does not require `A: Copy`.
+impl<A: AddressExt> Clone for AllRoutes<'_, '_, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A: AddressExt> Copy for AllRoutes<'_, '_, A> {}
 
 impl<'a, 'storage, A: AddressExt> AllRoutes<'a, 'storage, A> {
     pub(crate) fn new(
-        originated: &'a mut OriginatedRouteTable<'storage, A>,
-        learned: &'a mut RouteTable<'storage, A>,
+        originated: &'a OriginatedRouteTable<'storage, A>,
+        learned: &'a RouteTable<'storage, A>,
     ) -> Self {
         Self {
             originated,
@@ -38,8 +49,9 @@ impl<'a, 'storage, A: AddressExt> AllRoutes<'a, 'storage, A> {
     /// Every route in both tables: all originated routes first, then all learned ones.
     ///
     /// The two halves are each in key order, but the whole is not merged by destination. Use
-    /// [`Self::destination_groups_mut`] when the routes need to be seen a destination at a time.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = AnyRoute<'_, A>> {
+    /// [`AllRoutesMut::destination_groups_mut`] when the routes need to be seen a destination at a
+    /// time.
+    pub(crate) fn iter(self) -> impl Iterator<Item = AnyRoute<'a, A>> {
         self.originated
             .inner
             .iter()
@@ -47,19 +59,37 @@ impl<'a, 'storage, A: AddressExt> AllRoutes<'a, 'storage, A> {
             .chain(self.learned.inner.iter().map(AnyRoute::Learned))
     }
 
+    /// Every destination that has a selected route, from either table, each named once.
+    ///
+    /// At most one route is selected for any destination, so no destination can come out of both
+    /// tables. The destinations are not yielded in destination order.
+    pub(crate) fn selected_destinations(self) -> impl Iterator<Item = RouteDestination<A>> + 'a {
+        self.iter()
+            .filter(|route| route.selected())
+            .map(|route| *route.destination())
+    }
+
     /// Every route, from either table, towards `destination`.
+    ///
+    /// Both tables are sorted by destination first, so each side is found by binary search.
     pub(crate) fn iter_destination(
-        &self,
+        self,
         destination: &RouteDestination<A>,
-    ) -> impl Iterator<Item = AnyRoute<'_, A>> {
-        self.iter().filter(move |r| r.destination() == destination)
+    ) -> impl Iterator<Item = AnyRoute<'a, A>> {
+        self.originated
+            .inner
+            .iter_run(move |route| route.destination().cmp(destination))
+            .map(AnyRoute::Originated)
+            .chain(
+                self.learned
+                    .inner
+                    .iter_run(move |route| route.destination().cmp(destination))
+                    .map(AnyRoute::Learned),
+            )
     }
 
     /// The selected route for `destination`, from whichever table holds it.
-    pub(crate) fn get_selected(
-        &self,
-        destination: &RouteDestination<A>,
-    ) -> Option<AnyRoute<'_, A>> {
+    pub(crate) fn get_selected(self, destination: &RouteDestination<A>) -> Option<AnyRoute<'a, A>> {
         let mut iter = self
             .iter_destination(destination)
             .filter(|route| route.selected());
@@ -71,6 +101,30 @@ impl<'a, 'storage, A: AddressExt> AllRoutes<'a, 'storage, A> {
             "There should only be one selected route for a destination, across both tables."
         );
         out
+    }
+}
+
+/// [`AllRoutes`], holding both tables mutably so that route selection can mark routes selected.
+pub(crate) struct AllRoutesMut<'a, 'storage, A: AddressExt> {
+    originated: &'a mut OriginatedRouteTable<'storage, A>,
+    learned: &'a mut RouteTable<'storage, A>,
+}
+
+impl<'a, 'storage, A: AddressExt> AllRoutesMut<'a, 'storage, A> {
+    pub(crate) fn new(
+        originated: &'a mut OriginatedRouteTable<'storage, A>,
+        learned: &'a mut RouteTable<'storage, A>,
+    ) -> Self {
+        Self {
+            originated,
+            learned,
+        }
+    }
+
+    /// A read-only view of the same two tables.
+    #[cfg(test)]
+    pub(crate) fn as_ref(&self) -> AllRoutes<'_, 'storage, A> {
+        AllRoutes::new(self.originated, self.learned)
     }
 
     /// Walks both tables a destination at a time, yielding one [`DestinationGroup`] for every
@@ -271,11 +325,6 @@ impl<A: AddressExt> DestinationGroup<'_, A> {
         Selection { previous, winner }
     }
 
-    /// The route currently selected for this destination, from whichever table holds it.
-    pub(crate) fn selected(&self) -> Option<AnyRoute<'_, A>> {
-        self.iter().find(|route| route.selected())
-    }
-
     /// Marks `winner` selected and every other route towards this destination, in both tables,
     /// unselected. `None` leaves the destination with nothing selected.
     pub(crate) fn select(&mut self, winner: Option<AnyRouteIndex<A>>) {
@@ -359,6 +408,7 @@ impl<'a, A: AddressExt> AnyRoute<'a, A> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_originated(&self) -> bool {
         matches!(self, Self::Originated(_))
     }
@@ -446,7 +496,7 @@ impl<A: AddressExt> HasDestination<A> for Route<A> {
 /// The destination of an occupied slot, or `None` for a free one.
 ///
 /// Free slots compare equal to each other and to nothing else, which is what collapses them into
-/// the single leading run that [`AllRoutes::destination_groups_mut`] discards.
+/// the single leading run that [`AllRoutesMut::destination_groups_mut`] discards.
 fn destination_of<A, T>(entry: &Option<T>) -> Option<RouteDestination<A>>
 where
     A: AddressExt,
@@ -549,7 +599,7 @@ mod test {
     ///
     /// The source table is empty, so every learned route is feasible and only the metrics and
     /// the originated/learned split decide the outcome.
-    fn choices(all: &mut AllRoutes<'_, '_, NoExtension>) -> Vec<Selection<NoExtension>> {
+    fn choices(all: &mut AllRoutesMut<'_, '_, NoExtension>) -> Vec<Selection<NoExtension>> {
         let sources = SourceTable::new_with_storage(Vec::new());
         all.destination_groups_mut()
             .map(|group| group.choose(&sources))
@@ -571,7 +621,7 @@ mod test {
         insert_learned(&mut learned, DEST_C, NEIGHBOUR_1);
         insert_learned(&mut learned, DEST_C, NEIGHBOUR_2);
 
-        let mut all = AllRoutes::new(&mut originated, &mut learned);
+        let mut all = AllRoutesMut::new(&mut originated, &mut learned);
         let groups: Vec<(RouteDestination<NoExtension>, usize, usize)> = all
             .destination_groups_mut()
             .map(|group| {
@@ -601,7 +651,7 @@ mod test {
         insert_originated(&mut originated, DEST_A, "eth0");
         insert_learned(&mut learned, DEST_B, NEIGHBOUR_1);
 
-        let mut all = AllRoutes::new(&mut originated, &mut learned);
+        let mut all = AllRoutesMut::new(&mut originated, &mut learned);
         let lens: Vec<usize> = all.destination_groups_mut().map(|g| g.len()).collect();
 
         assert_eq!(
@@ -620,7 +670,7 @@ mod test {
         insert_originated(&mut originated, DEST_A, "eth0");
         insert_learned(&mut learned, DEST_A, NEIGHBOUR_1);
 
-        let mut all = AllRoutes::new(&mut originated, &mut learned);
+        let mut all = AllRoutesMut::new(&mut originated, &mut learned);
 
         // Select the learned route first, then hand the destination to the originated one.
         for mut group in all.destination_groups_mut() {
@@ -628,7 +678,8 @@ mod test {
             group.select(learned_key);
         }
         assert!(
-            all.get_selected(&destination(DEST_A))
+            all.as_ref()
+                .get_selected(&destination(DEST_A))
                 .is_some_and(|r| !r.is_originated())
         );
 
@@ -637,6 +688,7 @@ mod test {
             group.select(originated_key);
         }
         let selected: Vec<AnyRouteIndex<NoExtension>> = all
+            .as_ref()
             .iter()
             .filter(|r| r.selected())
             .map(|r| r.key())
@@ -653,7 +705,7 @@ mod test {
         for mut group in all.destination_groups_mut() {
             group.select(None);
         }
-        assert!(all.get_selected(&destination(DEST_A)).is_none());
+        assert!(all.as_ref().get_selected(&destination(DEST_A)).is_none());
     }
 
     /// A destination that only this router originates has no learned route to compete with, and
@@ -665,7 +717,7 @@ mod test {
         let mut learned = RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME);
         insert_originated(&mut originated, DEST_A, "eth0");
 
-        let mut all = AllRoutes::new(&mut originated, &mut learned);
+        let mut all = AllRoutesMut::new(&mut originated, &mut learned);
 
         assert_eq!(
             choices(&mut all),
@@ -693,7 +745,7 @@ mod test {
         insert_learned(&mut learned, DEST_B, NEIGHBOUR_1);
         insert_learned(&mut learned, DEST_C, NEIGHBOUR_1);
 
-        let mut all = AllRoutes::new(&mut originated, &mut learned);
+        let mut all = AllRoutesMut::new(&mut originated, &mut learned);
         let winners: Vec<bool> = choices(&mut all)
             .iter()
             .map(|s| matches!(s.winner, Some(AnyRouteIndex::Originated(_))))
@@ -715,7 +767,7 @@ mod test {
         insert_originated_with_metric(&mut originated, DEST_A, "eth0", Metric::INFINITY);
         insert_learned(&mut learned, DEST_A, NEIGHBOUR_1);
 
-        let mut all = AllRoutes::new(&mut originated, &mut learned);
+        let mut all = AllRoutesMut::new(&mut originated, &mut learned);
         let selection = choices(&mut all);
 
         assert_eq!(selection.len(), 1);
@@ -735,10 +787,11 @@ mod test {
         insert_originated_with_metric(&mut originated, DEST_A, "eth0", Metric::from(0));
         insert_learned(&mut learned, DEST_A, NEIGHBOUR_1);
 
-        let mut all = AllRoutes::new(&mut originated, &mut learned);
+        let mut all = AllRoutesMut::new(&mut originated, &mut learned);
 
         // Hand the destination to the learned route, so the originated route has to unseat it.
         let learned_key = all
+            .as_ref()
             .iter()
             .find(|r| !r.is_originated())
             .map(|r| r.key())
@@ -757,7 +810,9 @@ mod test {
             }]
         );
         assert_eq!(
-            all.get_selected(&destination(DEST_A)).map(|r| r.key()),
+            all.as_ref()
+                .get_selected(&destination(DEST_A))
+                .map(|r| r.key()),
             Some(learned_key),
             "choose must not apply its own decision"
         );

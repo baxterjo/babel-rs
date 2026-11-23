@@ -8,4 +8,4 @@
 pub mod all_routes;
 
 #[doc(inline)]
-pub(crate) use all_routes::{AllRoutes, AnyRoute, LocalOrigin, Selection};
+pub(crate) use all_routes::{AllRoutes, AllRoutesMut, AnyRoute, LocalOrigin, Selection};

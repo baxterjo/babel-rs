@@ -14,7 +14,7 @@ use crate::utils::InternallyKeyed;
 pub struct OriginatedRoute<A: AddressExt> {
     destination: RouteDestination<A>,
     interface: InterfaceHandle,
-    pub metric: Metric,
+    pub(crate) metric: Metric,
     pub(crate) selected: bool,
 }
 
