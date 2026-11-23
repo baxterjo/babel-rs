@@ -5,6 +5,7 @@ use crate::data_structures::source::SourceIndex;
 use crate::data_types::Address;
 use crate::data_types::address_encoding::AddressEncoding;
 use crate::data_types::destination::RouteDestination;
+use crate::data_views::AllRoutes;
 use crate::error::BabelError;
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
@@ -611,12 +612,18 @@ where
         }
 
         if ae == 0 {
-            // Wildcard update, send all routes.
-            for route in self.route_table.inner.iter().filter(|r| r.selected) {
+            // Wildcard request, send a full route table dump: every destination with a selected
+            // route, whether this router originates it or learned it. Walking a destination at a
+            // time answers each destination once, however many routes towards it there are.
+            let mut all_routes = AllRoutes::new(&mut self.originated_routes, &mut self.route_table);
+            for group in all_routes.destination_groups_mut() {
+                if group.selected().is_none() {
+                    continue;
+                }
                 self.update_queue.queue_route_response(
                     now,
                     interface,
-                    *route.destination(),
+                    group.destination(),
                     neighbour.key(),
                 )?;
             }
@@ -674,6 +681,7 @@ mod test {
     use crate::data_structures::updates::{Update, UpdateIndex};
     use crate::data_types::seqno::SeqNo;
     use crate::data_types::{Interval, RouterId};
+    use crate::data_views::all_routes::is_eligible;
     use crate::extension::NoExtension;
     use crate::metric::{Metric, RxCost, TxCost};
     use crate::output::DatagramSend;
@@ -683,7 +691,6 @@ mod test {
     use crate::packet::writer::ready::Ready;
     use crate::packet::writer::{PacketWriter, PacketWriterStep};
     use crate::router::config::{BabelRouterConfig, DEFAULT_ROUTE_EXPIRY_TIME};
-    use crate::router::is_eligible;
     use crate::utils::{Duration, InternallyKeyed};
 
     // Long enough not to fire again mid-test, still inside the Timer bound.
@@ -4201,6 +4208,7 @@ mod test {
     /// retraction.
     mod route_requests {
         use super::*;
+        use crate::data_structures::originated_route::originated_route_entry::OriginatedRouteIndex;
         use crate::output::{Output, TransmitDestination};
 
         /// A wildcard request: "dump your route table". Plen must be 0 alongside it.
@@ -4826,6 +4834,53 @@ mod test {
                     nbr_idx(iface, NEIGHBOUR_2_ADDR)
                 )],
                 "one destination, one answer, under the winner's originator"
+            );
+        }
+
+        /// A full route table dump includes the routes this router originates, not just the ones it
+        /// learned. A neighbour coming up asks for a dump to learn everything at once, and this
+        /// router's own prefixes are part of everything.
+        #[test]
+        fn a_wildcard_dump_includes_the_routes_this_router_originates() {
+            let mut r = router("node_1");
+            let t0 = Instant::from_secs(0);
+            let iface = three_neighbours(&mut r, t0);
+
+            r.originate_route(
+                t0,
+                OriginatedRouteIndex {
+                    destination: dest(PREFIX_B, PLEN),
+                    interface: iface,
+                },
+                Metric::from(0),
+            )
+            .expect("the originated route table has room");
+            advertise(
+                &mut r,
+                t0,
+                iface,
+                NEIGHBOUR_1_ADDR,
+                ORIGIN_1,
+                PLEN,
+                &PREFIX_A_WIRE,
+                ADVERTISED,
+            );
+            drain_updates(&mut r);
+
+            request(&mut r, t0, iface, NEIGHBOUR_2_ADDR, AE_WILDCARD, 0, &[]);
+
+            let mut sent = sent_updates(&mut r, t0, iface);
+            // Updates are written grouped by router-id, which says nothing about these two
+            // destinations' order, so compare them in prefix order.
+            sent.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+            assert_eq!(
+                sent,
+                alloc::vec![
+                    SentUpdate::advertising(PLEN, &PREFIX_A_WIRE, COMPUTED),
+                    SentUpdate::advertising(PLEN, &PREFIX_B_WIRE, 0),
+                ],
+                "the learned route at its computed metric, and the originated route at its \
+                 configured metric"
             );
         }
 

@@ -1,12 +1,11 @@
 use crate::data_structures::interface::{Interface, InterfaceHandle, InterfaceTable};
 use crate::data_structures::neighbour::{NeighbourIndex, NeighbourTable};
-use crate::data_structures::originated_route::originated_route_table::OriginatedRouteTable;
-use crate::data_structures::route::{Route, RouteTable};
 use crate::data_structures::source::SourceTable;
 use crate::data_structures::updates::{Update, UpdateError};
 use crate::data_types::RouterId;
 use crate::data_types::destination::RouteDestination;
 use crate::data_types::seqno::SeqNo;
+use crate::data_views::{AllRoutes, AnyRoute, LocalOrigin};
 use crate::extension::address::AddressExt;
 use crate::extension::parser_state::ParserStateExt;
 use crate::metric::Metric;
@@ -65,40 +64,32 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
         }
     }
 
-    /// Queues updates for all selected routes to all neighbours on the given interface.
+    /// Queues an update for every destination that has a selected route, originated or learned, to
+    /// all neighbours on the given interface.
+    ///
+    /// Walking the routes a destination at a time means each destination is queued once, for the
+    /// one route that holds it, however many routes towards it either table has.
     pub(crate) fn queue_periodic_update(
         &mut self,
         now: Instant,
-        routes: &RouteTable<A>,
-        originated_routes: &OriginatedRouteTable<A>,
+        routes: &mut AllRoutes<'_, '_, A>,
         interface: &Interface<A>,
         neighbours: &NeighbourTable<A>,
     ) {
-        for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
-            // Queue updates for all originated routes.
-            for o_route in originated_routes.inner.iter() {
-                if let Err(err) = self.add_update(
-                    Update::new(
-                        now,
-                        o_route.destination,
-                        neighbour.key(),
-                        !interface.prefer_ucast,
-                        false,
-                        *interface.update_retry_interval,
-                        1,
-                    ),
-                    false,
-                ) {
-                    b_debug!("Failed to add update for {:?} - {:?}", o_route.key(), err);
-                };
+        for group in routes.destination_groups_mut() {
+            // A destination with nothing selected has nothing to advertise. If it lost its route,
+            // the retraction was owed as a triggered update, not a periodic one.
+            if group.selected().is_none() {
+                continue;
             }
 
-            // Queue updates for all selected routes.
-            for route in routes.inner.iter().filter(|r| r.selected) {
+            let destination = group.destination();
+
+            for neighbour in neighbours.neighbours_for_iface(&interface.key()) {
                 if let Err(err) = self.add_update(
                     Update::new(
                         now,
-                        *route.destination(),
+                        destination,
                         neighbour.key(),
                         !interface.prefer_ucast,
                         false,
@@ -107,7 +98,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                     ),
                     false,
                 ) {
-                    b_debug!("Failed to add update for {:?} - {:?}", route.key(), err);
+                    b_debug!("Failed to add update for {:?} - {:?}", destination, err);
                 };
             }
         }
@@ -171,6 +162,10 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
 
     /// Writes out whatever this route owes on `interface`, advancing each update's send state as
     /// its TLV lands in the packet.
+    ///
+    /// Each update names a destination only. What it advertises is resolved from the route
+    /// selected for that destination in either table, with `origin` standing in as the source of
+    /// a route this router originates. A destination with no selected route is a retraction.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn poll_for_updates<'output, P>(
         &mut self,
@@ -179,8 +174,8 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
         active_dest: &mut DestAddr<A>,
         next_poll: &mut Duration,
         sources: &mut SourceTable<'_, A>,
-        routes: &RouteTable<'storage, A>,
-        //sent_update: &mut Option<SourceIndex<A>>,
+        routes: &AllRoutes<'_, '_, A>,
+        origin: LocalOrigin,
         mut writer: PacketWriterStep<'output, Ready>,
     ) -> Result<
         PacketWriterStep<'output, Ready>,
@@ -225,7 +220,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
         // interface this packet will be sent on.
         let mut parser: Parser<P> = Parser::new(interface.address);
 
-        let mut router_id_groups = self.router_id_groups_mut(interface.key(), routes);
+        let mut router_id_groups = self.router_id_groups_mut(interface.key(), routes, origin);
 
         let mut sent_dest: Option<RouteDestination<A>> = None;
 
@@ -241,9 +236,13 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                     continue;
                 }
 
+                // What the selected route for this update's destination advertises, if there is
+                // one.
+                let advertisement = route_opt.map(|r| r.advertisement(origin));
+
                 debug_assert_eq!(
                     router_id,
-                    route_opt.map(|r| r.source().router_id),
+                    advertisement.map(|a| a.router_id),
                     "Update router id does not match router id group"
                 );
 
@@ -295,14 +294,18 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                     };
                 }
 
-                let (seqno, metric) = if let Some(route) = route_opt {
-                    // Perform source table maintenance for this route.
-                    if let Err(err) = sources.perform_maintenance(
-                        now,
-                        &route.source(),
-                        route.seqno,
-                        *route.computed_metric(),
-                    ) {
+                let (seqno, metric) = if let Some(advertisement) = advertisement {
+                    // Perform source table maintenance for a learned route. An originated route has
+                    // no source entry to maintain: this router is the source, and the source table
+                    // only guards against accepting updates from others.
+                    if let Some(AnyRoute::Learned(route)) = route_opt
+                        && let Err(err) = sources.perform_maintenance(
+                            now,
+                            route.source(),
+                            advertisement.seqno,
+                            advertisement.metric,
+                        )
+                    {
                         b_debug!("Source Err: {}", err);
                         continue;
                     };
@@ -312,9 +315,9 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                     // attribute the Updates behind it.
                     if parser
                         .router_id()
-                        .is_none_or(|id| id != &route.source().router_id)
+                        .is_none_or(|id| id != &advertisement.router_id)
                     {
-                        let router_id = route.source().router_id;
+                        let router_id = advertisement.router_id;
                         b_debug!(
                             "[SEND] RouterId - iface: {:?}, dest: {:?}, - router_id: {:?}",
                             interface,
@@ -326,7 +329,7 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
                         parser.set_router_id(router_id);
                     }
 
-                    (route.seqno, *route.computed_metric())
+                    (advertisement.seqno, advertisement.metric)
                 } else {
                     // If there is no route for the queued update, then it can be assumed that it is
                     // a retraction, in which case the seqno and router_id don't matter.
@@ -409,13 +412,15 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
     }
 
     /// Get a [`RouterIdGroups`] cursor from self.
-    fn router_id_groups_mut<'a>(
+    fn router_id_groups_mut<'a, 'v, 'vs>(
         &'a mut self,
         interface: InterfaceHandle,
-        routes: &'a RouteTable<'storage, A>,
-    ) -> RouterIdGroups<'a, 'storage, A> {
+        routes: &'a AllRoutes<'v, 'vs, A>,
+        origin: LocalOrigin,
+    ) -> RouterIdGroups<'a, 'storage, 'v, 'vs, A> {
         RouterIdGroups {
             interface,
+            origin,
             update_queue: self,
             routes,
             last: None,
@@ -428,31 +433,37 @@ impl<'storage, A: AddressExt> UpdateQueue<'storage, A> {
 /// Only iterates over updates that are destined for neighbours on `self.interface` to avoid
 /// unnecessary route lookups.
 ///
-/// This cannot be an iterator because [`RouteTable`] is not ordered by [`RouterId`] and
+/// This cannot be an iterator because the route tables are not ordered by [`RouterId`] and
 /// [`core::slice::chunk_by`] only yields contiguous chunks so it must first establish a starting
 /// [`RouterId`] for all routes (the minimum) and then ratchet up for each call of
 /// [`RouterIdGroups::next_group`]
-struct RouterIdGroups<'a, 'storage, A: AddressExt> {
+///
+/// `'v` and `'vs` are the borrow and the storage of the [`AllRoutes`] view. They are kept apart
+/// from the queue's own `'storage` because the view holds its tables by `&mut`, which pins both.
+struct RouterIdGroups<'a, 'storage, 'v, 'vs, A: AddressExt> {
     interface: InterfaceHandle,
+    /// The source an originated route is advertised under.
+    origin: LocalOrigin,
     update_queue: &'a mut UpdateQueue<'storage, A>,
-    routes: &'a RouteTable<'storage, A>,
+    routes: &'a AllRoutes<'v, 'vs, A>,
     /// The [`RouterId`] of the group handed out last.
     last: Option<Option<RouterId>>,
 }
 
-impl<'a, 'storage, A: AddressExt> RouterIdGroups<'a, 'storage, A> {
+impl<'storage, 'v, 'vs, A: AddressExt> RouterIdGroups<'_, 'storage, 'v, 'vs, A> {
     /// Gets the next [`RouterIdGroup`] and advances the [`RouterId`] cursor.
-    fn next_group(&mut self) -> Option<RouterIdGroup<'_, 'storage, A>> {
+    fn next_group(&mut self) -> Option<RouterIdGroup<'_, 'storage, 'v, 'vs, A>> {
+        let origin = self.origin;
         let router_id_opt = self
             .update_queue
             .inner
             .iter()
             .filter(|u| u.neighbour().iface == self.interface)
-            // Get the selected route's originating RouterId if it exists.
+            // Get the router-id the selected route is advertised under, if there is one.
             .map(|u| {
                 self.routes
                     .get_selected(u.destination())
-                    .map(|ro| ro.source().router_id)
+                    .map(|route| route.advertisement(origin).router_id)
             })
             // On the first pass `self.last` will be None, so all reults of the above map will be
             // yielded. After that if there are queued updates that don't have routes (retractions),
@@ -468,6 +479,7 @@ impl<'a, 'storage, A: AddressExt> RouterIdGroups<'a, 'storage, A> {
 
         Some(RouterIdGroup {
             interface: self.interface,
+            origin: self.origin,
             router_id_group: router_id_opt,
             update_queue: self.update_queue,
             routes: self.routes,
@@ -476,29 +488,35 @@ impl<'a, 'storage, A: AddressExt> RouterIdGroups<'a, 'storage, A> {
 }
 
 /// The routes that were originated by one router-id.
-struct RouterIdGroup<'a, 'storage, A: AddressExt> {
+struct RouterIdGroup<'a, 'storage, 'v, 'vs, A: AddressExt> {
     interface: InterfaceHandle,
+    /// The source an originated route is advertised under.
+    origin: LocalOrigin,
     router_id_group: Option<RouterId>,
     update_queue: &'a mut UpdateQueue<'storage, A>,
-    routes: &'a RouteTable<'storage, A>,
+    routes: &'a AllRoutes<'v, 'vs, A>,
 }
 
-impl<A: AddressExt> RouterIdGroup<'_, '_, A> {
+impl<A: AddressExt> RouterIdGroup<'_, '_, '_, '_, A> {
     /// Yields all updates and corresponding routes that have this group's [`RouterId`]
     ///
     /// This iterates over the slots of the inner table to implement rate limiting of the update
     /// queue.
-    fn iter_mut(&mut self) -> impl Iterator<Item = (&mut Update<A>, Option<&Route<A>>)> {
+    fn iter_mut(&mut self) -> impl Iterator<Item = (&mut Update<A>, Option<AnyRoute<'_, A>>)> {
+        let origin = self.origin;
+        let interface = self.interface;
+        let router_id_group = self.router_id_group;
+        let routes = self.routes;
         self.update_queue
             .inner
             .iter_mut()
             // Filter out all updates that are not for this interface to avoid unnecessary lookups.
-            .filter(|u| u.neighbour().iface == self.interface)
-            .filter_map(|u| {
-                // Fetch the selected route for this destination.
-                let route_opt = self.routes.get_selected(u.destination());
+            .filter(move |u| u.neighbour().iface == interface)
+            .filter_map(move |u| {
+                // Fetch the selected route for this destination, from either table.
+                let route_opt = routes.get_selected(u.destination());
                 // If the selected route matches the router id group, yield it and the route.
-                if route_opt.map(|r| r.source().router_id) == self.router_id_group {
+                if route_opt.map(|r| r.advertisement(origin).router_id) == router_id_group {
                     Some((u, route_opt))
                 } else {
                     // Otherwise skip it.
@@ -516,6 +534,8 @@ mod test {
     use super::*;
     use crate::data_structures::interface::{Interface, InterfaceHandle};
     use crate::data_structures::neighbour::NeighbourIndex;
+    use crate::data_structures::originated_route::originated_route_entry::OriginatedRouteIndex;
+    use crate::data_structures::originated_route::originated_route_table::OriginatedRouteTable;
     use crate::data_structures::route::{RouteIndex, RouteTable};
     use crate::data_structures::source::{SourceIndex, SourceTable};
     use crate::data_types::destination::RouteDestination;
@@ -582,15 +602,49 @@ mod test {
     /// The queue belongs to the router rather than to any one route, so queueing an update means
     /// touching both: the route supplies what the update will advertise, the queue holds it.
     struct Tables<'storage> {
+        originated: OriginatedRouteTable<'storage, NoExtension>,
         routes: RouteTable<'storage, NoExtension>,
         updates: UpdateQueue<'storage, NoExtension>,
     }
 
     fn empty_tables() -> Tables<'static> {
         Tables {
+            originated: OriginatedRouteTable::new_with_storage(Vec::new()),
             routes: RouteTable::new_with_storage(Vec::new(), DEFAULT_ROUTE_EXPIRY_TIME),
             updates: UpdateQueue::new_with_storage(Vec::new()),
         }
+    }
+
+    /// The router-id and seqno this router announces its own routes under.
+    fn origin() -> LocalOrigin {
+        LocalOrigin {
+            router_id: router_id("self"),
+            seqno: SeqNo(7),
+        }
+    }
+
+    /// Adds a route this router originates, selected, as route selection would leave it when no
+    /// learned route competes.
+    fn originated_route(
+        tables: &mut Tables<'_>,
+        prefix: Ipv6Addr,
+        metric: Metric,
+    ) -> OriginatedRouteIndex<NoExtension> {
+        let index = OriginatedRouteIndex {
+            destination: dest(prefix, 64),
+            interface: iface_handle(IFACE_1),
+        };
+        tables
+            .originated
+            .insert_route(index, metric)
+            .expect("owned storage grows");
+        tables
+            .originated
+            .inner
+            .get_mut_by_key(&index)
+            .expect("just inserted")
+            .selected = true;
+        index
     }
 
     /// [`route`], with the prefix length and the advertising neighbour — the two parts of the
@@ -1011,6 +1065,8 @@ mod test {
     mod poll_updates {
         use super::*;
         use crate::data_structures::interface::InterfaceConfig;
+        use crate::data_structures::neighbour::NeighbourConfig;
+        use crate::data_structures::updates::UpdateIndex;
         use crate::extension::NoStateExtension;
         use crate::output::DatagramSend;
         use crate::packet::packet_header::PacketHeader;
@@ -1119,7 +1175,8 @@ mod test {
                     &mut dest,
                     &mut next_poll,
                     &mut empty_sources(),
-                    &tables.routes,
+                    &AllRoutes::new(&mut tables.originated, &mut tables.routes),
+                    origin(),
                     writer,
                 )
                 .map_err(|(err, _)| err)
@@ -1341,6 +1398,153 @@ mod test {
         // | _ \/ _ \| | | |_   _| __| _ \   |_ _|   \
         // |   / (_) | |_| | | | | _||   /    | || |) |
         // |_|_\\___/ \___/  |_| |___|_|_\   |___|___/
+
+        /// A route this router originates has no source of its own, so it is announced under this
+        /// router's router-id and global seqno, with its configured metric. It must not fall
+        /// through to the retraction that a destination with no selected learned route gets.
+        #[test]
+        fn an_originated_route_is_advertised_under_this_routers_id_and_seqno() {
+            let mut tables = empty_tables();
+
+            let index = originated_route(&mut tables, DEST_A, Metric::from(42));
+            tables
+                .updates
+                .add_update(
+                    Update::new(
+                        t0(),
+                        index.destination,
+                        neighbour(NEIGHBOUR_1),
+                        true,
+                        false,
+                        RETRY_INTERVAL,
+                        1,
+                    ),
+                    true,
+                )
+                .expect("owned storage grows");
+
+            let out = poll(&mut tables, &interface(IFACE_1), t0());
+
+            assert_eq!(
+                out.tlv_types(),
+                alloc::vec![RouterIdSlice::TYPE_ID, UpdateSlice::TYPE_ID]
+            );
+            match out.nth_tlv(0) {
+                Tlv::RouterId(tlv) => assert_eq!(
+                    RouterId::from(tlv.router_id()),
+                    origin().router_id,
+                    "an originated route is announced under this router's own router-id"
+                ),
+                other => panic!("should be a router-id, got {other:?}"),
+            }
+            match out.nth_tlv(1) {
+                Tlv::Update(tlv) => {
+                    assert_eq!(tlv.seqno(), origin().seqno, "this router's global seqno");
+                    assert_eq!(tlv.metric(), Metric::from(42), "the configured metric");
+                }
+                other => panic!("should be an update, got {other:?}"),
+            }
+        }
+
+        /// With routes towards one destination in both tables, the update is rendered from the one
+        /// that is selected, whichever table it is in.
+        #[test]
+        fn the_selected_route_is_advertised_whichever_table_holds_it() {
+            let mut tables = empty_tables();
+
+            // A learned route from rtr-a, then an originated route that takes the destination from
+            // it, as route selection would leave things when the originated route wins.
+            let learned = route(&mut tables, DEST_A, "rtr-a", NEIGHBOUR_1);
+            for route in tables.routes.inner.iter_mut() {
+                route.selected = false;
+            }
+            originated_route(&mut tables, DEST_A, Metric::from(0));
+            update(&mut tables, &learned, NEIGHBOUR_1);
+
+            let out = poll(&mut tables, &interface(IFACE_1), t0());
+
+            assert_eq!(
+                out.tlv_types(),
+                alloc::vec![RouterIdSlice::TYPE_ID, UpdateSlice::TYPE_ID],
+                "one destination, one update"
+            );
+            match out.nth_tlv(0) {
+                Tlv::RouterId(tlv) => assert_eq!(
+                    RouterId::from(tlv.router_id()),
+                    origin().router_id,
+                    "the originated route holds the destination, not rtr-a's"
+                ),
+                other => panic!("should be a router-id, got {other:?}"),
+            }
+        }
+
+        /// A periodic update walks the routes a destination at a time, so each destination with a
+        /// selected route is owed once per neighbour, however many routes towards it either table
+        /// holds. A destination with nothing selected is left out.
+        #[test]
+        fn a_periodic_update_owes_each_selected_destination_once() {
+            let mut tables = empty_tables();
+
+            // DEST_A: originated and selected, with a learned route that lost to it.
+            // DEST_B: learned and selected.
+            // DEST_C: learned, but nothing is selected.
+            route(&mut tables, DEST_A, "rtr-a", NEIGHBOUR_1);
+            for route in tables.routes.inner.iter_mut() {
+                route.selected = false;
+            }
+            originated_route(&mut tables, DEST_A, Metric::from(0));
+            route(&mut tables, DEST_B, "rtr-b", NEIGHBOUR_1);
+            route(&mut tables, DEST_C, "rtr-c", NEIGHBOUR_1);
+            for route in tables
+                .routes
+                .inner
+                .iter_mut()
+                .filter(|r| r.destination() == &dest(DEST_C, 64))
+            {
+                route.selected = false;
+            }
+
+            let mut neighbours = NeighbourTable::new_with_storage(Vec::new());
+            for addr in [NEIGHBOUR_1, NEIGHBOUR_2] {
+                neighbours
+                    .add_neighbour(
+                        t0(),
+                        NeighbourConfig::spec_default(iface_handle(IFACE_1), addr.into()),
+                    )
+                    .expect("owned storage grows");
+            }
+
+            tables.updates.queue_periodic_update(
+                t0(),
+                &mut AllRoutes::new(&mut tables.originated, &mut tables.routes),
+                &interface(IFACE_1),
+                &neighbours,
+            );
+
+            let owed: Vec<UpdateIndex<NoExtension>> =
+                tables.updates.inner.iter().map(|u| u.key()).collect();
+            assert_eq!(
+                owed,
+                alloc::vec![
+                    UpdateIndex {
+                        destination: dest(DEST_A, 64),
+                        neighbour: neighbour(NEIGHBOUR_1),
+                    },
+                    UpdateIndex {
+                        destination: dest(DEST_A, 64),
+                        neighbour: neighbour(NEIGHBOUR_2),
+                    },
+                    UpdateIndex {
+                        destination: dest(DEST_B, 64),
+                        neighbour: neighbour(NEIGHBOUR_1),
+                    },
+                    UpdateIndex {
+                        destination: dest(DEST_B, 64),
+                        neighbour: neighbour(NEIGHBOUR_2),
+                    },
+                ]
+            );
+        }
 
         /// Every Update TLV inherits the router-id from the last Router-Id TLV in front of it
         /// (RFC 8966 4.6.7). A packet starts with no router-id context at all, so the very first
@@ -1779,7 +1983,8 @@ mod test {
                     &mut dest,
                     &mut next_poll,
                     &mut empty_sources(),
-                    &tables.routes,
+                    &AllRoutes::new(&mut tables.originated, &mut tables.routes),
+                    origin(),
                     writer,
                 )
                 .map(|_| ())

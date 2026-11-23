@@ -22,6 +22,7 @@ mod macros;
 
 pub mod data_structures;
 pub mod data_types;
+pub mod data_views;
 pub mod error;
 pub mod extension;
 pub mod input;

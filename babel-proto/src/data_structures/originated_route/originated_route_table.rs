@@ -1,10 +1,7 @@
-use thiserror::Error;
-
 use crate::data_structures::originated_route::OriginatedRouteError;
 use crate::data_structures::originated_route::originated_route_entry::{
     OriginatedRoute, OriginatedRouteIndex,
 };
-use crate::data_types::Address;
 use crate::extension::address::AddressExt;
 use crate::metric::Metric;
 use crate::utils::ManagedSlice;
@@ -31,15 +28,7 @@ impl<'storage, A: AddressExt> OriginatedRouteTable<'storage, A> {
         route: OriginatedRouteIndex<A>,
         metric: Metric,
     ) -> Result<(), OriginatedRouteError> {
-        let route = OriginatedRoute {
-            destination: route.destination,
-            interface: route.interface,
-            metric,
-        };
+        let route = OriginatedRoute::new(route, metric);
         Ok(self.inner.insert(route)?)
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &OriginatedRoute<A>> {
-        self.inner.iter()
     }
 }

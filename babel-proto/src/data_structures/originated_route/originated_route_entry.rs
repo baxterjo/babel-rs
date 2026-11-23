@@ -12,9 +12,27 @@ use crate::utils::InternallyKeyed;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct OriginatedRoute<A: AddressExt> {
-    pub destination: RouteDestination<A>,
+    destination: RouteDestination<A>,
+    interface: InterfaceHandle,
     pub metric: Metric,
-    pub interface: InterfaceHandle,
+    pub(crate) selected: bool,
+}
+
+impl<A: AddressExt> OriginatedRoute<A> {
+    pub fn new(index: OriginatedRouteIndex<A>, metric: Metric) -> Self {
+        Self {
+            destination: index.destination,
+            interface: index.interface,
+            metric,
+            selected: false,
+        }
+    }
+    pub fn destination(&self) -> &RouteDestination<A> {
+        &self.destination
+    }
+    pub fn interface(&self) -> &InterfaceHandle {
+        &self.interface
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
